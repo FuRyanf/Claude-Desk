@@ -241,6 +241,12 @@ export function LeftRail({
                             <button
                               type="button"
                               onClick={() => onSelectThread(thread.id)}
+                              onDoubleClick={(event) => {
+                                event.preventDefault();
+                                setEditingThreadId(thread.id);
+                                setEditingValue(thread.title);
+                                setEditingOriginal(thread.title);
+                              }}
                               className={active ? 'thread-button active' : 'thread-button'}
                             >
                               <span className="thread-main-row">
@@ -273,6 +279,7 @@ export function LeftRail({
                                     className="thread-title"
                                     onDoubleClick={(event) => {
                                       event.preventDefault();
+                                      event.stopPropagation();
                                       setEditingThreadId(thread.id);
                                       setEditingValue(thread.title);
                                       setEditingOriginal(thread.title);

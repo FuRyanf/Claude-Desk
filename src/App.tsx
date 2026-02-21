@@ -28,6 +28,11 @@ const SELECTED_WORKSPACE_KEY = 'claude-desk:selected-workspace';
 const FULL_ACCESS_CONFIRM_KEY = 'claude-desk:full-access-confirmed';
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
+interface PendingSessionStart {
+  requestId: number;
+  promise: Promise<string>;
+}
+
 function threadSelectionKey(workspaceId: string) {
   return `claude-desk:selected-thread:${workspaceId}`;
 }
@@ -150,7 +155,9 @@ export default function App() {
 
   const selectedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const selectedThreadIdRef = useRef<string | undefined>(undefined);
-  const startingSessionByThreadRef = useRef<Record<string, Promise<string>>>({});
+  const startingSessionByThreadRef = useRef<Record<string, PendingSessionStart>>({});
+  const sessionStartRequestIdByThreadRef = useRef<Record<string, number>>({});
+  const threadsByWorkspaceRef = useRef<Record<string, ThreadMetadata[]>>({});
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
   const sessionMetaBySessionIdRef = useRef<
@@ -202,6 +209,10 @@ export default function App() {
   useEffect(() => {
     selectedThreadIdRef.current = selectedThreadId;
   }, [selectedThreadId]);
+
+  useEffect(() => {
+    threadsByWorkspaceRef.current = threadsByWorkspace;
+  }, [threadsByWorkspace]);
 
   const pushToast = useCallback((message: string, type: 'error' | 'info' = 'error') => {
     const id = todayId();
@@ -271,6 +282,21 @@ export default function App() {
     await api.terminalWrite(sessionId, pending);
   }, []);
 
+  const bumpSessionStartRequestId = useCallback((threadId: string) => {
+    const next = (sessionStartRequestIdByThreadRef.current[threadId] ?? 0) + 1;
+    sessionStartRequestIdByThreadRef.current[threadId] = next;
+    return next;
+  }, []);
+
+  const invalidatePendingSessionStart = useCallback(
+    (threadId: string) => {
+      bumpSessionStartRequestId(threadId);
+      delete startingSessionByThreadRef.current[threadId];
+      delete pendingInputByThreadRef.current[threadId];
+    },
+    [bumpSessionStartRequestId]
+  );
+
   const ensureSessionForThread = useCallback(
     async (thread: ThreadMetadata): Promise<string> => {
       const existing = runStore.sessionForThread(thread.id);
@@ -281,13 +307,14 @@ export default function App() {
 
       const inFlight = startingSessionByThreadRef.current[thread.id];
       if (inFlight) {
-        return inFlight;
+        return inFlight.promise;
       }
 
       const workspace = workspaces.find((item) => item.id === thread.workspaceId);
       if (!workspace) {
         throw new Error('Workspace not found for thread.');
       }
+      const requestId = bumpSessionStartRequestId(thread.id);
 
       const startPromise = (async () => {
         const response = await api.terminalStartSession({
@@ -299,9 +326,29 @@ export default function App() {
         });
 
         const sessionId = response.sessionId;
+        if ((sessionStartRequestIdByThreadRef.current[thread.id] ?? 0) !== requestId) {
+          try {
+            await api.terminalKill(sessionId);
+          } catch {
+            // best effort
+          }
+          return '';
+        }
+
+        const threadStillExists = (threadsByWorkspaceRef.current[thread.workspaceId] ?? []).some(
+          (item) => item.id === thread.id
+        );
+        if (!threadStillExists) {
+          try {
+            await api.terminalKill(sessionId);
+          } catch {
+            // best effort
+          }
+          return '';
+        }
+
         const startedAt = new Date().toISOString();
         runStore.bindSession(thread.id, sessionId, startedAt);
-        applyThreadUpdate(response.thread);
         setSessionModeByThread((current) => ({
           ...current,
           [thread.id]: response.sessionMode
@@ -332,13 +379,15 @@ export default function App() {
         return sessionId;
       })()
         .finally(() => {
-          delete startingSessionByThreadRef.current[thread.id];
+          if (startingSessionByThreadRef.current[thread.id]?.requestId === requestId) {
+            delete startingSessionByThreadRef.current[thread.id];
+          }
         });
 
-      startingSessionByThreadRef.current[thread.id] = startPromise;
+      startingSessionByThreadRef.current[thread.id] = { requestId, promise: startPromise };
       return startPromise;
     },
-    [applyThreadUpdate, flushPendingThreadInput, runStore, terminalSize.cols, terminalSize.rows, workspaces]
+    [bumpSessionStartRequestId, flushPendingThreadInput, runStore, terminalSize.cols, terminalSize.rows, workspaces]
   );
 
   const addWorkspaceByPath = useCallback(
@@ -422,14 +471,19 @@ export default function App() {
 
   const onRenameThread = useCallback(
     async (workspaceId: string, threadId: string, title: string) => {
-      await renameThread(workspaceId, threadId, title);
-      await refreshThreadsForWorkspace(workspaceId);
+      try {
+        await renameThread(workspaceId, threadId, title);
+        await refreshThreadsForWorkspace(workspaceId);
+      } catch (error) {
+        pushToast(`Rename failed: ${String(error)}`, 'error');
+      }
     },
-    [refreshThreadsForWorkspace, renameThread]
+    [pushToast, refreshThreadsForWorkspace, renameThread]
   );
 
   const onArchiveThread = useCallback(
     async (workspaceId: string, threadId: string) => {
+      invalidatePendingSessionStart(threadId);
       const existingSessionId = runStore.sessionForThread(threadId);
       if (existingSessionId) {
         void api.terminalKill(existingSessionId);
@@ -437,7 +491,12 @@ export default function App() {
         delete sessionMetaBySessionIdRef.current[existingSessionId];
       }
 
-      await archiveThread(workspaceId, threadId);
+      try {
+        await archiveThread(workspaceId, threadId);
+      } catch (error) {
+        pushToast(`Archive failed: ${String(error)}`, 'error');
+        return;
+      }
 
       if (existingSessionId) {
         runStore.stopWorking(threadId);
@@ -449,11 +508,12 @@ export default function App() {
 
       await refreshThreadsForWorkspace(workspaceId);
     },
-    [archiveThread, refreshThreadsForWorkspace, runStore, setSelectedThread]
+    [archiveThread, invalidatePendingSessionStart, pushToast, refreshThreadsForWorkspace, runStore, setSelectedThread]
   );
 
   const onDeleteThread = useCallback(
     async (workspaceId: string, threadId: string) => {
+      invalidatePendingSessionStart(threadId);
       const existingSessionId = runStore.sessionForThread(threadId);
       if (existingSessionId) {
         void api.terminalKill(existingSessionId);
@@ -461,7 +521,12 @@ export default function App() {
         delete sessionMetaBySessionIdRef.current[existingSessionId];
       }
 
-      await deleteThread(workspaceId, threadId);
+      try {
+        await deleteThread(workspaceId, threadId);
+      } catch (error) {
+        pushToast(`Delete failed: ${String(error)}`, 'error');
+        return;
+      }
       runStore.stopWorking(threadId);
 
       if (selectedThreadIdRef.current === threadId) {
@@ -470,11 +535,12 @@ export default function App() {
 
       await refreshThreadsForWorkspace(workspaceId);
     },
-    [deleteThread, refreshThreadsForWorkspace, runStore, setSelectedThread]
+    [deleteThread, invalidatePendingSessionStart, pushToast, refreshThreadsForWorkspace, runStore, setSelectedThread]
   );
 
   const stopThreadSession = useCallback(
     async (threadId: string) => {
+      invalidatePendingSessionStart(threadId);
       const sessionId = runStore.sessionForThread(threadId);
       if (!sessionId) {
         return;
@@ -499,11 +565,17 @@ export default function App() {
       setThreadRunState(threadId, 'Canceled', null, endedAt);
       delete sessionMetaBySessionIdRef.current[sessionId];
     },
-    [runStore, setThreadRunState]
+    [invalidatePendingSessionStart, runStore, setThreadRunState]
   );
 
   const stopSessionsExcept = useCallback(
     async (keepThreadId?: string) => {
+      for (const threadId of Object.keys(startingSessionByThreadRef.current)) {
+        if (keepThreadId && threadId === keepThreadId) {
+          continue;
+        }
+        invalidatePendingSessionStart(threadId);
+      }
       const activeRuns = Object.values(runStore.activeRunsByThread);
       for (const run of activeRuns) {
         if (keepThreadId && run.threadId === keepThreadId) {
@@ -512,7 +584,7 @@ export default function App() {
         await stopThreadSession(run.threadId);
       }
     },
-    [runStore.activeRunsByThread, stopThreadSession]
+    [invalidatePendingSessionStart, runStore.activeRunsByThread, stopThreadSession]
   );
 
   const switchToThread = useCallback(
@@ -847,6 +919,9 @@ export default function App() {
 
     const setup = async () => {
       unlistenThreadUpdate = await onThreadUpdated((thread) => {
+        if (!thread || !thread.id || !thread.workspaceId) {
+          return;
+        }
         applyThreadUpdate(thread);
       });
     };

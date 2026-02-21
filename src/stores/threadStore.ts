@@ -7,8 +7,19 @@ function sortThreads(threads: ThreadMetadata[]): ThreadMetadata[] {
   return [...threads].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
 }
 
-function upsertThread(map: Record<string, ThreadMetadata[]>, thread: ThreadMetadata) {
+function upsertThread(map: Record<string, ThreadMetadata[]>, thread?: ThreadMetadata | null) {
+  if (!thread || !thread.id || !thread.workspaceId) {
+    return map;
+  }
+
   const existing = map[thread.workspaceId] ?? [];
+  if (thread.isArchived) {
+    return {
+      ...map,
+      [thread.workspaceId]: existing.filter((item) => item.id !== thread.id)
+    };
+  }
+
   const filtered = existing.filter((item) => item.id !== thread.id);
   return {
     ...map,
