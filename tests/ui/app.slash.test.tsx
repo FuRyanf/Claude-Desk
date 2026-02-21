@@ -220,7 +220,7 @@ describe('App terminal-first layout', () => {
     const composer = screen.queryByTestId('composer');
 
     expect(getComputedStyle(header).height).toBe('44px');
-    expect(getComputedStyle(sidebar).width).toBe('280px');
+    expect(getComputedStyle(sidebar).width).toBe('320px');
 
     expect(getComputedStyle(mainPanel).display).toBe('grid');
     expect(getComputedStyle(mainPanel).gridTemplateRows).toContain('44px');

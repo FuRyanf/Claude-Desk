@@ -34,6 +34,59 @@ interface ThreadContextMenuState {
   y: number;
 }
 
+function FolderIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M3 6.75A1.75 1.75 0 0 1 4.75 5h4.1c.56 0 1.08.27 1.41.72l.76 1.03c.14.2.37.31.61.31h7.67A1.75 1.75 0 0 1 21 8.8v8.45A1.75 1.75 0 0 1 19.25 19H4.75A1.75 1.75 0 0 1 3 17.25V6.75Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function PathIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M5.5 18.5 18.5 5.5M8.75 5.5h9.75v9.75"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ThreadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M12 6v12M6 12h12"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.7" />
+    </svg>
+  );
+}
+
 function formatDurationShort(totalSeconds: number): string {
   const seconds = Math.max(0, Math.floor(totalSeconds));
   const minutes = Math.floor(seconds / 60);
@@ -159,31 +212,78 @@ export function LeftRail({
     [editingOriginal, editingValue, onRenameThread]
   );
 
-  return (
-    <aside className="left-rail" data-testid="sidebar" aria-label="Workspace sidebar" style={{ width: 280 }}>
-      <div className="workspace-controls">
-        <label>Workspaces</label>
-        <div className="workspace-row workspace-action-row">
-          <button type="button" className="ghost-button" onClick={onOpenWorkspacePicker}>
-            Add
-          </button>
-          <button type="button" className="ghost-button" onClick={onOpenManualWorkspaceModal}>
-            Path
-          </button>
-          <button type="button" className="primary-button" onClick={onNewThread} disabled={!selectedWorkspaceId}>
-            New thread
-          </button>
-        </div>
-      </div>
+  const summarizeThreadStatus = React.useCallback(
+    (thread: ThreadMetadata, runningFor: string | null) => {
+      if (runningFor) {
+        return `Running ${runningFor}`;
+      }
+      if (thread.lastRunStatus === 'Failed') {
+        return 'Failed';
+      }
+      if (thread.lastRunStatus === 'Canceled') {
+        return 'Canceled';
+      }
+      if (thread.lastRunStatus === 'Succeeded') {
+        return 'Succeeded';
+      }
+      return null;
+    },
+    []
+  );
 
-      <div className="thread-search">
-        <input
-          type="text"
-          value={threadSearch}
-          onChange={(event) => onThreadSearchChange(event.target.value)}
-          placeholder="Search threads"
-          aria-label="Search threads"
-        />
+  return (
+    <aside className="left-rail" data-testid="sidebar" aria-label="Workspace sidebar" style={{ width: 320 }}>
+      <div className="workspace-controls codex-rail-header">
+        <div className="codex-rail-title-row">
+          <label>Threads</label>
+          <div className="codex-rail-toolbar">
+            <button type="button" className="icon-ghost-button" onClick={onOpenWorkspacePicker} title="Add workspace">
+              <span className="rail-icon" aria-hidden="true">
+                <PlusIcon />
+              </span>
+              <span>Add</span>
+            </button>
+            <button
+              type="button"
+              className="icon-ghost-button"
+              onClick={onOpenManualWorkspaceModal}
+              title="Add workspace by path"
+            >
+              <span className="rail-icon" aria-hidden="true">
+                <PathIcon />
+              </span>
+              <span>Path</span>
+            </button>
+            <button
+              type="button"
+              className="icon-primary-button"
+              onClick={onNewThread}
+              disabled={!selectedWorkspaceId}
+              title="New thread"
+            >
+              <span className="rail-icon" aria-hidden="true">
+                <ThreadIcon />
+              </span>
+              <span>New thread</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="thread-search codex-thread-search">
+          <span className="search-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <circle cx="11" cy="11" r="6.8" fill="none" stroke="currentColor" strokeWidth="1.8" />
+              <path d="M16 16l4 4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </span>
+          <input
+            type="text"
+            value={threadSearch}
+            onChange={(event) => onThreadSearchChange(event.target.value)}
+            placeholder="Search threads"
+            aria-label="Search threads"
+          />
+        </div>
       </div>
 
       <div className="thread-groups">
@@ -211,7 +311,12 @@ export function LeftRail({
                   onClick={() => onSelectWorkspace(workspace.id)}
                   title={workspace.path}
                 >
-                  <span className="workspace-group-name">{workspace.name}</span>
+                  <span className="workspace-group-leading">
+                    <span className="workspace-folder-icon" aria-hidden="true">
+                      <FolderIcon />
+                    </span>
+                    <span className="workspace-group-name">{workspace.name}</span>
+                  </span>
                   <span className="workspace-group-count">{allThreads.length}</span>
                 </button>
 
@@ -226,7 +331,7 @@ export function LeftRail({
                         const runningFor = activeRun
                           ? formatDurationShort((nowMs - Date.parse(activeRun.startedAt)) / 1000)
                           : null;
-                        const lastRunStatus = thread.lastRunStatus ?? 'Idle';
+                        const statusLine = summarizeThreadStatus(thread, runningFor);
 
                         return (
                           <li
@@ -291,18 +396,18 @@ export function LeftRail({
                                 <span className="thread-time">{formatRelativeShort(thread.updatedAt, nowMs)}</span>
                               </span>
 
-                              <span className="thread-status-row">
-                                {activeRun ? (
-                                  <span className="thread-running" title="Claude is processing a response">
-                                    <span className="spinner-dot" />
-                                    <span>Running {runningFor}</span>
-                                  </span>
-                                ) : lastRunStatus !== 'Idle' && lastRunStatus !== 'Running' ? (
-                                  <span className="thread-last-status">{lastRunStatus.toLowerCase()}</span>
-                                ) : (
-                                  <span className="thread-last-status">idle</span>
-                                )}
-                              </span>
+                              {statusLine ? (
+                                <span className="thread-status-row">
+                                  {activeRun ? (
+                                    <span className="thread-running" title="Claude is processing a response">
+                                      <span className="spinner-dot" />
+                                      <span>{statusLine}</span>
+                                    </span>
+                                  ) : (
+                                    <span className="thread-last-status">{statusLine}</span>
+                                  )}
+                                </span>
+                              ) : null}
                             </button>
                           </li>
                         );
