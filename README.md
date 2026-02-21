@@ -22,15 +22,18 @@ No skills or context-pack controls are required for normal use.
 - Selecting/opening a thread auto-starts a PTY session so you can type immediately.
 - Runs are stored under `runs/<runId>/` as children of a single thread.
 - Thread list is always driven by thread metadata, not by run logs.
+- Thread actions are available from right-click context menu: `Rename`, `Archive`, `Delete`.
 
 ## Interactive Terminal Mode
 
 ### How it works
 
 - Backend starts `claude` in interactive mode inside a PTY (`portable-pty`).
+- PTY startup uses the same login shell path as Terminal (`$SHELL -lic`) for environment parity (MCP reliability).
 - Frontend uses `xterm.js` + fit addon for ANSI rendering and resize.
 - Keystrokes/paste are forwarded to PTY.
 - `Cmd+C` sends SIGINT to the PTY process.
+- Terminal is the primary input surface (no separate composer input).
 
 ### Session controls
 
@@ -114,5 +117,6 @@ Artifacts:
 - `/Users/rfu/Claude Desk/docs/iteration-loop.md`
 - `/Users/rfu/Claude Desk/docs/threads-model.md`
 - `/Users/rfu/Claude Desk/docs/manual-left-rail.md`
-- `/Users/rfu/Claude Desk/docs/manual-terminal-checklist.md`
+- `/Users/rfu/Claude Desk/docs/manual-terminal.md`
+- `/Users/rfu/Claude Desk/docs/mcp-debugging.md`
 - `/Users/rfu/Claude Desk/docs/assumptions.md`
