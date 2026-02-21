@@ -40,6 +40,10 @@ export const api = {
     invoke<ThreadMetadata>('create_thread', { workspaceId, agentId }),
   renameThread: (workspaceId: string, threadId: string, title: string) =>
     invoke<ThreadMetadata>('rename_thread', { workspaceId, threadId, title }),
+  archiveThread: (workspaceId: string, threadId: string) =>
+    invoke<ThreadMetadata>('archive_thread', { workspaceId, threadId }),
+  deleteThread: (workspaceId: string, threadId: string) =>
+    invoke<boolean>('delete_thread', { workspaceId, threadId }),
   setThreadFullAccess: (workspaceId: string, threadId: string, fullAccess: boolean) =>
     invoke<ThreadMetadata>('set_thread_full_access', { workspaceId, threadId, fullAccess }),
   setThreadSkills: (workspaceId: string, threadId: string, enabledSkills: string[]) =>
@@ -82,7 +86,9 @@ export const api = {
   generateCommitMessage: (workspacePath: string, fullAccess: boolean) =>
     invoke<string>('generate_commit_message', { workspacePath, fullAccess }),
   openInFinder: (path: string) => invoke<void>('open_in_finder', { path }),
-  openInTerminal: (path: string) => invoke<void>('open_in_terminal', { path })
+  openInTerminal: (path: string) => invoke<void>('open_in_terminal', { path }),
+  copyTerminalEnvDiagnostics: (workspacePath: string) =>
+    invoke<string>('copy_terminal_env_diagnostics', { workspacePath })
 };
 
 export const onRunStream = async (

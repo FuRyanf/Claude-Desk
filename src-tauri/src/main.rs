@@ -81,6 +81,18 @@ fn rename_thread(workspace_id: String, thread_id: String, title: String) -> Resu
 }
 
 #[tauri::command]
+fn archive_thread(workspace_id: String, thread_id: String) -> Result<ThreadMetadata, String> {
+    storage::archive_thread(&workspace_id, &thread_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_thread(workspace_id: String, thread_id: String) -> Result<bool, String> {
+    storage::delete_thread(&workspace_id, &thread_id)
+        .map(|_| true)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn append_user_message(workspace_id: String, thread_id: String, content: String) -> Result<TranscriptEntry, String> {
     storage::append_user_message(&workspace_id, &thread_id, &content).map_err(|error| error.to_string())
 }
@@ -228,6 +240,11 @@ fn open_in_terminal(path: String) -> Result<(), String> {
         })
 }
 
+#[tauri::command]
+fn copy_terminal_env_diagnostics(workspace_path: String) -> Result<String, String> {
+    runner::copy_terminal_env_diagnostics(workspace_path).map_err(|error| error.to_string())
+}
+
 fn main() {
     let _ = storage::ensure_base_dirs();
 
@@ -254,6 +271,8 @@ fn main() {
             set_thread_skills,
             set_thread_agent,
             rename_thread,
+            archive_thread,
+            delete_thread,
             append_user_message,
             load_transcript,
             list_skills,
@@ -272,7 +291,8 @@ fn main() {
             terminal_read_output,
             generate_commit_message,
             open_in_finder,
-            open_in_terminal
+            open_in_terminal,
+            copy_terminal_env_diagnostics
         ])
         .run(tauri::generate_context!())
         .expect("error while running Claude Desk");

@@ -6,21 +6,30 @@ interface ActiveThreadRun {
   startedAt: string;
 }
 
+interface WorkingThreadState {
+  startedAt: string;
+}
+
 export interface RunStore {
   activeRunsByThread: Record<string, ActiveThreadRun>;
+  workingByThread: Record<string, WorkingThreadState>;
   bindSession: (threadId: string, sessionId: string, startedAt?: string) => void;
   finishSession: (sessionId: string) => string | null;
   sessionForThread: (threadId?: string) => string | null;
-  isThreadRunning: (threadId?: string) => boolean;
-  startedAtForThread: (threadId?: string) => string | null;
+  startWorking: (threadId: string, startedAt?: string) => void;
+  stopWorking: (threadId: string) => void;
+  isThreadWorking: (threadId?: string) => boolean;
+  workingStartedAtForThread: (threadId?: string) => string | null;
 }
 
 export function useRunStore(): RunStore {
   const [activeRunsByThread, setActiveRunsByThread] = useState<Record<string, ActiveThreadRun>>({});
+  const [workingByThread, setWorkingByThread] = useState<Record<string, WorkingThreadState>>({});
 
   return useMemo(
     () => ({
       activeRunsByThread,
+      workingByThread,
       bindSession: (threadId: string, sessionId: string, startedAt = new Date().toISOString()) => {
         setActiveRunsByThread((current) => ({
           ...current,
@@ -44,6 +53,13 @@ export function useRunStore(): RunStore {
           }
           return next;
         });
+        if (removedThreadId) {
+          setWorkingByThread((current) => {
+            const next = { ...current };
+            delete next[removedThreadId as string];
+            return next;
+          });
+        }
         return removedThreadId;
       },
       sessionForThread: (threadId?: string) => {
@@ -52,19 +68,40 @@ export function useRunStore(): RunStore {
         }
         return activeRunsByThread[threadId]?.sessionId ?? null;
       },
-      isThreadRunning: (threadId?: string) => {
+      startWorking: (threadId: string, startedAt = new Date().toISOString()) => {
+        setWorkingByThread((current) => {
+          if (current[threadId]) {
+            return current;
+          }
+          return {
+            ...current,
+            [threadId]: { startedAt }
+          };
+        });
+      },
+      stopWorking: (threadId: string) => {
+        setWorkingByThread((current) => {
+          if (!current[threadId]) {
+            return current;
+          }
+          const next = { ...current };
+          delete next[threadId];
+          return next;
+        });
+      },
+      isThreadWorking: (threadId?: string) => {
         if (!threadId) {
           return false;
         }
-        return Boolean(activeRunsByThread[threadId]);
+        return Boolean(workingByThread[threadId]);
       },
-      startedAtForThread: (threadId?: string) => {
+      workingStartedAtForThread: (threadId?: string) => {
         if (!threadId) {
           return null;
         }
-        return activeRunsByThread[threadId]?.startedAt ?? null;
+        return workingByThread[threadId]?.startedAt ?? null;
       }
     }),
-    [activeRunsByThread]
+    [activeRunsByThread, workingByThread]
   );
 }

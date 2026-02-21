@@ -7,7 +7,6 @@ import { AddWorkspaceModal } from './components/AddWorkspaceModal';
 import { HeaderBar } from './components/HeaderBar';
 import { LeftRail } from './components/LeftRail';
 import { SettingsModal } from './components/SettingsModal';
-import { SimpleComposer } from './components/SimpleComposer';
 import { TerminalPanel } from './components/TerminalPanel';
 import { ToastRegion, type ToastItem } from './components/ToastRegion';
 import { api, onTerminalExit } from './lib/api';
@@ -16,6 +15,7 @@ import { useThreadStore } from './stores/threadStore';
 import type { GitInfo, RunStatus, Settings, TerminalExitEvent, ThreadMetadata, Workspace } from './types';
 
 const SELECTED_WORKSPACE_KEY = 'claude-desk:selected-workspace';
+const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
 function threadSelectionKey(workspaceId: string) {
   return `claude-desk:selected-thread:${workspaceId}`;
@@ -25,8 +25,24 @@ function todayId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 }
 
-function normalizeComposerInput(input: string): string {
-  return input.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n+$/g, '');
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_REGEX, '');
+}
+
+function terminalChunkSignalsIdle(chunk: string): boolean {
+  const clean = stripAnsi(chunk);
+  return clean.includes('\n❯') || clean.includes('❯ ') || clean.trim().endsWith('❯');
+}
+
+function terminalChunkSignalsWorking(chunk: string): boolean {
+  const normalized = stripAnsi(chunk).toLowerCase();
+  return (
+    normalized.includes('esc to interrupt') ||
+    normalized.includes('thinking') ||
+    normalized.includes('actioning') ||
+    normalized.includes('frosting') ||
+    normalized.includes('moseying')
+  );
 }
 
 function formatDurationShort(totalSeconds: number): string {
@@ -67,6 +83,8 @@ export default function App() {
     listThreads,
     createThread,
     renameThread,
+    archiveThread,
+    deleteThread,
     setSelectedWorkspace,
     setSelectedThread,
     setThreadRunState
@@ -78,8 +96,6 @@ export default function App() {
   const [terminalFocused, setTerminalFocused] = useState(false);
   const [terminalSize, setTerminalSize] = useState({ cols: 120, rows: 32 });
   const [lastTerminalLogByThread, setLastTerminalLogByThread] = useState<Record<string, string>>({});
-  const [composerText, setComposerText] = useState('');
-  const [sendingComposer, setSendingComposer] = useState(false);
 
   const [settings, setSettings] = useState<Settings>({ claudeCliPath: null });
   const [detectedCliPath, setDetectedCliPath] = useState<string | null>(null);
@@ -128,7 +144,7 @@ export default function App() {
     return lastTerminalLogByThread[selectedThreadId] ?? '';
   }, [lastTerminalLogByThread, selectedThreadId]);
 
-  const activeRunCount = Object.keys(runStore.activeRunsByThread).length;
+  const activeRunCount = Object.keys(runStore.workingByThread).length;
 
   useEffect(() => {
     selectedWorkspaceIdRef.current = selectedWorkspaceId;
@@ -236,7 +252,6 @@ export default function App() {
         const sessionId = response.sessionId;
         const startedAt = new Date().toISOString();
         runStore.bindSession(thread.id, sessionId, startedAt);
-        setThreadRunState(thread.id, 'Running', startedAt, null);
 
         void api.terminalResize(sessionId, terminalSize.cols, terminalSize.rows);
         await flushPendingThreadInput(thread.id, sessionId);
@@ -263,7 +278,7 @@ export default function App() {
       startingSessionByThreadRef.current[thread.id] = startPromise;
       return startPromise;
     },
-    [flushPendingThreadInput, runStore, setThreadRunState, terminalSize.cols, terminalSize.rows, workspaces]
+    [flushPendingThreadInput, runStore, terminalSize.cols, terminalSize.rows, workspaces]
   );
 
   const addWorkspaceByPath = useCallback(
@@ -353,44 +368,48 @@ export default function App() {
     [refreshThreadsForWorkspace, renameThread]
   );
 
-  const sendComposerMessage = useCallback(async () => {
-    const text = normalizeComposerInput(composerText).trim();
-    if (!text) {
-      return;
-    }
-
-    if (!selectedWorkspaceId) {
-      pushToast('Select a workspace first.', 'error');
-      return;
-    }
-
-    setSendingComposer(true);
-    try {
-      let thread = selectedThread;
-      if (!thread) {
-        thread = await createThread(selectedWorkspaceId);
-        setSelectedThread(thread.id);
+  const onArchiveThread = useCallback(
+    async (workspaceId: string, threadId: string) => {
+      const existingSessionId = runStore.sessionForThread(threadId);
+      if (existingSessionId) {
+        void api.terminalKill(existingSessionId);
+        runStore.finishSession(existingSessionId);
       }
 
-      const sessionId = await ensureSessionForThread(thread);
-      await api.terminalWrite(sessionId, text.replace(/\n/g, '\r'));
-      await api.terminalWrite(sessionId, '\r');
+      await archiveThread(workspaceId, threadId);
 
-      await api.appendUserMessage(thread.workspaceId, thread.id, text);
-      await refreshThreadsForWorkspace(thread.workspaceId);
-      setComposerText('');
-    } catch (error) {
-      const errorText = String(error);
-      if (errorText.includes('Claude CLI not found')) {
-        setBlockingError('Claude CLI not found. Configure the path in Settings.');
-        setSettingsOpen(true);
-      } else {
-        pushToast(errorText, 'error');
+      if (existingSessionId) {
+        runStore.stopWorking(threadId);
       }
-    } finally {
-      setSendingComposer(false);
-    }
-  }, [composerText, createThread, ensureSessionForThread, pushToast, refreshThreadsForWorkspace, selectedThread, selectedWorkspaceId, setSelectedThread]);
+
+      if (selectedThreadIdRef.current === threadId) {
+        setSelectedThread(undefined);
+      }
+
+      await refreshThreadsForWorkspace(workspaceId);
+    },
+    [archiveThread, refreshThreadsForWorkspace, runStore, setSelectedThread]
+  );
+
+  const onDeleteThread = useCallback(
+    async (workspaceId: string, threadId: string) => {
+      const existingSessionId = runStore.sessionForThread(threadId);
+      if (existingSessionId) {
+        void api.terminalKill(existingSessionId);
+        runStore.finishSession(existingSessionId);
+      }
+
+      await deleteThread(workspaceId, threadId);
+      runStore.stopWorking(threadId);
+
+      if (selectedThreadIdRef.current === threadId) {
+        setSelectedThread(undefined);
+      }
+
+      await refreshThreadsForWorkspace(workspaceId);
+    },
+    [deleteThread, refreshThreadsForWorkspace, runStore, setSelectedThread]
+  );
 
   useEffect(() => {
     const init = async () => {
@@ -573,11 +592,34 @@ export default function App() {
     }
   }, []);
 
-  const selectedThreadStartedAt = runStore.startedAtForThread(selectedThreadId);
-  const runningForLabel = selectedThreadStartedAt
-    ? formatDurationShort((nowMs - Date.parse(selectedThreadStartedAt)) / 1000)
+  const copyEnvDiagnostics = useCallback(async () => {
+    if (!selectedWorkspace) {
+      pushToast('Select a workspace first.', 'error');
+      return;
+    }
+
+    try {
+      const diagnostics = await api.copyTerminalEnvDiagnostics(selectedWorkspace.path);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(diagnostics);
+        pushToast('Copied terminal environment diagnostics to clipboard.', 'info');
+      } else {
+        pushToast('Diagnostics saved to artifacts/env-diagnostics.txt.', 'info');
+      }
+    } catch (error) {
+      pushToast(`Failed to collect diagnostics: ${String(error)}`, 'error');
+    }
+  }, [pushToast, selectedWorkspace]);
+
+  const selectedWorkingStartedAt = runStore.workingStartedAtForThread(selectedThreadId);
+  const runningForLabel = selectedWorkingStartedAt
+    ? formatDurationShort((nowMs - Date.parse(selectedWorkingStartedAt)) / 1000)
     : undefined;
-  const statusLabel = selectedThread?.lastRunStatus ?? 'Idle';
+  const normalizedStatus =
+    selectedThread?.lastRunStatus && selectedThread.lastRunStatus !== 'Running'
+      ? selectedThread.lastRunStatus
+      : 'Idle';
+  const statusLabel = runStore.isThreadWorking(selectedThreadId) ? 'Running' : normalizedStatus;
 
   return (
     <div className="app-shell">
@@ -589,7 +631,7 @@ export default function App() {
         threadSearch={threadSearch}
         nowMs={nowMs}
         activeRunsByThread={Object.fromEntries(
-          Object.entries(runStore.activeRunsByThread).map(([threadId, run]) => [threadId, { startedAt: run.startedAt }])
+          Object.entries(runStore.workingByThread).map(([threadId, run]) => [threadId, { startedAt: run.startedAt }])
         )}
         onSelectWorkspace={(workspaceId) => {
           setSelectedWorkspace(workspaceId);
@@ -605,6 +647,8 @@ export default function App() {
         onThreadSearchChange={setThreadSearch}
         onSelectThread={setSelectedThread}
         onRenameThread={onRenameThread}
+        onArchiveThread={onArchiveThread}
+        onDeleteThread={onDeleteThread}
         getSearchTextForThread={(threadId) => lastTerminalLogByThread[threadId] ?? ''}
       />
 
@@ -648,6 +692,9 @@ export default function App() {
                 }
 
                 const sessionId = runStore.sessionForThread(selectedThread.id);
+                if (data.includes('\r')) {
+                  runStore.startWorking(selectedThread.id);
+                }
                 if (sessionId) {
                   void api.terminalWrite(sessionId, data);
                   return;
@@ -655,6 +702,16 @@ export default function App() {
 
                 pendingInputByThreadRef.current[selectedThread.id] = `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${data}`;
                 void ensureSessionForThread(selectedThread);
+              }}
+              onOutput={(chunk) => {
+                if (!selectedThread) {
+                  return;
+                }
+                if (terminalChunkSignalsIdle(chunk)) {
+                  runStore.stopWorking(selectedThread.id);
+                } else if (terminalChunkSignalsWorking(chunk)) {
+                  runStore.startWorking(selectedThread.id);
+                }
               }}
               onResize={(cols, rows) => {
                 setTerminalSize({ cols, rows });
@@ -669,14 +726,6 @@ export default function App() {
             <div className="terminal-empty">Create a thread to start typing.</div>
           )}
         </section>
-
-        <SimpleComposer
-          value={composerText}
-          disabled={!selectedWorkspace || Boolean(blockingError)}
-          sending={sendingComposer}
-          onChange={setComposerText}
-          onSend={sendComposerMessage}
-        />
       </main>
 
       <SettingsModal
@@ -685,6 +734,7 @@ export default function App() {
         detectedCliPath={detectedCliPath}
         onClose={() => setSettingsOpen(false)}
         onSave={(path) => void saveSettings(path)}
+        onCopyEnvDiagnostics={() => void copyEnvDiagnostics()}
       />
 
       <AddWorkspaceModal

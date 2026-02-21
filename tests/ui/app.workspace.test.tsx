@@ -26,6 +26,13 @@ const mocks = vi.hoisted(() => {
     createThread: vi.fn(async () => {
       throw new Error('not needed');
     }),
+    renameThread: vi.fn(async () => {
+      throw new Error('not needed');
+    }),
+    archiveThread: vi.fn(async () => {
+      throw new Error('not needed');
+    }),
+    deleteThread: vi.fn(async () => true),
     setThreadFullAccess: vi.fn(async () => {
       throw new Error('not needed');
     }),
@@ -55,7 +62,8 @@ const mocks = vi.hoisted(() => {
     cancelRun: vi.fn(async () => true),
     generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
-    openInTerminal: vi.fn(async () => undefined)
+    openInTerminal: vi.fn(async () => undefined),
+    copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics')
   };
 
   const reset = () => {

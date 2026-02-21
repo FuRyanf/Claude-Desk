@@ -6,6 +6,7 @@ interface SettingsModalProps {
   detectedCliPath?: string | null;
   onClose: () => void;
   onSave: (path: string) => void;
+  onCopyEnvDiagnostics?: () => void | Promise<void>;
 }
 
 export function SettingsModal({
@@ -13,7 +14,8 @@ export function SettingsModal({
   initialCliPath,
   detectedCliPath,
   onClose,
-  onSave
+  onSave,
+  onCopyEnvDiagnostics
 }: SettingsModalProps) {
   const [cliPath, setCliPath] = useState(initialCliPath);
 
@@ -45,6 +47,9 @@ export function SettingsModal({
         {detectedCliPath ? <p className="muted">Detected path: {detectedCliPath}</p> : null}
 
         <footer className="modal-actions">
+          <button type="button" className="ghost-button" onClick={() => void onCopyEnvDiagnostics?.()}>
+            Copy terminal env diagnostics
+          </button>
           <button type="button" className="ghost-button" onClick={onClose}>
             Cancel
           </button>

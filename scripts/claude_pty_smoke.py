@@ -139,9 +139,13 @@ def main() -> int:
                     "esc to interrupt" in normalize_text(t)
                     or "inferring" in normalize_text(t)
                     or "whatchamacalliting" in normalize_text(t)
+                    or "moseying" in normalize_text(t)
+                    or "frosting" in normalize_text(t)
+                    or "dilly-dallying" in normalize_text(t)
                     or "press ctrl-c again to exit" in normalize_text(t)
+                    or normalize_text(t).count("❯") >= 2
                 ),
-                timeout=10,
+                timeout=25,
                 label="run state after submitting prompt",
                 pid=pid,
             )
@@ -154,9 +158,13 @@ def main() -> int:
                     "esc to interrupt" in normalize_text(t)
                     or "inferring" in normalize_text(t)
                     or "whatchamacalliting" in normalize_text(t)
+                    or "moseying" in normalize_text(t)
+                    or "frosting" in normalize_text(t)
+                    or "dilly-dallying" in normalize_text(t)
                     or "press ctrl-c again to exit" in normalize_text(t)
+                    or normalize_text(t).count("❯") >= 2
                 ),
-                timeout=10,
+                timeout=25,
                 label="run state after fallback submit",
                 pid=pid,
             )

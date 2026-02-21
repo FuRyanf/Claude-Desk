@@ -203,6 +203,12 @@ textarea {
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 
+.thread-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
 .thread-button:hover {
   border-color: var(--line-strong);
   background: var(--panel-muted);
@@ -246,12 +252,89 @@ textarea {
   font-size: 12px;
 }
 
+.thread-row-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.thread-row:hover .thread-row-actions,
+.thread-row.active .thread-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.thread-icon-button {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--muted);
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.thread-icon-button:hover {
+  border-color: var(--line-strong);
+  background: var(--panel-muted);
+  color: var(--ink);
+}
+
+.thread-icon-button.danger {
+  color: #991b1b;
+  border-color: #fecaca;
+  background: #fff1f2;
+}
+
+.thread-icon-button.danger:hover {
+  border-color: #fca5a5;
+  background: #fee2e2;
+}
+
 .thread-rename-input {
   width: 100%;
   min-width: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 3px 6px;
+}
+
+.thread-context-menu {
+  position: fixed;
+  z-index: 40;
+  width: 170px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  box-shadow: var(--shadow);
+  padding: 4px;
+}
+
+.thread-context-menu button {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  padding: 6px 8px;
+  cursor: pointer;
+  color: var(--ink);
+}
+
+.thread-context-menu button:hover {
+  background: var(--panel-muted);
+}
+
+.thread-context-menu button.danger {
+  color: #991b1b;
+}
+
+.thread-context-menu button.danger:hover {
+  background: #fff1f2;
 }
 
 .thread-title {
@@ -267,13 +350,13 @@ textarea {
 
 .main-panel {
   display: grid;
-  grid-template-rows: 44px minmax(0, 1fr) auto;
+  grid-template-rows: 44px minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
 }
 
 .main-panel.has-blocking-error {
-  grid-template-rows: 44px auto minmax(0, 1fr) auto;
+  grid-template-rows: 44px auto minmax(0, 1fr);
 }
 
 .header-bar {

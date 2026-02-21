@@ -15,6 +15,7 @@ interface TerminalPanelProps {
   content: string;
   readOnly?: boolean;
   onData?: (data: string) => void;
+  onOutput?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
   onFocusChange?: (focused: boolean) => void;
 }
@@ -24,6 +25,7 @@ export function TerminalPanel({
   content,
   readOnly = false,
   onData,
+  onOutput,
   onResize,
   onFocusChange
 }: TerminalPanelProps) {
@@ -32,6 +34,7 @@ export function TerminalPanel({
   const terminalRef = useRef<Terminal | null>(null);
   const contentRef = useRef(content);
   const onDataRef = useRef(onData);
+  const onOutputRef = useRef(onOutput);
   const onResizeRef = useRef(onResize);
   const onFocusChangeRef = useRef(onFocusChange);
   const readOnlyRef = useRef(readOnly);
@@ -125,6 +128,10 @@ export function TerminalPanel({
   useEffect(() => {
     onDataRef.current = onData;
   }, [onData]);
+
+  useEffect(() => {
+    onOutputRef.current = onOutput;
+  }, [onOutput]);
 
   useEffect(() => {
     onResizeRef.current = onResize;
@@ -333,6 +340,7 @@ export function TerminalPanel({
         return;
       }
       hasLiveDataRef.current = true;
+      onOutputRef.current?.(event.data);
       queueWrite(event.data);
     }).then((cleanup) => {
       if (disposed) {

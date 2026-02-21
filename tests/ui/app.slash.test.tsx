@@ -59,6 +59,28 @@ const mocks = vi.hoisted(() => {
       threadState = [next, ...threadState];
       return next;
     }),
+    renameThread: vi.fn(async (_workspaceId: string, threadId: string, title: string) => {
+      const updated = {
+        ...threadState.find((thread) => thread.id === threadId)!,
+        title,
+        updatedAt: new Date().toISOString()
+      };
+      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
+      return updated;
+    }),
+    archiveThread: vi.fn(async (_workspaceId: string, threadId: string) => {
+      const updated = {
+        ...threadState.find((thread) => thread.id === threadId)!,
+        isArchived: true,
+        updatedAt: new Date().toISOString()
+      };
+      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
+      return updated;
+    }),
+    deleteThread: vi.fn(async (_workspaceId: string, threadId: string) => {
+      threadState = threadState.filter((thread) => thread.id !== threadId);
+      return true;
+    }),
     setThreadFullAccess: vi.fn(async (_workspaceId: string, threadId: string, fullAccess: boolean) => {
       const updated = {
         ...threadState.find((thread) => thread.id === threadId)!,
@@ -110,7 +132,8 @@ const mocks = vi.hoisted(() => {
     cancelRun: vi.fn(async () => true),
     generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
-    openInTerminal: vi.fn(async () => undefined)
+    openInTerminal: vi.fn(async () => undefined),
+    copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics')
   };
 
   const reset = () => {
@@ -157,7 +180,6 @@ describe('App terminal-first layout', () => {
     render(<App />);
 
     expect(await screen.findByText('Create a thread to start typing.')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Type and press Enter')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'New thread' }));
     await waitFor(() => {
@@ -178,7 +200,7 @@ describe('App terminal-first layout', () => {
 
     expect(getComputedStyle(mainPanel).display).toBe('grid');
     expect(getComputedStyle(mainPanel).gridTemplateRows).toContain('44px');
-    expect(composer).toBeInTheDocument();
+    expect(composer).toBeNull();
 
     expect(document.querySelector('.terminal-panel')).toBeTruthy();
   });

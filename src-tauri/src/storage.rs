@@ -174,9 +174,13 @@ pub fn list_threads(workspace_id: &str) -> Result<Vec<ThreadMetadata>> {
             continue;
         }
         let raw = fs::read_to_string(metadata_path)?;
-        let metadata: ThreadMetadata = serde_json::from_str(&raw)?;
+        let mut metadata: ThreadMetadata = serde_json::from_str(&raw)?;
         if metadata.is_archived {
             continue;
+        }
+        if matches!(metadata.last_run_status, ThreadRunStatus::Running) {
+            metadata.last_run_status = ThreadRunStatus::Idle;
+            let _ = write_thread_metadata(&metadata);
         }
         threads.push(metadata);
     }
@@ -219,10 +223,27 @@ pub fn rename_thread(workspace_id: &str, thread_id: &str, title: String) -> Resu
     if trimmed.is_empty() {
         return Err(anyhow!("Thread title cannot be empty"));
     }
-    thread.title = trimmed.chars().take(50).collect();
+    thread.title = trimmed.chars().take(80).collect();
     thread.updated_at = Utc::now();
     write_thread_metadata(&thread)?;
     Ok(thread)
+}
+
+pub fn archive_thread(workspace_id: &str, thread_id: &str) -> Result<ThreadMetadata> {
+    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
+    thread.is_archived = true;
+    thread.updated_at = Utc::now();
+    write_thread_metadata(&thread)?;
+    Ok(thread)
+}
+
+pub fn delete_thread(workspace_id: &str, thread_id: &str) -> Result<()> {
+    let path = thread_dir(workspace_id, thread_id)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_dir_all(path)?;
+    Ok(())
 }
 
 pub fn set_thread_run_state(

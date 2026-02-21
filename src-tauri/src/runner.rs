@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,6 +30,28 @@ const TERMINAL_DATA_EVENT: &str = "terminal:data";
 const TERMINAL_EXIT_EVENT: &str = "terminal:exit";
 const TERMINAL_EVENT_FLUSH_INTERVAL_MS: u64 = 12;
 const TERMINAL_EVENT_BUFFER_SIZE: usize = 16 * 1024;
+
+fn shell_escape_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn resolve_login_shell() -> String {
+    env::var("SHELL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "/bin/zsh".to_string())
+}
+
+fn build_claude_shell_command(cli_path: &str, full_access_flag: bool) -> String {
+    let mut parts = vec![shell_escape_arg(cli_path)];
+    if full_access_flag {
+        parts.push("--dangerously-skip-permissions".to_string());
+    }
+    parts.join(" ")
+}
 
 pub type TerminalSessionId = String;
 
@@ -357,13 +380,6 @@ pub async fn terminal_start_session(
         thread.full_access = full_access_flag;
         storage::write_thread_metadata(&thread)?;
     }
-    let _ = storage::set_thread_run_state(
-        &workspace_id,
-        &thread_id,
-        ThreadRunStatus::Running,
-        Some(Utc::now()),
-        None,
-    );
 
     let settings = storage::load_settings()?;
     let cli_path = detect_claude_cli_path(&settings)
@@ -374,13 +390,10 @@ pub async fn terminal_start_session(
     let run_dir = storage::runs_dir(&workspace_id, &thread_id)?.join(&session_id);
     fs::create_dir_all(&run_dir)?;
 
-    let mut args = Vec::new();
-    if full_access_flag {
-        args.push("--dangerously-skip-permissions".to_string());
-    }
-
     let started_at = Utc::now();
-    let command_manifest = [vec![cli_path.clone()], args.clone()].concat();
+    let shell_path = resolve_login_shell();
+    let shell_command = build_claude_shell_command(&cli_path, full_access_flag);
+    let command_manifest = vec![shell_path.clone(), "-lic".to_string(), shell_command.clone()];
     storage::write_json_file(
         &run_dir.join("input_manifest.json"),
         &serde_json::json!({
@@ -392,6 +405,8 @@ pub async fn terminal_start_session(
             "cwd": cwd,
             "envVars": env_vars,
             "command": command_manifest,
+            "shell": shell_path,
+            "shellCommand": shell_command,
             "startedAt": started_at,
             "mode": "interactive-terminal"
         }),
@@ -405,12 +420,14 @@ pub async fn terminal_start_session(
         pixel_height: 0,
     })?;
 
-    let mut command = CommandBuilder::new(cli_path.clone());
-    for arg in &args {
-        command.arg(arg);
-    }
+    let mut command = CommandBuilder::new(shell_path.clone());
+    command.arg("-lic");
+    command.arg(shell_command.clone());
     command.cwd(cwd.clone());
     command.env("TERM", "xterm-256color");
+    for (key, value) in env::vars() {
+        command.env(key, value);
+    }
     if let Some(extra_env) = &env_vars {
         for (key, value) in extra_env {
             command.env(key, value);
@@ -643,6 +660,41 @@ pub fn terminal_send_signal(state: Arc<RunnerState>, session_id: String, signal:
     }
 
     terminal_write(state, session_id, "\u{3}".to_string())
+}
+
+pub fn copy_terminal_env_diagnostics(workspace_path: String) -> Result<String> {
+    let settings = storage::load_settings()?;
+    let cli_path = detect_claude_cli_path(&settings)
+        .ok_or_else(|| anyhow!("Claude CLI not found. Configure the CLI path in Settings."))?;
+    let shell_path = resolve_login_shell();
+    let shell_command = format!(
+        "env; echo '---'; which claude; echo '---'; {} --version",
+        shell_escape_arg(&cli_path)
+    );
+
+    let output = StdCommand::new(&shell_path)
+        .arg("-lic")
+        .arg(shell_command)
+        .current_dir(&workspace_path)
+        .envs(env::vars())
+        .output()?;
+
+    let mut diagnostics = String::new();
+    diagnostics.push_str(&format!("shell={shell_path}\n"));
+    diagnostics.push_str(&format!("workspace={workspace_path}\n"));
+    diagnostics.push_str("=== stdout ===\n");
+    diagnostics.push_str(&String::from_utf8_lossy(&output.stdout));
+    diagnostics.push_str("\n=== stderr ===\n");
+    diagnostics.push_str(&String::from_utf8_lossy(&output.stderr));
+
+    let artifacts_root = match env::current_dir() {
+        Ok(current) => current.join("artifacts"),
+        Err(_) => storage::ensure_base_dirs()?.join("artifacts"),
+    };
+    fs::create_dir_all(&artifacts_root)?;
+    fs::write(artifacts_root.join("env-diagnostics.txt"), diagnostics.as_bytes())?;
+
+    Ok(diagnostics)
 }
 
 pub async fn run_claude(

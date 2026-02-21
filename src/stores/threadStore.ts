@@ -23,6 +23,8 @@ export interface ThreadStore {
   listThreads: (workspaceId: string) => Promise<ThreadMetadata[]>;
   createThread: (workspaceId: string) => Promise<ThreadMetadata>;
   renameThread: (workspaceId: string, threadId: string, title: string) => Promise<ThreadMetadata>;
+  archiveThread: (workspaceId: string, threadId: string) => Promise<void>;
+  deleteThread: (workspaceId: string, threadId: string) => Promise<void>;
   setSelectedWorkspace: (workspaceId?: string) => void;
   setSelectedThread: (threadId?: string) => void;
   setThreadRunState: (
@@ -59,6 +61,28 @@ export function useThreadStore(): ThreadStore {
     const thread = await api.renameThread(workspaceId, threadId, title);
     setThreadsByWorkspace((current) => upsertThread(current, thread));
     return thread;
+  }, []);
+
+  const archiveThread = useCallback(async (workspaceId: string, threadId: string) => {
+    await api.archiveThread(workspaceId, threadId);
+    setThreadsByWorkspace((current) => {
+      const existing = current[workspaceId] ?? [];
+      return {
+        ...current,
+        [workspaceId]: existing.filter((thread) => thread.id !== threadId)
+      };
+    });
+  }, []);
+
+  const deleteThread = useCallback(async (workspaceId: string, threadId: string) => {
+    await api.deleteThread(workspaceId, threadId);
+    setThreadsByWorkspace((current) => {
+      const existing = current[workspaceId] ?? [];
+      return {
+        ...current,
+        [workspaceId]: existing.filter((thread) => thread.id !== threadId)
+      };
+    });
   }, []);
 
   const applyThreadUpdate = useCallback((thread: ThreadMetadata) => {
@@ -98,6 +122,8 @@ export function useThreadStore(): ThreadStore {
       listThreads,
       createThread,
       renameThread,
+      archiveThread,
+      deleteThread,
       setSelectedWorkspace: setSelectedWorkspaceId,
       setSelectedThread: setSelectedThreadId,
       setThreadRunState,
@@ -108,6 +134,8 @@ export function useThreadStore(): ThreadStore {
       createThread,
       listThreads,
       renameThread,
+      archiveThread,
+      deleteThread,
       selectedThreadId,
       selectedWorkspaceId,
       setThreadRunState,

@@ -20,7 +20,15 @@ interface LeftRailProps {
   onThreadSearchChange: (value: string) => void;
   onSelectThread: (threadId: string) => void;
   onRenameThread: (workspaceId: string, threadId: string, title: string) => Promise<void>;
+  onArchiveThread: (workspaceId: string, threadId: string) => Promise<void>;
+  onDeleteThread: (workspaceId: string, threadId: string) => Promise<void>;
   getSearchTextForThread?: (threadId: string) => string;
+}
+
+interface ThreadContextMenuState {
+  thread: ThreadMetadata;
+  x: number;
+  y: number;
 }
 
 function formatDurationShort(totalSeconds: number): string {
@@ -83,12 +91,61 @@ export function LeftRail({
   onThreadSearchChange,
   onSelectThread,
   onRenameThread,
+  onArchiveThread,
+  onDeleteThread,
   getSearchTextForThread
 }: LeftRailProps) {
   const [editingThreadId, setEditingThreadId] = React.useState<string | null>(null);
   const [editingValue, setEditingValue] = React.useState('');
+  const [editingOriginal, setEditingOriginal] = React.useState('');
+  const [contextMenu, setContextMenu] = React.useState<ThreadContextMenuState | null>(null);
+  const [deleteTarget, setDeleteTarget] = React.useState<ThreadMetadata | null>(null);
 
   const query = threadSearch.trim().toLowerCase();
+
+  React.useEffect(() => {
+    if (!contextMenu) {
+      return;
+    }
+
+    const closeMenu = () => setContextMenu(null);
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setContextMenu(null);
+      }
+    };
+
+    window.addEventListener('mousedown', closeMenu);
+    window.addEventListener('scroll', closeMenu, true);
+    window.addEventListener('keydown', onEscape);
+
+    return () => {
+      window.removeEventListener('mousedown', closeMenu);
+      window.removeEventListener('scroll', closeMenu, true);
+      window.removeEventListener('keydown', onEscape);
+    };
+  }, [contextMenu]);
+
+  const commitRename = React.useCallback(
+    async (thread: ThreadMetadata) => {
+      const trimmed = editingValue.trim().slice(0, 80);
+      if (!trimmed) {
+        setEditingThreadId(null);
+        setEditingValue('');
+        setEditingOriginal('');
+        return;
+      }
+
+      if (trimmed !== editingOriginal) {
+        await onRenameThread(thread.workspaceId, thread.id, trimmed);
+      }
+
+      setEditingThreadId(null);
+      setEditingValue('');
+      setEditingOriginal('');
+    },
+    [editingOriginal, editingValue, onRenameThread]
+  );
 
   return (
     <aside className="left-rail" data-testid="sidebar" aria-label="Workspace sidebar" style={{ width: 280 }}>
@@ -160,7 +217,15 @@ export function LeftRail({
                         const lastRunStatus = thread.lastRunStatus ?? 'Idle';
 
                         return (
-                          <li key={thread.id}>
+                          <li
+                            key={thread.id}
+                            onContextMenu={(event) => {
+                              event.preventDefault();
+                              const x = Math.min(event.clientX, window.innerWidth - 180);
+                              const y = Math.min(event.clientY, window.innerHeight - 160);
+                              setContextMenu({ thread, x, y });
+                            }}
+                          >
                             <button
                               type="button"
                               onClick={() => onSelectThread(thread.id)}
@@ -171,6 +236,7 @@ export function LeftRail({
                                   <input
                                     className="thread-rename-input"
                                     value={editingValue}
+                                    maxLength={80}
                                     autoFocus
                                     onChange={(event) => setEditingValue(event.target.value)}
                                     onClick={(event) => event.stopPropagation()}
@@ -179,25 +245,15 @@ export function LeftRail({
                                         event.preventDefault();
                                         setEditingThreadId(null);
                                         setEditingValue('');
+                                        setEditingOriginal('');
                                       }
                                       if (event.key === 'Enter') {
                                         event.preventDefault();
-                                        const trimmed = editingValue.trim();
-                                        if (!trimmed) {
-                                          return;
-                                        }
-                                        await onRenameThread(thread.workspaceId, thread.id, trimmed);
-                                        setEditingThreadId(null);
-                                        setEditingValue('');
+                                        await commitRename(thread);
                                       }
                                     }}
                                     onBlur={async () => {
-                                      const trimmed = editingValue.trim();
-                                      if (trimmed) {
-                                        await onRenameThread(thread.workspaceId, thread.id, trimmed);
-                                      }
-                                      setEditingThreadId(null);
-                                      setEditingValue('');
+                                      await commitRename(thread);
                                     }}
                                   />
                                 ) : (
@@ -207,6 +263,7 @@ export function LeftRail({
                                       event.preventDefault();
                                       setEditingThreadId(thread.id);
                                       setEditingValue(thread.title);
+                                      setEditingOriginal(thread.title);
                                     }}
                                   >
                                     {thread.title}
@@ -217,13 +274,15 @@ export function LeftRail({
 
                               <span className="thread-status-row">
                                 {activeRun ? (
-                                  <span className="thread-running" title="Active run">
+                                  <span className="thread-running" title="Claude is processing a response">
                                     <span className="spinner-dot" />
                                     <span>Running {runningFor}</span>
                                   </span>
-                                ) : lastRunStatus !== 'Idle' ? (
+                                ) : lastRunStatus !== 'Idle' && lastRunStatus !== 'Running' ? (
                                   <span className="thread-last-status">{lastRunStatus.toLowerCase()}</span>
-                                ) : null}
+                                ) : (
+                                  <span className="thread-last-status">idle</span>
+                                )}
                               </span>
                             </button>
                           </li>
@@ -237,6 +296,67 @@ export function LeftRail({
           })}
         </ul>
       </div>
+
+      {contextMenu ? (
+        <div className="thread-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
+          <button
+            type="button"
+            onClick={() => {
+              setEditingThreadId(contextMenu.thread.id);
+              setEditingValue(contextMenu.thread.title);
+              setEditingOriginal(contextMenu.thread.title);
+              setContextMenu(null);
+            }}
+          >
+            Rename
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              await onArchiveThread(contextMenu.thread.workspaceId, contextMenu.thread.id);
+              setContextMenu(null);
+            }}
+          >
+            Archive
+          </button>
+          <button
+            type="button"
+            className="danger"
+            onClick={() => {
+              setDeleteTarget(contextMenu.thread);
+              setContextMenu(null);
+            }}
+          >
+            Delete
+          </button>
+        </div>
+      ) : null}
+
+      {deleteTarget ? (
+        <div className="modal-backdrop">
+          <section className="modal">
+            <h3>Delete thread?</h3>
+            <p>
+              This permanently removes <strong>{deleteTarget.title}</strong> and all of its run logs.
+            </p>
+            <footer className="modal-actions">
+              <button type="button" className="ghost-button" onClick={() => setDeleteTarget(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                onClick={async () => {
+                  await onDeleteThread(deleteTarget.workspaceId, deleteTarget.id);
+                  setDeleteTarget(null);
+                }}
+              >
+                Delete
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
     </aside>
   );
 }
