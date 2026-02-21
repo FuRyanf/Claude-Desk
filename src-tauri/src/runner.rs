@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -26,6 +27,8 @@ const STREAM_EVENT: &str = "claude://run-stream";
 const EXIT_EVENT: &str = "claude://run-exit";
 const TERMINAL_DATA_EVENT: &str = "terminal:data";
 const TERMINAL_EXIT_EVENT: &str = "terminal:exit";
+const TERMINAL_EVENT_FLUSH_INTERVAL_MS: u64 = 12;
+const TERMINAL_EVENT_BUFFER_SIZE: usize = 16 * 1024;
 
 pub type TerminalSessionId = String;
 
@@ -445,6 +448,8 @@ pub async fn terminal_start_session(
     std::thread::spawn(move || {
         let mut buffer = [0u8; 4096];
         let mut utf8_carry = Vec::<u8>::new();
+        let mut event_buffer = String::new();
+        let mut last_emit = Instant::now();
         loop {
             let read = match reader.read(&mut buffer) {
                 Ok(0) => break,
@@ -457,23 +462,34 @@ pub async fn terminal_start_session(
             }
 
             if let Some(chunk) = decode_utf8_chunk(&buffer[..read], &mut utf8_carry) {
-                let _ = data_app.emit(
-                    TERMINAL_DATA_EVENT,
-                    TerminalDataEvent {
-                        session_id: data_session_id.clone(),
-                        data: chunk,
-                    },
-                );
+                event_buffer.push_str(&chunk);
+                if event_buffer.len() >= TERMINAL_EVENT_BUFFER_SIZE
+                    || last_emit.elapsed() >= Duration::from_millis(TERMINAL_EVENT_FLUSH_INTERVAL_MS)
+                {
+                    let data = std::mem::take(&mut event_buffer);
+                    let _ = data_app.emit(
+                        TERMINAL_DATA_EVENT,
+                        TerminalDataEvent {
+                            session_id: data_session_id.clone(),
+                            data,
+                        },
+                    );
+                    last_emit = Instant::now();
+                }
             }
         }
 
         if !utf8_carry.is_empty() {
-            let chunk = String::from_utf8_lossy(&utf8_carry).to_string();
+            event_buffer.push_str(&String::from_utf8_lossy(&utf8_carry));
+        }
+
+        if !event_buffer.is_empty() {
+            let data = std::mem::take(&mut event_buffer);
             let _ = data_app.emit(
                 TERMINAL_DATA_EVENT,
                 TerminalDataEvent {
                     session_id: data_session_id.clone(),
-                    data: chunk,
+                    data,
                 },
             );
         }

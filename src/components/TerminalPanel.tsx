@@ -5,6 +5,11 @@ import { FitAddon } from 'xterm-addon-fit';
 import { Terminal } from 'xterm';
 import { onTerminalData } from '../lib/api';
 
+const OUTPUT_FLUSH_MS = 8;
+const OUTPUT_CHUNK_SIZE = 16 * 1024;
+const INPUT_FLUSH_MS = 8;
+const INPUT_CHUNK_SIZE = 4 * 1024;
+
 interface TerminalPanelProps {
   sessionId?: string | null;
   content: string;
@@ -36,6 +41,38 @@ export function TerminalPanel({
   const writeBufferRef = useRef('');
   const flushTimerRef = useRef<number | null>(null);
   const writingRef = useRef(false);
+  const inputBufferRef = useRef('');
+  const inputFlushTimerRef = useRef<number | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
+
+  const flushOutgoingInput = useCallback(() => {
+    const payload = inputBufferRef.current;
+    if (!payload) {
+      return;
+    }
+    inputBufferRef.current = '';
+    onDataRef.current?.(payload);
+  }, []);
+
+  const scheduleOutgoingInputFlush = useCallback(() => {
+    if (inputFlushTimerRef.current !== null) {
+      return;
+    }
+    inputFlushTimerRef.current = window.setTimeout(() => {
+      inputFlushTimerRef.current = null;
+      flushOutgoingInput();
+    }, INPUT_FLUSH_MS);
+  }, [flushOutgoingInput]);
+
+  const scheduleOutputFlush = useCallback((flush: () => void) => {
+    if (flushTimerRef.current !== null) {
+      return;
+    }
+    flushTimerRef.current = window.setTimeout(() => {
+      flushTimerRef.current = null;
+      flush();
+    }, OUTPUT_FLUSH_MS);
+  }, []);
 
   const flushQueuedWrites = useCallback(() => {
     if (writingRef.current) {
@@ -53,18 +90,16 @@ export function TerminalPanel({
       return;
     }
 
-    writeBufferRef.current = '';
+    const chunk = payload.slice(0, OUTPUT_CHUNK_SIZE);
+    writeBufferRef.current = payload.slice(chunk.length);
     writingRef.current = true;
-    term.write(payload, () => {
+    term.write(chunk, () => {
       writingRef.current = false;
       if (writeBufferRef.current.length > 0) {
-        flushTimerRef.current = window.setTimeout(() => {
-          flushTimerRef.current = null;
-          flushQueuedWrites();
-        }, 8);
+        scheduleOutputFlush(flushQueuedWrites);
       }
     });
-  }, []);
+  }, [scheduleOutputFlush]);
 
   const queueWrite = useCallback(
     (data: string) => {
@@ -73,15 +108,18 @@ export function TerminalPanel({
       }
 
       writeBufferRef.current += data;
-      if (flushTimerRef.current !== null) {
-        return;
-      }
-      flushTimerRef.current = window.setTimeout(() => {
-        flushTimerRef.current = null;
+
+      if (writeBufferRef.current.length >= OUTPUT_CHUNK_SIZE * 2) {
+        if (flushTimerRef.current !== null) {
+          window.clearTimeout(flushTimerRef.current);
+          flushTimerRef.current = null;
+        }
         flushQueuedWrites();
-      }, 8);
+      } else {
+        scheduleOutputFlush(flushQueuedWrites);
+      }
     },
-    [flushQueuedWrites]
+    [flushQueuedWrites, scheduleOutputFlush]
   );
 
   useEffect(() => {
@@ -134,8 +172,23 @@ export function TerminalPanel({
       }
 
       const onDataDisposable = term.onData((data) => {
-        if (!readOnlyRef.current) {
-          onDataRef.current?.(data);
+        if (readOnlyRef.current) {
+          return;
+        }
+
+        inputBufferRef.current += data;
+        if (
+          data === '\r' ||
+          data === '\x03' ||
+          inputBufferRef.current.length >= INPUT_CHUNK_SIZE
+        ) {
+          if (inputFlushTimerRef.current !== null) {
+            window.clearTimeout(inputFlushTimerRef.current);
+            inputFlushTimerRef.current = null;
+          }
+          flushOutgoingInput();
+        } else {
+          scheduleOutgoingInputFlush();
         }
       });
 
@@ -145,8 +198,14 @@ export function TerminalPanel({
       host.addEventListener('focusout', onFocusOut);
 
       const observer = new ResizeObserver(() => {
-        fitAddon.fit();
-        onResizeRef.current?.(term.cols, term.rows);
+        if (resizeFrameRef.current !== null) {
+          return;
+        }
+        resizeFrameRef.current = window.requestAnimationFrame(() => {
+          resizeFrameRef.current = null;
+          fitAddon.fit();
+          onResizeRef.current?.(term.cols, term.rows);
+        });
       });
       observer.observe(host);
 
@@ -162,16 +221,25 @@ export function TerminalPanel({
         terminalRef.current = null;
         writeBufferRef.current = '';
         writingRef.current = false;
+        inputBufferRef.current = '';
         if (flushTimerRef.current !== null) {
           window.clearTimeout(flushTimerRef.current);
           flushTimerRef.current = null;
+        }
+        if (inputFlushTimerRef.current !== null) {
+          window.clearTimeout(inputFlushTimerRef.current);
+          inputFlushTimerRef.current = null;
+        }
+        if (resizeFrameRef.current !== null) {
+          window.cancelAnimationFrame(resizeFrameRef.current);
+          resizeFrameRef.current = null;
         }
       };
     } catch {
       setFallback(true);
       return;
     }
-  }, [fallback]);
+  }, [fallback, flushOutgoingInput, scheduleOutgoingInputFlush]);
 
   useEffect(() => {
     readOnlyRef.current = readOnly;
@@ -200,9 +268,14 @@ export function TerminalPanel({
     hydratedSessionRef.current = null;
     writeBufferRef.current = '';
     writingRef.current = false;
+    inputBufferRef.current = '';
     if (flushTimerRef.current !== null) {
       window.clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
+    }
+    if (inputFlushTimerRef.current !== null) {
+      window.clearTimeout(inputFlushTimerRef.current);
+      inputFlushTimerRef.current = null;
     }
 
     term.reset();
@@ -271,9 +344,10 @@ export function TerminalPanel({
 
     return () => {
       disposed = true;
+      flushOutgoingInput();
       unlisten?.();
     };
-  }, [fallback, queueWrite, readOnly, sessionId]);
+  }, [fallback, flushOutgoingInput, queueWrite, readOnly, sessionId]);
 
   if (fallback) {
     return (
