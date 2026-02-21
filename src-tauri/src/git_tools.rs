@@ -1,8 +1,8 @@
 use std::process::Command;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
-use crate::models::{GitDiffSummary, GitInfo};
+use crate::models::{GitBranchEntry, GitDiffSummary, GitInfo, GitWorkspaceStatus};
 
 fn run_git(workspace_path: &str, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
@@ -17,9 +17,32 @@ fn run_git(workspace_path: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-pub fn get_git_info(workspace_path: &str) -> Result<Option<GitInfo>> {
+fn run_git_checked(workspace_path: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace_path)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if stderr.is_empty() {
+            format!("git {:?} failed", args)
+        } else {
+            stderr
+        };
+        return Err(anyhow!(message));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn is_git_repo(workspace_path: &str) -> Result<bool> {
     let is_repo = run_git(workspace_path, &["rev-parse", "--is-inside-work-tree"])?;
-    if is_repo.trim() != "true" {
+    Ok(is_repo.trim() == "true")
+}
+
+pub fn get_git_info(workspace_path: &str) -> Result<Option<GitInfo>> {
+    if !is_git_repo(workspace_path)? {
         return Ok(None);
     }
 
@@ -60,6 +83,104 @@ pub fn get_git_diff_summary(workspace_path: &str) -> Result<GitDiffSummary> {
 
 pub fn capture_patch_diff(workspace_path: &str) -> Result<String> {
     run_git(workspace_path, &["diff"])
+}
+
+pub fn list_branches(workspace_path: &str) -> Result<Vec<GitBranchEntry>> {
+    if !is_git_repo(workspace_path)? {
+        return Ok(Vec::new());
+    }
+
+    let current_branch = run_git(workspace_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let refs = run_git(
+        workspace_path,
+        &[
+            "for-each-ref",
+            "refs/heads/",
+            "--format=%(refname:short)\t%(committerdate:unix)",
+            "--sort=-committerdate",
+        ],
+    )?;
+
+    let mut branches = Vec::new();
+    for line in refs.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, '\t');
+        let name = parts.next().unwrap_or_default().trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let last_commit_unix = parts
+            .next()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        branches.push(GitBranchEntry {
+            is_current: name == current_branch,
+            name,
+            last_commit_unix,
+        });
+    }
+
+    Ok(branches)
+}
+
+pub fn workspace_status(workspace_path: &str) -> Result<GitWorkspaceStatus> {
+    if !is_git_repo(workspace_path)? {
+        return Ok(GitWorkspaceStatus {
+            is_dirty: false,
+            uncommitted_files: 0,
+            insertions: 0,
+            deletions: 0,
+        });
+    }
+
+    let status = run_git(workspace_path, &["status", "--porcelain"])?;
+    let uncommitted_files = status.lines().filter(|line| !line.trim().is_empty()).count() as u32;
+
+    let numstat = run_git(workspace_path, &["diff", "--numstat"])?;
+    let mut insertions = 0u32;
+    let mut deletions = 0u32;
+
+    for line in numstat.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(ins) = fields.next() else {
+            continue;
+        };
+        let Some(del) = fields.next() else {
+            continue;
+        };
+        if let Ok(value) = ins.parse::<u32>() {
+            insertions = insertions.saturating_add(value);
+        }
+        if let Ok(value) = del.parse::<u32>() {
+            deletions = deletions.saturating_add(value);
+        }
+    }
+
+    Ok(GitWorkspaceStatus {
+        is_dirty: uncommitted_files > 0,
+        uncommitted_files,
+        insertions,
+        deletions,
+    })
+}
+
+pub fn checkout_branch(workspace_path: &str, branch_name: &str) -> Result<()> {
+    let normalized = branch_name.trim();
+    if normalized.is_empty() {
+        return Err(anyhow!("Branch name cannot be empty"));
+    }
+    run_git_checked(workspace_path, &["checkout", normalized]).map(|_| ())
+}
+
+pub fn create_and_checkout_branch(workspace_path: &str, branch_name: &str) -> Result<()> {
+    let normalized = branch_name.trim();
+    if normalized.is_empty() {
+        return Err(anyhow!("Branch name cannot be empty"));
+    }
+    run_git_checked(workspace_path, &["checkout", "-b", normalized]).map(|_| ())
 }
 
 fn parse_ahead_behind(input: &str) -> (u32, u32) {

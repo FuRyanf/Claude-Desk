@@ -98,6 +98,23 @@ pub struct GitDiffSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GitBranchEntry {
+    pub name: String,
+    pub is_current: bool,
+    pub last_commit_unix: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitWorkspaceStatus {
+    pub is_dirty: bool,
+    pub uncommitted_files: u32,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillInfo {
     pub id: String,
     pub name: String,

@@ -3,8 +3,10 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   ContextPack,
   ContextPreview,
+  GitBranchEntry,
   GitDiffSummary,
   GitInfo,
+  GitWorkspaceStatus,
   RunClaudeRequest,
   RunClaudeResponse,
   RunExitEvent,
@@ -34,6 +36,14 @@ export const api = {
     invoke<GitInfo | null>('get_git_info', { workspacePath }),
   getGitDiffSummary: (workspacePath: string) =>
     invoke<GitDiffSummary>('get_git_diff_summary', { workspacePath }),
+  gitListBranches: (workspacePath: string) =>
+    invoke<GitBranchEntry[]>('git_list_branches', { workspacePath }),
+  gitWorkspaceStatus: (workspacePath: string) =>
+    invoke<GitWorkspaceStatus>('git_workspace_status', { workspacePath }),
+  gitCheckoutBranch: (workspacePath: string, branchName: string) =>
+    invoke<boolean>('git_checkout_branch', { workspacePath, branchName }),
+  gitCreateAndCheckoutBranch: (workspacePath: string, branchName: string) =>
+    invoke<boolean>('git_create_and_checkout_branch', { workspacePath, branchName }),
   listThreads: (workspaceId: string) =>
     invoke<ThreadMetadata[]>('list_threads', { workspaceId }),
   createThread: (workspaceId: string, agentId?: string) =>

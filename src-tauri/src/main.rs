@@ -11,8 +11,8 @@ use std::sync::Arc;
 use tauri::{Manager, State};
 
 use crate::models::{
-    ContextPreview, GitDiffSummary, GitInfo, RunClaudeRequest, RunClaudeResponse, Settings, SkillInfo,
-    TerminalStartResponse, ThreadMetadata, TranscriptEntry, Workspace,
+    ContextPreview, GitBranchEntry, GitDiffSummary, GitInfo, GitWorkspaceStatus, RunClaudeRequest, RunClaudeResponse,
+    Settings, SkillInfo, TerminalStartResponse, ThreadMetadata, TranscriptEntry, Workspace,
 };
 
 struct AppState {
@@ -44,6 +44,30 @@ fn get_git_info(workspace_path: String) -> Result<Option<GitInfo>, String> {
 #[tauri::command]
 fn get_git_diff_summary(workspace_path: String) -> Result<GitDiffSummary, String> {
     git_tools::get_git_diff_summary(&workspace_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn git_list_branches(workspace_path: String) -> Result<Vec<GitBranchEntry>, String> {
+    git_tools::list_branches(&workspace_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn git_workspace_status(workspace_path: String) -> Result<GitWorkspaceStatus, String> {
+    git_tools::workspace_status(&workspace_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn git_checkout_branch(workspace_path: String, branch_name: String) -> Result<bool, String> {
+    git_tools::checkout_branch(&workspace_path, &branch_name)
+        .map(|_| true)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn git_create_and_checkout_branch(workspace_path: String, branch_name: String) -> Result<bool, String> {
+    git_tools::create_and_checkout_branch(&workspace_path, &branch_name)
+        .map(|_| true)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -265,6 +289,10 @@ fn main() {
             add_workspace,
             get_git_info,
             get_git_diff_summary,
+            git_list_branches,
+            git_workspace_status,
+            git_checkout_branch,
+            git_create_and_checkout_branch,
             list_threads,
             create_thread,
             set_thread_full_access,

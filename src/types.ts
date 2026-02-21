@@ -40,6 +40,19 @@ export interface GitInfo {
   behind: number;
 }
 
+export interface GitBranchEntry {
+  name: string;
+  isCurrent: boolean;
+  lastCommitUnix: number;
+}
+
+export interface GitWorkspaceStatus {
+  isDirty: boolean;
+  uncommittedFiles: number;
+  insertions: number;
+  deletions: number;
+}
+
 export interface Settings {
   claudeCliPath?: string | null;
 }
