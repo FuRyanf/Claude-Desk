@@ -98,6 +98,15 @@ const mocks = vi.hoisted(() => {
       threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
       return updated;
     }),
+    clearThreadClaudeSession: vi.fn(async (_workspaceId: string, threadId: string) => {
+      const updated = {
+        ...threadState.find((thread) => thread.id === threadId)!,
+        claudeSessionId: null,
+        updatedAt: new Date().toISOString()
+      };
+      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
+      return updated;
+    }),
     setThreadSkills: vi.fn(async () => {
       throw new Error('not needed');
     }),
@@ -113,7 +122,20 @@ const mocks = vi.hoisted(() => {
     getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
     saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
     detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
-    terminalStartSession: vi.fn(async () => ({ sessionId: 'session-1' })),
+    terminalStartSession: vi.fn(async (params: { threadId: string }) => {
+      const thread = threadState.find((item) => item.id === params.threadId) ?? threadState[0];
+      return {
+        sessionId: 'session-1',
+        sessionMode: thread?.claudeSessionId ? 'resumed' : 'new',
+        resumeSessionId: thread?.claudeSessionId ?? null,
+        thread: {
+          ...thread,
+          claudeSessionId: thread?.claudeSessionId ?? null,
+          lastResumeAt: thread?.claudeSessionId ? new Date().toISOString() : null,
+          lastNewSessionAt: thread?.claudeSessionId ? null : new Date().toISOString()
+        }
+      };
+    }),
     terminalWrite: vi.fn(async () => true),
     terminalResize: vi.fn(async () => true),
     terminalKill: vi.fn(async () => true),
@@ -145,7 +167,8 @@ const mocks = vi.hoisted(() => {
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
-    onTerminalExit: vi.fn(async () => () => undefined)
+    onTerminalExit: vi.fn(async () => () => undefined),
+    onThreadUpdated: vi.fn(async () => () => undefined)
   };
 });
 
@@ -154,7 +177,8 @@ vi.mock('../../src/lib/api', () => ({
   onRunStream: mocks.onRunStream,
   onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
-  onTerminalExit: mocks.onTerminalExit
+  onTerminalExit: mocks.onTerminalExit,
+  onThreadUpdated: mocks.onThreadUpdated
 }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({

@@ -9,7 +9,7 @@ import { LeftRail } from './components/LeftRail';
 import { SettingsModal } from './components/SettingsModal';
 import { TerminalPanel } from './components/TerminalPanel';
 import { ToastRegion, type ToastItem } from './components/ToastRegion';
-import { api, onTerminalExit } from './lib/api';
+import { api, onTerminalExit, onThreadUpdated } from './lib/api';
 import { useRunStore } from './stores/runStore';
 import { useThreadStore } from './stores/threadStore';
 import type {
@@ -19,6 +19,7 @@ import type {
   RunStatus,
   Settings,
   TerminalExitEvent,
+  TerminalSessionMode,
   ThreadMetadata,
   Workspace
 } from './types';
@@ -82,6 +83,22 @@ function statusFromExit(event: TerminalExitEvent): RunStatus {
   return 'Idle';
 }
 
+function looksLikeResumeFailureOutput(output: string): boolean {
+  const normalized = stripAnsi(output).toLowerCase();
+  const mentionsResume =
+    normalized.includes('--resume') || normalized.includes('resume a conversation') || normalized.includes('session');
+  if (!mentionsResume) {
+    return false;
+  }
+  return (
+    normalized.includes('unknown session') ||
+    normalized.includes('invalid session') ||
+    normalized.includes('session not found') ||
+    normalized.includes('no session found') ||
+    normalized.includes('failed to resume')
+  );
+}
+
 export default function App() {
   const threadStore = useThreadStore();
   const runStore = useRunStore();
@@ -123,12 +140,30 @@ export default function App() {
   const [fullAccessConfirmOpen, setFullAccessConfirmOpen] = useState(false);
   const [pendingFullAccessValue, setPendingFullAccessValue] = useState<boolean | null>(null);
   const [savingFullAccess, setSavingFullAccess] = useState(false);
+  const [sessionModeByThread, setSessionModeByThread] = useState<Record<string, TerminalSessionMode>>({});
+  const [resumeFailureModal, setResumeFailureModal] = useState<{
+    threadId: string;
+    workspaceId: string;
+    log: string;
+    showLog: boolean;
+  } | null>(null);
 
   const selectedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const selectedThreadIdRef = useRef<string | undefined>(undefined);
   const startingSessionByThreadRef = useRef<Record<string, Promise<string>>>({});
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
+  const sessionMetaBySessionIdRef = useRef<
+    Record<
+      string,
+      {
+        threadId: string;
+        workspaceId: string;
+        mode: TerminalSessionMode;
+        startedAtMs: number;
+      }
+    >
+  >({});
 
   const selectedWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId),
@@ -266,6 +301,17 @@ export default function App() {
         const sessionId = response.sessionId;
         const startedAt = new Date().toISOString();
         runStore.bindSession(thread.id, sessionId, startedAt);
+        applyThreadUpdate(response.thread);
+        setSessionModeByThread((current) => ({
+          ...current,
+          [thread.id]: response.sessionMode
+        }));
+        sessionMetaBySessionIdRef.current[sessionId] = {
+          threadId: thread.id,
+          workspaceId: thread.workspaceId,
+          mode: response.sessionMode,
+          startedAtMs: Date.now()
+        };
 
         void api.terminalResize(sessionId, terminalSize.cols, terminalSize.rows);
         await flushPendingThreadInput(thread.id, sessionId);
@@ -292,7 +338,7 @@ export default function App() {
       startingSessionByThreadRef.current[thread.id] = startPromise;
       return startPromise;
     },
-    [flushPendingThreadInput, runStore, terminalSize.cols, terminalSize.rows, workspaces]
+    [applyThreadUpdate, flushPendingThreadInput, runStore, terminalSize.cols, terminalSize.rows, workspaces]
   );
 
   const addWorkspaceByPath = useCallback(
@@ -388,6 +434,7 @@ export default function App() {
       if (existingSessionId) {
         void api.terminalKill(existingSessionId);
         runStore.finishSession(existingSessionId);
+        delete sessionMetaBySessionIdRef.current[existingSessionId];
       }
 
       await archiveThread(workspaceId, threadId);
@@ -411,6 +458,7 @@ export default function App() {
       if (existingSessionId) {
         void api.terminalKill(existingSessionId);
         runStore.finishSession(existingSessionId);
+        delete sessionMetaBySessionIdRef.current[existingSessionId];
       }
 
       await deleteThread(workspaceId, threadId);
@@ -425,6 +473,116 @@ export default function App() {
     [deleteThread, refreshThreadsForWorkspace, runStore, setSelectedThread]
   );
 
+  const stopThreadSession = useCallback(
+    async (threadId: string) => {
+      const sessionId = runStore.sessionForThread(threadId);
+      if (!sessionId) {
+        return;
+      }
+
+      try {
+        await api.terminalSendSignal(sessionId, 'SIGINT');
+      } catch {
+        // best effort
+      }
+      await new Promise<void>((resolve) => {
+        window.setTimeout(() => resolve(), 120);
+      });
+      try {
+        await api.terminalKill(sessionId);
+      } catch {
+        // best effort
+      }
+      runStore.finishSession(sessionId);
+      runStore.stopWorking(threadId);
+      const endedAt = new Date().toISOString();
+      setThreadRunState(threadId, 'Canceled', null, endedAt);
+      delete sessionMetaBySessionIdRef.current[sessionId];
+    },
+    [runStore, setThreadRunState]
+  );
+
+  const stopSessionsExcept = useCallback(
+    async (keepThreadId?: string) => {
+      const activeRuns = Object.values(runStore.activeRunsByThread);
+      for (const run of activeRuns) {
+        if (keepThreadId && run.threadId === keepThreadId) {
+          continue;
+        }
+        await stopThreadSession(run.threadId);
+      }
+    },
+    [runStore.activeRunsByThread, stopThreadSession]
+  );
+
+  const switchToThread = useCallback(
+    async (threadId: string) => {
+      await stopSessionsExcept(threadId);
+      setSelectedThread(threadId);
+    },
+    [setSelectedThread, stopSessionsExcept]
+  );
+
+  const restartThreadSession = useCallback(
+    async (thread: ThreadMetadata) => {
+      await stopSessionsExcept();
+      if (selectedWorkspaceIdRef.current !== thread.workspaceId) {
+        setSelectedWorkspace(thread.workspaceId);
+      }
+      setSelectedThread(thread.id);
+      setResumeFailureModal(null);
+      void ensureSessionForThread(thread).catch((error) => {
+        pushToast(String(error), 'error');
+      });
+    },
+    [ensureSessionForThread, pushToast, setSelectedThread, setSelectedWorkspace, stopSessionsExcept]
+  );
+
+  const onResumeThreadSession = useCallback(
+    async (thread: ThreadMetadata) => {
+      if (!thread.claudeSessionId) {
+        pushToast('No saved Claude session id for this thread yet.', 'error');
+        return;
+      }
+      await restartThreadSession(thread);
+    },
+    [pushToast, restartThreadSession]
+  );
+
+  const onStartFreshThreadSession = useCallback(
+    async (thread: ThreadMetadata) => {
+      try {
+        const cleared = await api.clearThreadClaudeSession(thread.workspaceId, thread.id);
+        applyThreadUpdate(cleared);
+        setSessionModeByThread((current) => ({
+          ...current,
+          [thread.id]: 'new'
+        }));
+        await restartThreadSession(cleared);
+      } catch (error) {
+        pushToast(`Failed to start a fresh session: ${String(error)}`, 'error');
+      }
+    },
+    [applyThreadUpdate, pushToast, restartThreadSession]
+  );
+
+  const onCopyResumeCommand = useCallback(
+    async (thread: ThreadMetadata) => {
+      if (!thread.claudeSessionId) {
+        pushToast('No saved Claude session id for this thread yet.', 'error');
+        return;
+      }
+      const command = `claude --resume ${thread.claudeSessionId}`;
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(command);
+        pushToast('Copied resume command.', 'info');
+        return;
+      }
+      pushToast(command, 'info');
+    },
+    [pushToast]
+  );
+
   const stopSessionsForBranchSwitch = useCallback(async () => {
     const activeRuns = Object.values(runStore.activeRunsByThread);
     if (activeRuns.length === 0) {
@@ -435,16 +593,9 @@ export default function App() {
     if (!confirmed) {
       return false;
     }
-
-    await Promise.all(
-      activeRuns.map((run) => api.terminalSendSignal(run.sessionId, 'SIGINT').catch(() => false))
-    );
-    await new Promise<void>((resolve) => {
-      window.setTimeout(() => resolve(), 300);
-    });
-    await Promise.all(activeRuns.map((run) => api.terminalKill(run.sessionId).catch(() => false)));
+    await stopSessionsExcept();
     return true;
-  }, [runStore.activeRunsByThread]);
+  }, [runStore.activeRunsByThread, stopSessionsExcept]);
 
   const onLoadBranchSwitcher = useCallback(async (): Promise<{
     branches: GitBranchEntry[];
@@ -634,6 +785,9 @@ export default function App() {
 
     const setup = async () => {
       unlistenExit = await onTerminalExit((event: TerminalExitEvent) => {
+        const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
+        delete sessionMetaBySessionIdRef.current[event.sessionId];
+
         const endedThreadId = runStore.finishSession(event.sessionId);
         if (!endedThreadId) {
           return;
@@ -642,9 +796,11 @@ export default function App() {
         const endedAt = new Date().toISOString();
         setThreadRunState(endedThreadId, statusFromExit(event), null, endedAt);
 
-        const workspaceId = Object.values(threadsByWorkspace)
-          .flat()
-          .find((thread) => thread.id === endedThreadId)?.workspaceId;
+        const workspaceId =
+          sessionMeta?.workspaceId ??
+          Object.values(threadsByWorkspace)
+            .flat()
+            .find((thread) => thread.id === endedThreadId)?.workspaceId;
         if (workspaceId) {
           void refreshThreadsForWorkspace(workspaceId);
         }
@@ -656,6 +812,25 @@ export default function App() {
               ...current,
               [endedThreadId]: snapshot
             }));
+
+            if (sessionMeta?.mode !== 'resumed') {
+              return;
+            }
+
+            const elapsedMs = Date.now() - sessionMeta.startedAtMs;
+            const failedCode = typeof event.code === 'number' && event.code !== 0 && event.code !== 130;
+            const likelyResumeFailure =
+              looksLikeResumeFailureOutput(snapshot) || (failedCode && elapsedMs < 15_000);
+            if (!likelyResumeFailure || !workspaceId) {
+              return;
+            }
+
+            setResumeFailureModal({
+              threadId: endedThreadId,
+              workspaceId,
+              log: snapshot,
+              showLog: false
+            });
           })
           .catch(() => undefined);
       });
@@ -666,6 +841,21 @@ export default function App() {
       unlistenExit?.();
     };
   }, [refreshThreadsForWorkspace, runStore, setThreadRunState, threadsByWorkspace]);
+
+  useEffect(() => {
+    let unlistenThreadUpdate: (() => void) | null = null;
+
+    const setup = async () => {
+      unlistenThreadUpdate = await onThreadUpdated((thread) => {
+        applyThreadUpdate(thread);
+      });
+    };
+
+    void setup();
+    return () => {
+      unlistenThreadUpdate?.();
+    };
+  }, [applyThreadUpdate]);
 
   useEffect(() => {
     if (activeRunCount === 0) {
@@ -753,6 +943,9 @@ export default function App() {
       ? selectedThread.lastRunStatus
       : 'Idle';
   const statusLabel = runStore.isThreadWorking(selectedThreadId) ? 'Running' : normalizedStatus;
+  const selectedSessionMode = selectedThreadId ? sessionModeByThread[selectedThreadId] : undefined;
+  const sessionModeLabel =
+    selectedSessionMode === 'resumed' ? 'Resumed' : selectedSessionMode === 'new' ? 'New session' : undefined;
 
   return (
     <div className="app-shell">
@@ -767,6 +960,7 @@ export default function App() {
           Object.entries(runStore.workingByThread).map(([threadId, run]) => [threadId, { startedAt: run.startedAt }])
         )}
         onSelectWorkspace={(workspaceId) => {
+          void stopSessionsExcept();
           setSelectedWorkspace(workspaceId);
           setSelectedThread(undefined);
           setThreadSearch('');
@@ -778,10 +972,13 @@ export default function App() {
         }}
         onNewThread={() => void onNewThread()}
         onThreadSearchChange={setThreadSearch}
-        onSelectThread={setSelectedThread}
+        onSelectThread={(threadId) => void switchToThread(threadId)}
         onRenameThread={onRenameThread}
         onArchiveThread={onArchiveThread}
         onDeleteThread={onDeleteThread}
+        onResumeThreadSession={onResumeThreadSession}
+        onStartFreshThreadSession={onStartFreshThreadSession}
+        onCopyResumeCommand={onCopyResumeCommand}
         getSearchTextForThread={(threadId) => lastTerminalLogByThread[threadId] ?? ''}
       />
 
@@ -791,6 +988,7 @@ export default function App() {
           gitInfo={gitInfo}
           statusLabel={statusLabel}
           runningForLabel={runningForLabel}
+          sessionModeLabel={sessionModeLabel}
           fullAccess={selectedThread?.fullAccess ?? false}
           fullAccessDisabled={!selectedThread || savingFullAccess}
           onToggleFullAccess={onToggleFullAccess}
@@ -888,6 +1086,60 @@ export default function App() {
         onPickDirectory={() => void openWorkspacePicker()}
         onConfirm={(path) => void confirmManualWorkspace(path)}
       />
+
+      {resumeFailureModal ? (
+        <div className="modal-backdrop">
+          <section className="modal">
+            <h3>Failed to resume session. Start fresh?</h3>
+            <p>Claude could not resume this thread&apos;s saved session id.</p>
+            {resumeFailureModal.showLog ? <pre>{resumeFailureModal.log || '(No logs captured)'}</pre> : null}
+            <footer className="modal-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => {
+                  setResumeFailureModal(null);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => {
+                  setResumeFailureModal((current) =>
+                    current
+                      ? {
+                          ...current,
+                          showLog: !current.showLog
+                        }
+                      : null
+                  );
+                }}
+              >
+                View logs
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                onClick={() => {
+                  const thread = (threadsByWorkspace[resumeFailureModal.workspaceId] ?? []).find(
+                    (item) => item.id === resumeFailureModal.threadId
+                  );
+                  if (thread) {
+                    void onStartFreshThreadSession(thread);
+                  } else {
+                    pushToast('Unable to locate thread metadata for fresh restart.', 'error');
+                  }
+                  setResumeFailureModal(null);
+                }}
+              >
+                Start fresh
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
 
       {fullAccessConfirmOpen ? (
         <div className="modal-backdrop">

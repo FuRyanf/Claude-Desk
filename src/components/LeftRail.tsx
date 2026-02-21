@@ -22,6 +22,9 @@ interface LeftRailProps {
   onRenameThread: (workspaceId: string, threadId: string, title: string) => Promise<void>;
   onArchiveThread: (workspaceId: string, threadId: string) => Promise<void>;
   onDeleteThread: (workspaceId: string, threadId: string) => Promise<void>;
+  onResumeThreadSession: (thread: ThreadMetadata) => Promise<void>;
+  onStartFreshThreadSession: (thread: ThreadMetadata) => Promise<void>;
+  onCopyResumeCommand: (thread: ThreadMetadata) => Promise<void>;
   getSearchTextForThread?: (threadId: string) => string;
 }
 
@@ -93,6 +96,9 @@ export function LeftRail({
   onRenameThread,
   onArchiveThread,
   onDeleteThread,
+  onResumeThreadSession,
+  onStartFreshThreadSession,
+  onCopyResumeCommand,
   getSearchTextForThread
 }: LeftRailProps) {
   const [editingThreadId, setEditingThreadId] = React.useState<string | null>(null);
@@ -100,6 +106,7 @@ export function LeftRail({
   const [editingOriginal, setEditingOriginal] = React.useState('');
   const [contextMenu, setContextMenu] = React.useState<ThreadContextMenuState | null>(null);
   const [deleteTarget, setDeleteTarget] = React.useState<ThreadMetadata | null>(null);
+  const contextMenuRef = React.useRef<HTMLDivElement | null>(null);
 
   const query = threadSearch.trim().toLowerCase();
 
@@ -108,7 +115,12 @@ export function LeftRail({
       return;
     }
 
-    const closeMenu = () => setContextMenu(null);
+    const closeMenu = (event: Event) => {
+      if (contextMenuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setContextMenu(null);
+    };
     const onEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setContextMenu(null);
@@ -298,7 +310,37 @@ export function LeftRail({
       </div>
 
       {contextMenu ? (
-        <div className="thread-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
+        <div className="thread-context-menu" ref={contextMenuRef} style={{ left: contextMenu.x, top: contextMenu.y }}>
+          <button
+            type="button"
+            disabled={!contextMenu.thread.claudeSessionId}
+            onClick={async () => {
+              await onResumeThreadSession(contextMenu.thread);
+              setContextMenu(null);
+            }}
+          >
+            Resume session
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              await onStartFreshThreadSession(contextMenu.thread);
+              setContextMenu(null);
+            }}
+          >
+            Start fresh session
+          </button>
+          <button
+            type="button"
+            disabled={!contextMenu.thread.claudeSessionId}
+            onClick={async () => {
+              await onCopyResumeCommand(contextMenu.thread);
+              setContextMenu(null);
+            }}
+          >
+            Copy resume command
+          </button>
+          <div className="thread-context-divider" />
           <button
             type="button"
             onClick={() => {

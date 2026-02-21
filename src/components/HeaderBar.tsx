@@ -10,6 +10,7 @@ interface BranchSwitcherSnapshot {
 interface HeaderBarProps {
   workspace?: Workspace;
   gitInfo: GitInfo | null;
+  sessionModeLabel?: string;
   statusLabel: string;
   runningForLabel?: string;
   fullAccess: boolean;
@@ -26,6 +27,7 @@ interface HeaderBarProps {
 export function HeaderBar({
   workspace,
   gitInfo,
+  sessionModeLabel,
   statusLabel,
   runningForLabel,
   fullAccess,
@@ -302,6 +304,13 @@ export function HeaderBar({
         >
           Full Access {fullAccess ? 'ON' : 'OFF'}
         </button>
+
+        {sessionModeLabel ? (
+          <span className={sessionModeLabel === 'Resumed' ? 'session-mode-pill resumed' : 'session-mode-pill'}>
+            <span className="session-mode-dot" />
+            {sessionModeLabel}
+          </span>
+        ) : null}
 
         <span className={runningForLabel ? 'status running' : 'status'}>
           {runningForLabel ? `Running for ${runningForLabel}` : statusLabel}

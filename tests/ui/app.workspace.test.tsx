@@ -36,6 +36,9 @@ const mocks = vi.hoisted(() => {
     setThreadFullAccess: vi.fn(async () => {
       throw new Error('not needed');
     }),
+    clearThreadClaudeSession: vi.fn(async () => {
+      throw new Error('not needed');
+    }),
     setThreadSkills: vi.fn(async () => {
       throw new Error('not needed');
     }),
@@ -51,7 +54,28 @@ const mocks = vi.hoisted(() => {
     getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
     saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
     detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
-    terminalStartSession: vi.fn(async () => ({ sessionId: 'session-1' })),
+    terminalStartSession: vi.fn(async () => ({
+      sessionId: 'session-1',
+      sessionMode: 'new',
+      resumeSessionId: null,
+      thread: {
+        id: 'thread-1',
+        workspaceId: 'ws-added',
+        agentId: 'claude-code',
+        fullAccess: false,
+        enabledSkills: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        title: 'New thread',
+        isArchived: false,
+        lastRunStatus: 'Idle',
+        lastRunStartedAt: null,
+        lastRunEndedAt: null,
+        claudeSessionId: null,
+        lastResumeAt: null,
+        lastNewSessionAt: null
+      }
+    })),
     terminalWrite: vi.fn(async () => true),
     terminalResize: vi.fn(async () => true),
     terminalKill: vi.fn(async () => true),
@@ -82,7 +106,8 @@ const mocks = vi.hoisted(() => {
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
-    onTerminalExit: vi.fn(async () => () => undefined)
+    onTerminalExit: vi.fn(async () => () => undefined),
+    onThreadUpdated: vi.fn(async () => () => undefined)
   };
 });
 
@@ -91,7 +116,8 @@ vi.mock('../../src/lib/api', () => ({
   onRunStream: mocks.onRunStream,
   onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
-  onTerminalExit: mocks.onTerminalExit
+  onTerminalExit: mocks.onTerminalExit,
+  onThreadUpdated: mocks.onThreadUpdated
 }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
