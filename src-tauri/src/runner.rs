@@ -28,8 +28,10 @@ const STREAM_EVENT: &str = "claude://run-stream";
 const EXIT_EVENT: &str = "claude://run-exit";
 const TERMINAL_DATA_EVENT: &str = "terminal:data";
 const TERMINAL_EXIT_EVENT: &str = "terminal:exit";
+const THREAD_UPDATED_EVENT: &str = "thread:updated";
 const TERMINAL_EVENT_FLUSH_INTERVAL_MS: u64 = 12;
 const TERMINAL_EVENT_BUFFER_SIZE: usize = 16 * 1024;
+const SESSION_ID_PARSE_BUFFER_MAX: usize = 24 * 1024;
 
 fn shell_escape_arg(value: &str) -> String {
     if value.is_empty() {
@@ -45,12 +47,120 @@ fn resolve_login_shell() -> String {
         .unwrap_or_else(|| "/bin/zsh".to_string())
 }
 
-fn build_claude_shell_command(cli_path: &str, full_access_flag: bool) -> String {
+fn build_claude_shell_command(
+    cli_path: &str,
+    resume_session_id: Option<&str>,
+    full_access_flag: bool,
+) -> String {
     let mut parts = vec![shell_escape_arg(cli_path)];
+    if let Some(session_id) = resume_session_id {
+        parts.push("--resume".to_string());
+        parts.push(shell_escape_arg(session_id));
+    }
     if full_access_flag {
         parts.push("--dangerously-skip-permissions".to_string());
     }
     parts.join(" ")
+}
+
+fn is_uuid_like(value: &str) -> bool {
+    if value.len() != 36 {
+        return false;
+    }
+
+    for (index, ch) in value.chars().enumerate() {
+        let hyphen_index = matches!(index, 8 | 13 | 18 | 23);
+        if hyphen_index {
+            if ch != '-' {
+                return false;
+            }
+            continue;
+        }
+
+        if !ch.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn strip_ansi_sequences(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            output.push(ch);
+            continue;
+        }
+
+        let Some(next) = chars.peek().copied() else {
+            break;
+        };
+
+        if next == '[' {
+            let _ = chars.next();
+            for ctrl in chars.by_ref() {
+                if ('@'..='~').contains(&ctrl) {
+                    break;
+                }
+            }
+        } else {
+            let _ = chars.next();
+        }
+    }
+
+    output
+}
+
+fn extract_claude_resume_session_id(text: &str) -> Option<String> {
+    for marker in ["claude --resume ", "--resume "] {
+        let mut offset = 0usize;
+        while let Some(index) = text[offset..].find(marker) {
+            let start = offset + index + marker.len();
+            let candidate: String = text[start..]
+                .chars()
+                .take_while(|ch| ch.is_ascii_hexdigit() || *ch == '-')
+                .collect();
+            if is_uuid_like(&candidate) {
+                return Some(candidate.to_lowercase());
+            }
+            offset = start;
+        }
+    }
+
+    None
+}
+
+fn extract_resume_session_id_from_chunk(parse_buffer: &mut String, chunk: &str) -> Option<String> {
+    let clean = strip_ansi_sequences(chunk);
+    if clean.is_empty() {
+        return None;
+    }
+
+    parse_buffer.push_str(&clean);
+    if parse_buffer.len() > SESSION_ID_PARSE_BUFFER_MAX {
+        let drain_len = parse_buffer.len() - (SESSION_ID_PARSE_BUFFER_MAX / 2);
+        parse_buffer.drain(..drain_len);
+    }
+
+    extract_claude_resume_session_id(parse_buffer)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalSessionMode {
+    Resumed,
+    New,
+}
+
+impl TerminalSessionMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Resumed => "resumed",
+            Self::New => "new",
+        }
+    }
 }
 
 pub type TerminalSessionId = String;
@@ -60,6 +170,8 @@ struct TerminalSession {
     workspace_id: String,
     workspace_path: String,
     thread_id: String,
+    session_mode: TerminalSessionMode,
+    resume_session_id: Option<String>,
     started_at: chrono::DateTime<Utc>,
     command: Vec<String>,
     output_log_path: PathBuf,
@@ -376,10 +488,31 @@ pub async fn terminal_start_session(
         .ok_or_else(|| anyhow!("Workspace not registered. Add workspace before starting terminal."))?;
 
     let mut thread = storage::read_thread_metadata(&workspace_id, &thread_id)?;
+    let started_at = Utc::now();
     if thread.full_access != full_access_flag {
         thread.full_access = full_access_flag;
-        storage::write_thread_metadata(&thread)?;
     }
+    if thread
+        .claude_session_id
+        .as_deref()
+        .is_some_and(|session_id| !is_uuid_like(session_id))
+    {
+        thread.claude_session_id = None;
+    }
+
+    let resume_session_id = thread
+        .claude_session_id
+        .clone()
+        .filter(|session_id| is_uuid_like(session_id));
+    let session_mode = if resume_session_id.is_some() {
+        thread.last_resume_at = Some(started_at);
+        TerminalSessionMode::Resumed
+    } else {
+        thread.last_new_session_at = Some(started_at);
+        TerminalSessionMode::New
+    };
+    thread.updated_at = started_at;
+    storage::write_thread_metadata(&thread)?;
 
     let settings = storage::load_settings()?;
     let cli_path = detect_claude_cli_path(&settings)
@@ -390,9 +523,8 @@ pub async fn terminal_start_session(
     let run_dir = storage::runs_dir(&workspace_id, &thread_id)?.join(&session_id);
     fs::create_dir_all(&run_dir)?;
 
-    let started_at = Utc::now();
     let shell_path = resolve_login_shell();
-    let shell_command = build_claude_shell_command(&cli_path, full_access_flag);
+    let shell_command = build_claude_shell_command(&cli_path, resume_session_id.as_deref(), full_access_flag);
     let command_manifest = vec![shell_path.clone(), "-lic".to_string(), shell_command.clone()];
     storage::write_json_file(
         &run_dir.join("input_manifest.json"),
@@ -402,6 +534,9 @@ pub async fn terminal_start_session(
             "workspacePath": workspace_path,
             "workspaceId": workspace_id,
             "fullAccess": full_access_flag,
+            "sessionMode": session_mode.as_str(),
+            "resumeSessionId": resume_session_id.clone(),
+            "claudeSessionId": thread.claude_session_id.clone(),
             "cwd": cwd,
             "envVars": env_vars,
             "command": command_manifest,
@@ -450,6 +585,8 @@ pub async fn terminal_start_session(
         workspace_id: workspace_id.clone(),
         workspace_path: workspace_path.clone(),
         thread_id: thread_id.clone(),
+        session_mode,
+        resume_session_id: resume_session_id.clone(),
         started_at,
         command: command_manifest.clone(),
         output_log_path,
@@ -460,12 +597,16 @@ pub async fn terminal_start_session(
     state.terminal_sessions.insert(session.clone())?;
 
     let data_session_id = session_id.clone();
+    let data_workspace_id = workspace_id.clone();
+    let data_thread_id = thread_id.clone();
     let data_output_log = output_log.clone();
     let data_app = app.clone();
+    let mut should_capture_session_id = thread.claude_session_id.is_none();
     std::thread::spawn(move || {
         let mut buffer = [0u8; 4096];
         let mut utf8_carry = Vec::<u8>::new();
         let mut event_buffer = String::new();
+        let mut session_id_parse_buffer = String::new();
         let mut last_emit = Instant::now();
         loop {
             let read = match reader.read(&mut buffer) {
@@ -479,6 +620,21 @@ pub async fn terminal_start_session(
             }
 
             if let Some(chunk) = decode_utf8_chunk(&buffer[..read], &mut utf8_carry) {
+                if should_capture_session_id {
+                    if let Some(captured_session_id) =
+                        extract_resume_session_id_from_chunk(&mut session_id_parse_buffer, &chunk)
+                    {
+                        if let Ok(Some(updated_thread)) = storage::set_thread_claude_session_id_if_missing(
+                            &data_workspace_id,
+                            &data_thread_id,
+                            &captured_session_id,
+                        ) {
+                            should_capture_session_id = false;
+                            let _ = data_app.emit(THREAD_UPDATED_EVENT, updated_thread);
+                        }
+                    }
+                }
+
                 event_buffer.push_str(&chunk);
                 if event_buffer.len() >= TERMINAL_EVENT_BUFFER_SIZE
                     || last_emit.elapsed() >= Duration::from_millis(TERMINAL_EVENT_FLUSH_INTERVAL_MS)
@@ -497,7 +653,21 @@ pub async fn terminal_start_session(
         }
 
         if !utf8_carry.is_empty() {
-            event_buffer.push_str(&String::from_utf8_lossy(&utf8_carry));
+            let trailing = String::from_utf8_lossy(&utf8_carry).to_string();
+            if should_capture_session_id {
+                if let Some(captured_session_id) =
+                    extract_resume_session_id_from_chunk(&mut session_id_parse_buffer, &trailing)
+                {
+                    if let Ok(Some(updated_thread)) = storage::set_thread_claude_session_id_if_missing(
+                        &data_workspace_id,
+                        &data_thread_id,
+                        &captured_session_id,
+                    ) {
+                        let _ = data_app.emit(THREAD_UPDATED_EVENT, updated_thread);
+                    }
+                }
+            }
+            event_buffer.push_str(&trailing);
         }
 
         if !event_buffer.is_empty() {
@@ -543,6 +713,8 @@ pub async fn terminal_start_session(
                 "sessionId": wait_session_id,
                 "threadId": wait_session.thread_id,
                 "workspaceId": wait_session.workspace_id,
+                "sessionMode": wait_session.session_mode.as_str(),
+                "resumeSessionId": wait_session.resume_session_id,
                 "command": wait_session.command,
                 "durationMs": duration_ms,
                 "exitCode": code,
@@ -584,7 +756,12 @@ pub async fn terminal_start_session(
         );
     });
 
-    Ok(TerminalStartResponse { session_id })
+    Ok(TerminalStartResponse {
+        session_id,
+        session_mode: session_mode.as_str().to_string(),
+        resume_session_id,
+        thread,
+    })
 }
 
 pub fn terminal_write(state: Arc<RunnerState>, session_id: String, data: String) -> Result<bool> {
@@ -973,4 +1150,53 @@ pub async fn generate_commit_message(workspace_path: String, full_access: bool) 
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_resume_session_id_from_chunked_terminal_output() {
+        let mut parse_buffer = String::new();
+        let chunks = [
+            "Welcome to Claude Code\n",
+            "Resume this session with: claude --resume 123e4567-e89b-12d3-a456-426614174000\n",
+            "Done.\n",
+        ];
+
+        let mut detected = None;
+        for chunk in chunks {
+            let maybe_id = extract_resume_session_id_from_chunk(&mut parse_buffer, chunk);
+            if maybe_id.is_some() {
+                detected = maybe_id;
+            }
+        }
+
+        assert_eq!(
+            detected.as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174000")
+        );
+    }
+
+    #[test]
+    fn extracts_resume_session_id_when_ansi_codes_are_present() {
+        let mut parse_buffer = String::new();
+        let chunk = "\u{1b}[31mResume this session with:\u{1b}[0m claude --resume ABCDEFAB-CDEF-ABCD-EFAB-ABCDEFABCDEF";
+        let detected = extract_resume_session_id_from_chunk(&mut parse_buffer, chunk);
+        assert_eq!(
+            detected.as_deref(),
+            Some("abcdefab-cdef-abcd-efab-abcdefabcdef")
+        );
+    }
+
+    #[test]
+    fn ignores_non_uuid_resume_values() {
+        let mut parse_buffer = String::new();
+        let detected = extract_resume_session_id_from_chunk(
+            &mut parse_buffer,
+            "Resume this session with: claude --resume not-a-uuid",
+        );
+        assert!(detected.is_none());
+    }
 }

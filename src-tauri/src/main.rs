@@ -86,6 +86,11 @@ fn set_thread_full_access(workspace_id: String, thread_id: String, full_access: 
 }
 
 #[tauri::command]
+fn clear_thread_claude_session(workspace_id: String, thread_id: String) -> Result<ThreadMetadata, String> {
+    storage::clear_thread_claude_session(&workspace_id, &thread_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn set_thread_skills(
     workspace_id: String,
     thread_id: String,
@@ -296,6 +301,7 @@ fn main() {
             list_threads,
             create_thread,
             set_thread_full_access,
+            clear_thread_claude_session,
             set_thread_skills,
             set_thread_agent,
             rename_thread,

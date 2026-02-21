@@ -1,5 +1,6 @@
 export type RunStatus = 'Idle' | 'Running' | 'Succeeded' | 'Failed' | 'Canceled';
 export type ContextPack = 'Minimal' | 'Git Diff' | 'Debug';
+export type TerminalSessionMode = 'resumed' | 'new';
 
 export interface Workspace {
   id: string;
@@ -22,6 +23,9 @@ export interface ThreadMetadata {
   agentId: string;
   fullAccess: boolean;
   enabledSkills: string[];
+  claudeSessionId?: string | null;
+  lastResumeAt?: string | null;
+  lastNewSessionAt?: string | null;
 }
 
 export interface TranscriptEntry {
@@ -91,6 +95,9 @@ export interface RunClaudeResponse {
 
 export interface TerminalStartResponse {
   sessionId: string;
+  sessionMode: TerminalSessionMode;
+  resumeSessionId?: string | null;
+  thread: ThreadMetadata;
 }
 
 export interface TerminalDataEvent {

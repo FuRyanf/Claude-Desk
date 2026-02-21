@@ -25,7 +25,8 @@ export const events = {
   runStream: 'claude://run-stream',
   runExit: 'claude://run-exit',
   terminalData: 'terminal:data',
-  terminalExit: 'terminal:exit'
+  terminalExit: 'terminal:exit',
+  threadUpdated: 'thread:updated'
 } as const;
 
 export const api = {
@@ -56,6 +57,8 @@ export const api = {
     invoke<boolean>('delete_thread', { workspaceId, threadId }),
   setThreadFullAccess: (workspaceId: string, threadId: string, fullAccess: boolean) =>
     invoke<ThreadMetadata>('set_thread_full_access', { workspaceId, threadId, fullAccess }),
+  clearThreadClaudeSession: (workspaceId: string, threadId: string) =>
+    invoke<ThreadMetadata>('clear_thread_claude_session', { workspaceId, threadId }),
   setThreadSkills: (workspaceId: string, threadId: string, enabledSkills: string[]) =>
     invoke<ThreadMetadata>('set_thread_skills', { workspaceId, threadId, enabledSkills }),
   setThreadAgent: (workspaceId: string, threadId: string, agentId: string) =>
@@ -126,5 +129,12 @@ export const onTerminalExit = async (
   handler: (event: TerminalExitEvent) => void
 ): Promise<UnlistenFn> =>
   listen<TerminalExitEvent>(events.terminalExit, (event) => {
+    handler(event.payload);
+  });
+
+export const onThreadUpdated = async (
+  handler: (event: ThreadMetadata) => void
+): Promise<UnlistenFn> =>
+  listen<ThreadMetadata>(events.threadUpdated, (event) => {
     handler(event.payload);
   });

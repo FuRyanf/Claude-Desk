@@ -53,6 +53,12 @@ pub struct ThreadMetadata {
     pub last_run_started_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_run_ended_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
+    #[serde(default)]
+    pub last_resume_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_new_session_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +165,9 @@ pub struct RunClaudeResponse {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalStartResponse {
     pub session_id: String,
+    pub session_mode: String,
+    pub resume_session_id: Option<String>,
+    pub thread: ThreadMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

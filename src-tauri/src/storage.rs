@@ -126,6 +126,9 @@ pub fn create_thread(workspace_id: &str, agent_id: Option<String>) -> Result<Thr
         last_run_status: ThreadRunStatus::Idle,
         last_run_started_at: None,
         last_run_ended_at: None,
+        claude_session_id: None,
+        last_resume_at: None,
+        last_new_session_at: None,
     };
 
     write_thread_metadata(&thread)?;
@@ -195,6 +198,35 @@ pub fn set_thread_full_access(workspace_id: &str, thread_id: &str, full_access: 
     thread.updated_at = Utc::now();
     write_thread_metadata(&thread)?;
     Ok(thread)
+}
+
+pub fn clear_thread_claude_session(workspace_id: &str, thread_id: &str) -> Result<ThreadMetadata> {
+    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
+    thread.claude_session_id = None;
+    thread.updated_at = Utc::now();
+    write_thread_metadata(&thread)?;
+    Ok(thread)
+}
+
+pub fn set_thread_claude_session_id_if_missing(
+    workspace_id: &str,
+    thread_id: &str,
+    claude_session_id: &str,
+) -> Result<Option<ThreadMetadata>> {
+    let normalized = claude_session_id.trim();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+
+    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
+    if thread.claude_session_id.is_some() {
+        return Ok(None);
+    }
+
+    thread.claude_session_id = Some(normalized.to_string());
+    thread.updated_at = Utc::now();
+    write_thread_metadata(&thread)?;
+    Ok(Some(thread))
 }
 
 pub fn set_thread_skills(
@@ -424,6 +456,52 @@ mod tests {
 
         let reloaded = read_thread_metadata(&workspace.id, &thread.id).expect("thread should reload");
         assert!(reloaded.full_access);
+
+        std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn claude_session_id_persists_per_thread() {
+        let _guard = test_lock().lock().expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!("claude-desk-session-test-{}", Uuid::new_v4()));
+        let workspace_path = temp_root.join("workspace");
+        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
+
+        std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
+
+        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref()).expect("workspace should be added");
+        let thread = create_thread(&workspace.id, Some("claude-code".to_string())).expect("thread should be created");
+
+        let captured = set_thread_claude_session_id_if_missing(
+            &workspace.id,
+            &thread.id,
+            "123e4567-e89b-12d3-a456-426614174000",
+        )
+        .expect("session id should persist")
+        .expect("thread should update");
+        assert_eq!(
+            captured.claude_session_id.as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174000")
+        );
+
+        let duplicate = set_thread_claude_session_id_if_missing(
+            &workspace.id,
+            &thread.id,
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        )
+        .expect("duplicate capture should not error");
+        assert!(duplicate.is_none(), "capture should not overwrite existing session id");
+
+        let reloaded = read_thread_metadata(&workspace.id, &thread.id).expect("thread should reload");
+        assert_eq!(
+            reloaded.claude_session_id.as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174000")
+        );
+
+        let cleared = clear_thread_claude_session(&workspace.id, &thread.id).expect("clear should succeed");
+        assert!(cleared.claude_session_id.is_none());
 
         std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
