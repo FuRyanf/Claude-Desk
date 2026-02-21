@@ -221,7 +221,7 @@ export function HeaderBar({
             title={gitInfo ? `Current branch: ${gitInfo.branch}` : 'Workspace is not a git repository'}
           >
             <span className="branch-trigger-label">{gitInfo?.branch ?? 'No git repo'}</span>
-            <span className="branch-trigger-chevron">⌄</span>
+            <span className="branch-trigger-chevron">v</span>
           </button>
 
           {branchPopoverOpen ? (
@@ -245,7 +245,7 @@ export function HeaderBar({
 
               <div className="branch-list">
                 {isLoadingBranches ? (
-                  <p className="branch-empty">Loading…</p>
+                  <p className="branch-empty">Loading...</p>
                 ) : filteredBranches.length === 0 ? (
                   <p className="branch-empty">No branches found.</p>
                 ) : (
@@ -261,7 +261,7 @@ export function HeaderBar({
                         disabled={isSwitchingBranch}
                       >
                         <div className="branch-row-top">
-                          <span className="branch-icon">⑂</span>
+                          <span className="branch-icon">git</span>
                           <span className="branch-name">{branch.name}</span>
                           {branch.isCurrent ? <span className="branch-check">✓</span> : null}
                         </div>
@@ -285,8 +285,8 @@ export function HeaderBar({
                   onClick={() => void runCreateAndCheckout()}
                   disabled={isSwitchingBranch}
                 >
-                  <span className="branch-plus">＋</span>
-                  <span>Create and checkout new branch…</span>
+                  <span className="branch-plus">+</span>
+                  <span>Create and checkout new branch...</span>
                 </button>
               </div>
             </section>
