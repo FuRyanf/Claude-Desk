@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::git_tools;
 use crate::models::{
     ContextFilePreview, ContextPreview, RunClaudeRequest, RunClaudeResponse, RunExitEvent, RunMetadata, Settings,
-    StreamEvent, TerminalDataEvent, TerminalExitEvent, TerminalStartResponse, TranscriptEntry,
+    StreamEvent, TerminalDataEvent, TerminalExitEvent, TerminalStartResponse, ThreadRunStatus, TranscriptEntry,
 };
 use crate::skills;
 use crate::storage;
@@ -354,6 +354,13 @@ pub async fn terminal_start_session(
         thread.full_access = full_access_flag;
         storage::write_thread_metadata(&thread)?;
     }
+    let _ = storage::set_thread_run_state(
+        &workspace_id,
+        &thread_id,
+        ThreadRunStatus::Running,
+        Some(Utc::now()),
+        None,
+    );
 
     let settings = storage::load_settings()?;
     let cli_path = detect_claude_cli_path(&settings)
@@ -509,8 +516,25 @@ pub async fn terminal_start_session(
                 "signal": signal,
                 "startedAt": wait_session.started_at,
                 "endedAt": ended_at,
+                "rawOutputLogPath": wait_session.output_log_path,
+                "userInputsLogPath": serde_json::Value::Null,
                 "outputLogPath": wait_session.output_log_path,
             }),
+        );
+
+        let status = if signal.is_some() || code == Some(130) {
+            ThreadRunStatus::Canceled
+        } else if code == Some(0) {
+            ThreadRunStatus::Succeeded
+        } else {
+            ThreadRunStatus::Failed
+        };
+        let _ = storage::set_thread_run_state(
+            &wait_session.workspace_id,
+            &wait_session.thread_id,
+            status,
+            None,
+            Some(ended_at),
         );
 
         if let Ok(diff) = git_tools::capture_patch_diff(&wait_session.workspace_path) {

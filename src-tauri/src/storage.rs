@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::models::{Settings, ThreadMetadata, TranscriptEntry, Workspace};
+use crate::models::{Settings, ThreadMetadata, ThreadRunStatus, TranscriptEntry, Workspace};
 
 const APP_SUPPORT_SUBDIR: &str = "Library/Application Support/ClaudeDesk";
 
@@ -122,6 +122,10 @@ pub fn create_thread(workspace_id: &str, agent_id: Option<String>) -> Result<Thr
         created_at: now,
         updated_at: now,
         title: "New thread".to_string(),
+        is_archived: false,
+        last_run_status: ThreadRunStatus::Idle,
+        last_run_started_at: None,
+        last_run_ended_at: None,
     };
 
     write_thread_metadata(&thread)?;
@@ -171,6 +175,9 @@ pub fn list_threads(workspace_id: &str) -> Result<Vec<ThreadMetadata>> {
         }
         let raw = fs::read_to_string(metadata_path)?;
         let metadata: ThreadMetadata = serde_json::from_str(&raw)?;
+        if metadata.is_archived {
+            continue;
+        }
         threads.push(metadata);
     }
 
@@ -206,6 +213,38 @@ pub fn set_thread_agent(workspace_id: &str, thread_id: &str, agent_id: String) -
     Ok(thread)
 }
 
+pub fn rename_thread(workspace_id: &str, thread_id: &str, title: String) -> Result<ThreadMetadata> {
+    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("Thread title cannot be empty"));
+    }
+    thread.title = trimmed.chars().take(50).collect();
+    thread.updated_at = Utc::now();
+    write_thread_metadata(&thread)?;
+    Ok(thread)
+}
+
+pub fn set_thread_run_state(
+    workspace_id: &str,
+    thread_id: &str,
+    status: ThreadRunStatus,
+    started_at: Option<chrono::DateTime<Utc>>,
+    ended_at: Option<chrono::DateTime<Utc>>,
+) -> Result<ThreadMetadata> {
+    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
+    thread.last_run_status = status;
+    if started_at.is_some() {
+        thread.last_run_started_at = started_at;
+    }
+    if ended_at.is_some() {
+        thread.last_run_ended_at = ended_at;
+    }
+    thread.updated_at = Utc::now();
+    write_thread_metadata(&thread)?;
+    Ok(thread)
+}
+
 fn transcript_path(workspace_id: &str, thread_id: &str) -> Result<PathBuf> {
     Ok(thread_dir(workspace_id, thread_id)?.join("transcript.jsonl"))
 }
@@ -227,7 +266,7 @@ pub fn append_transcript_entry(workspace_id: &str, thread_id: &str, entry: &Tran
     if entry.role == "user" {
         let first_line = entry.content.lines().next().unwrap_or("New thread").trim();
         if thread.title == "New thread" && !first_line.is_empty() {
-            thread.title = first_line.chars().take(48).collect();
+            thread.title = first_line.chars().take(50).collect();
         }
     }
     write_thread_metadata(&thread)?;

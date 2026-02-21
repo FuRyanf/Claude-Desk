@@ -13,15 +13,46 @@ pub struct Workspace {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum ThreadRunStatus {
+    Idle,
+    Running,
+    Succeeded,
+    Failed,
+    Canceled,
+}
+
+impl Default for ThreadRunStatus {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+fn default_agent_id() -> String {
+    "claude-code".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThreadMetadata {
     pub id: String,
     pub workspace_id: String,
+    #[serde(default = "default_agent_id")]
     pub agent_id: String,
+    #[serde(default)]
     pub full_access: bool,
+    #[serde(default)]
     pub enabled_skills: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub title: String,
+    #[serde(default)]
+    pub is_archived: bool,
+    #[serde(default)]
+    pub last_run_status: ThreadRunStatus,
+    #[serde(default)]
+    pub last_run_started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_run_ended_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

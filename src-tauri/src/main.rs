@@ -76,6 +76,11 @@ fn set_thread_agent(workspace_id: String, thread_id: String, agent_id: String) -
 }
 
 #[tauri::command]
+fn rename_thread(workspace_id: String, thread_id: String, title: String) -> Result<ThreadMetadata, String> {
+    storage::rename_thread(&workspace_id, &thread_id, title).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn append_user_message(workspace_id: String, thread_id: String, content: String) -> Result<TranscriptEntry, String> {
     storage::append_user_message(&workspace_id, &thread_id, &content).map_err(|error| error.to_string())
 }
@@ -231,6 +236,7 @@ fn main() {
             set_thread_full_access,
             set_thread_skills,
             set_thread_agent,
+            rename_thread,
             append_user_message,
             load_transcript,
             list_skills,
