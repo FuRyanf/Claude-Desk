@@ -12,9 +12,19 @@ import { ToastRegion, type ToastItem } from './components/ToastRegion';
 import { api, onTerminalExit } from './lib/api';
 import { useRunStore } from './stores/runStore';
 import { useThreadStore } from './stores/threadStore';
-import type { GitInfo, RunStatus, Settings, TerminalExitEvent, ThreadMetadata, Workspace } from './types';
+import type {
+  GitBranchEntry,
+  GitInfo,
+  GitWorkspaceStatus,
+  RunStatus,
+  Settings,
+  TerminalExitEvent,
+  ThreadMetadata,
+  Workspace
+} from './types';
 
 const SELECTED_WORKSPACE_KEY = 'claude-desk:selected-workspace';
+const FULL_ACCESS_CONFIRM_KEY = 'claude-desk:full-access-confirmed';
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
 function threadSelectionKey(workspaceId: string) {
@@ -87,7 +97,8 @@ export default function App() {
     deleteThread,
     setSelectedWorkspace,
     setSelectedThread,
-    setThreadRunState
+    setThreadRunState,
+    applyThreadUpdate
   } = threadStore;
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -109,6 +120,9 @@ export default function App() {
 
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [nowMs, setNowMs] = useState(Date.now());
+  const [fullAccessConfirmOpen, setFullAccessConfirmOpen] = useState(false);
+  const [pendingFullAccessValue, setPendingFullAccessValue] = useState<boolean | null>(null);
+  const [savingFullAccess, setSavingFullAccess] = useState(false);
 
   const selectedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const selectedThreadIdRef = useRef<string | undefined>(undefined);
@@ -411,6 +425,125 @@ export default function App() {
     [deleteThread, refreshThreadsForWorkspace, runStore, setSelectedThread]
   );
 
+  const stopSessionsForBranchSwitch = useCallback(async () => {
+    const activeRuns = Object.values(runStore.activeRunsByThread);
+    if (activeRuns.length === 0) {
+      return true;
+    }
+
+    const confirmed = window.confirm('Switching branches may affect the running session. Continue?');
+    if (!confirmed) {
+      return false;
+    }
+
+    await Promise.all(
+      activeRuns.map((run) => api.terminalSendSignal(run.sessionId, 'SIGINT').catch(() => false))
+    );
+    await new Promise<void>((resolve) => {
+      window.setTimeout(() => resolve(), 300);
+    });
+    await Promise.all(activeRuns.map((run) => api.terminalKill(run.sessionId).catch(() => false)));
+    return true;
+  }, [runStore.activeRunsByThread]);
+
+  const onLoadBranchSwitcher = useCallback(async (): Promise<{
+    branches: GitBranchEntry[];
+    status: GitWorkspaceStatus | null;
+  }> => {
+    if (!selectedWorkspace || !gitInfo) {
+      return { branches: [], status: null };
+    }
+    const [branches, status] = await Promise.all([
+      api.gitListBranches(selectedWorkspace.path),
+      api.gitWorkspaceStatus(selectedWorkspace.path)
+    ]);
+    return { branches, status };
+  }, [gitInfo, selectedWorkspace]);
+
+  const onCheckoutBranch = useCallback(
+    async (branchName: string) => {
+      if (!selectedWorkspace) {
+        return false;
+      }
+
+      const shouldContinue = await stopSessionsForBranchSwitch();
+      if (!shouldContinue) {
+        return false;
+      }
+
+      try {
+        await api.gitCheckoutBranch(selectedWorkspace.path, branchName);
+        await refreshGitInfo();
+        return true;
+      } catch (error) {
+        pushToast(`Branch checkout failed: ${String(error)}`, 'error');
+        throw error;
+      }
+    },
+    [pushToast, refreshGitInfo, selectedWorkspace, stopSessionsForBranchSwitch]
+  );
+
+  const onCreateAndCheckoutBranch = useCallback(
+    async (branchName: string) => {
+      if (!selectedWorkspace) {
+        return false;
+      }
+
+      const shouldContinue = await stopSessionsForBranchSwitch();
+      if (!shouldContinue) {
+        return false;
+      }
+
+      try {
+        await api.gitCreateAndCheckoutBranch(selectedWorkspace.path, branchName);
+        await refreshGitInfo();
+        return true;
+      } catch (error) {
+        pushToast(`Create branch failed: ${String(error)}`, 'error');
+        throw error;
+      }
+    },
+    [pushToast, refreshGitInfo, selectedWorkspace, stopSessionsForBranchSwitch]
+  );
+
+  const applyFullAccessSetting = useCallback(
+    async (enabled: boolean) => {
+      if (!selectedThread) {
+        return;
+      }
+      setSavingFullAccess(true);
+      try {
+        const updated = await api.setThreadFullAccess(selectedThread.workspaceId, selectedThread.id, enabled);
+        applyThreadUpdate(updated);
+      } catch (error) {
+        pushToast(`Failed to update Full Access: ${String(error)}`, 'error');
+      } finally {
+        setSavingFullAccess(false);
+      }
+    },
+    [applyThreadUpdate, pushToast, selectedThread]
+  );
+
+  const onToggleFullAccess = useCallback(
+    async (nextValue: boolean) => {
+      if (!selectedThread) {
+        return;
+      }
+
+      if (nextValue) {
+        const alreadyConfirmed = window.localStorage.getItem(FULL_ACCESS_CONFIRM_KEY) === 'true';
+        if (!alreadyConfirmed) {
+          setPendingFullAccessValue(true);
+          setFullAccessConfirmOpen(true);
+          return;
+        }
+      }
+
+      await applyFullAccessSetting(nextValue);
+    },
+    [applyFullAccessSetting, selectedThread]
+  );
+
   useEffect(() => {
     const init = async () => {
       try {
@@ -658,6 +791,12 @@ export default function App() {
           gitInfo={gitInfo}
           statusLabel={statusLabel}
           runningForLabel={runningForLabel}
+          fullAccess={selectedThread?.fullAccess ?? false}
+          fullAccessDisabled={!selectedThread || savingFullAccess}
+          onToggleFullAccess={onToggleFullAccess}
+          onLoadBranchSwitcher={onLoadBranchSwitcher}
+          onCheckoutBranch={onCheckoutBranch}
+          onCreateAndCheckoutBranch={onCreateAndCheckoutBranch}
           onOpenWorkspace={() => {
             if (selectedWorkspace) {
               void api.openInFinder(selectedWorkspace.path);
@@ -749,6 +888,40 @@ export default function App() {
         onPickDirectory={() => void openWorkspacePicker()}
         onConfirm={(path) => void confirmManualWorkspace(path)}
       />
+
+      {fullAccessConfirmOpen ? (
+        <div className="modal-backdrop">
+          <section className="modal">
+            <h3>Enable Full Access?</h3>
+            <p>Full Access disables permission prompts. Continue?</p>
+            <footer className="modal-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => {
+                  setFullAccessConfirmOpen(false);
+                  setPendingFullAccessValue(null);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                onClick={() => {
+                  const nextValue = pendingFullAccessValue ?? true;
+                  window.localStorage.setItem(FULL_ACCESS_CONFIRM_KEY, 'true');
+                  setFullAccessConfirmOpen(false);
+                  setPendingFullAccessValue(null);
+                  void applyFullAccessSetting(nextValue);
+                }}
+              >
+                Enable Full Access
+              </button>
+            </footer>
+          </section>
+        </div>
+      ) : null}
 
       <ToastRegion toasts={toasts} />
     </div>
