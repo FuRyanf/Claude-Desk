@@ -1,0 +1,111 @@
+import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import type {
+  ContextPack,
+  ContextPreview,
+  GitDiffSummary,
+  GitInfo,
+  RunClaudeRequest,
+  RunClaudeResponse,
+  RunExitEvent,
+  RunStreamEvent,
+  Settings,
+  SkillInfo,
+  TerminalDataEvent,
+  TerminalExitEvent,
+  TerminalStartResponse,
+  ThreadMetadata,
+  TranscriptEntry,
+  Workspace
+} from '../types';
+
+export const events = {
+  runStream: 'claude://run-stream',
+  runExit: 'claude://run-exit',
+  terminalData: 'terminal:data',
+  terminalExit: 'terminal:exit'
+} as const;
+
+export const api = {
+  getAppStorageRoot: () => invoke<string>('get_app_storage_root'),
+  listWorkspaces: () => invoke<Workspace[]>('list_workspaces'),
+  addWorkspace: (path: string) => invoke<Workspace>('add_workspace', { path }),
+  getGitInfo: (workspacePath: string) =>
+    invoke<GitInfo | null>('get_git_info', { workspacePath }),
+  getGitDiffSummary: (workspacePath: string) =>
+    invoke<GitDiffSummary>('get_git_diff_summary', { workspacePath }),
+  listThreads: (workspaceId: string) =>
+    invoke<ThreadMetadata[]>('list_threads', { workspaceId }),
+  createThread: (workspaceId: string, agentId?: string) =>
+    invoke<ThreadMetadata>('create_thread', { workspaceId, agentId }),
+  setThreadFullAccess: (workspaceId: string, threadId: string, fullAccess: boolean) =>
+    invoke<ThreadMetadata>('set_thread_full_access', { workspaceId, threadId, fullAccess }),
+  setThreadSkills: (workspaceId: string, threadId: string, enabledSkills: string[]) =>
+    invoke<ThreadMetadata>('set_thread_skills', { workspaceId, threadId, enabledSkills }),
+  setThreadAgent: (workspaceId: string, threadId: string, agentId: string) =>
+    invoke<ThreadMetadata>('set_thread_agent', { workspaceId, threadId, agentId }),
+  appendUserMessage: (workspaceId: string, threadId: string, content: string) =>
+    invoke<TranscriptEntry>('append_user_message', { workspaceId, threadId, content }),
+  loadTranscript: (workspaceId: string, threadId: string) =>
+    invoke<TranscriptEntry[]>('load_transcript', { workspaceId, threadId }),
+  listSkills: (workspacePath: string) => invoke<SkillInfo[]>('list_skills', { workspacePath }),
+  buildContextPreview: (workspacePath: string, contextPack: ContextPack) =>
+    invoke<ContextPreview>('build_context_preview', { workspacePath, contextPack }),
+  getSettings: () => invoke<Settings>('get_settings'),
+  saveSettings: (settings: Settings) => invoke<Settings>('save_settings', { settings }),
+  detectClaudeCliPath: () => invoke<string | null>('detect_claude_cli_path'),
+  runClaude: (request: RunClaudeRequest) =>
+    invoke<RunClaudeResponse>('run_claude', { request }),
+  cancelRun: (runId: string) => invoke<boolean>('cancel_run', { runId }),
+  terminalStartSession: (params: {
+    workspacePath: string;
+    initialCwd?: string | null;
+    envVars?: Record<string, string> | null;
+    fullAccessFlag: boolean;
+    threadId: string;
+  }) =>
+    invoke<TerminalStartResponse>('terminal_start_session', params),
+  terminalWrite: (sessionId: string, data: string) =>
+    invoke<boolean>('terminal_write', { sessionId, data }),
+  terminalResize: (sessionId: string, cols: number, rows: number) =>
+    invoke<boolean>('terminal_resize', { sessionId, cols, rows }),
+  terminalKill: (sessionId: string) =>
+    invoke<boolean>('terminal_kill', { sessionId }),
+  terminalSendSignal: (sessionId: string, signal: string) =>
+    invoke<boolean>('terminal_send_signal', { sessionId, signal }),
+  terminalGetLastLog: (workspaceId: string, threadId: string) =>
+    invoke<string>('terminal_get_last_log', { workspaceId, threadId }),
+  terminalReadOutput: (sessionId: string) =>
+    invoke<string>('terminal_read_output', { sessionId }),
+  generateCommitMessage: (workspacePath: string, fullAccess: boolean) =>
+    invoke<string>('generate_commit_message', { workspacePath, fullAccess }),
+  openInFinder: (path: string) => invoke<void>('open_in_finder', { path })
+};
+
+export const onRunStream = async (
+  handler: (event: RunStreamEvent) => void
+): Promise<UnlistenFn> =>
+  listen<RunStreamEvent>(events.runStream, (event) => {
+    handler(event.payload);
+  });
+
+export const onRunExit = async (
+  handler: (event: RunExitEvent) => void
+): Promise<UnlistenFn> =>
+  listen<RunExitEvent>(events.runExit, (event) => {
+    handler(event.payload);
+  });
+
+export const onTerminalData = async (
+  handler: (event: TerminalDataEvent) => void
+): Promise<UnlistenFn> =>
+  listen<TerminalDataEvent>(events.terminalData, (event) => {
+    handler(event.payload);
+  });
+
+export const onTerminalExit = async (
+  handler: (event: TerminalExitEvent) => void
+): Promise<UnlistenFn> =>
+  listen<TerminalExitEvent>(events.terminalExit, (event) => {
+    handler(event.payload);
+  });

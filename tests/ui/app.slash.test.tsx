@@ -1,0 +1,180 @@
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => {
+  const workspace = {
+    id: 'ws-1',
+    name: 'Workspace',
+    path: '/tmp/workspace',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const baseThread = {
+    id: 'thread-1',
+    workspaceId: 'ws-1',
+    agentId: 'claude-code',
+    fullAccess: false,
+    enabledSkills: [] as string[],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    title: 'First thread'
+  };
+
+  const skill = {
+    id: 'refactor-skill',
+    name: 'Refactor Skill',
+    description: 'Helps refactor code',
+    entryPoints: ['/skill refactor'],
+    path: '/tmp/workspace/skills/refactor-skill'
+  };
+
+  let threadState = [{ ...baseThread }];
+
+  const api = {
+    getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
+    listWorkspaces: vi.fn(async () => [workspace]),
+    addWorkspace: vi.fn(async () => workspace),
+    getGitInfo: vi.fn(async () => ({
+      branch: 'main',
+      shortHash: 'abc123',
+      isDirty: false,
+      ahead: 0,
+      behind: 0
+    })),
+    getGitDiffSummary: vi.fn(async () => ({ stat: '', diffExcerpt: '' })),
+    listThreads: vi.fn(async () => threadState),
+    createThread: vi.fn(async () => {
+      const next = {
+        ...baseThread,
+        id: `thread-${threadState.length + 1}`,
+        title: 'New thread',
+        updatedAt: new Date().toISOString()
+      };
+      threadState = [next, ...threadState];
+      return next;
+    }),
+    setThreadFullAccess: vi.fn(async (_workspaceId: string, threadId: string, fullAccess: boolean) => {
+      const updated = {
+        ...threadState.find((thread) => thread.id === threadId)!,
+        fullAccess,
+        updatedAt: new Date().toISOString()
+      };
+      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
+      return updated;
+    }),
+    setThreadSkills: vi.fn(async (_workspaceId: string, threadId: string, enabledSkills: string[]) => {
+      const updated = {
+        ...threadState.find((thread) => thread.id === threadId)!,
+        enabledSkills,
+        updatedAt: new Date().toISOString()
+      };
+      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
+      return updated;
+    }),
+    setThreadAgent: vi.fn(async (_workspaceId: string, threadId: string, agentId: string) => {
+      const updated = {
+        ...threadState.find((thread) => thread.id === threadId)!,
+        agentId,
+        updatedAt: new Date().toISOString()
+      };
+      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
+      return updated;
+    }),
+    appendUserMessage: vi.fn(async (_workspaceId: string, _threadId: string, content: string) => ({
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content,
+      createdAt: new Date().toISOString(),
+      runId: null
+    })),
+    loadTranscript: vi.fn(async () => []),
+    listSkills: vi.fn(async () => [skill]),
+    buildContextPreview: vi.fn(async () => ({ files: [], totalSize: 0, contextText: '' })),
+    getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
+    saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
+    detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
+    terminalStartSession: vi.fn(async () => ({ sessionId: 'session-1' })),
+    terminalWrite: vi.fn(async () => true),
+    terminalResize: vi.fn(async () => true),
+    terminalKill: vi.fn(async () => true),
+    terminalSendSignal: vi.fn(async () => true),
+    terminalGetLastLog: vi.fn(async () => ''),
+    terminalReadOutput: vi.fn(async () => ''),
+    runClaude: vi.fn(async () => ({ runId: 'run-1' })),
+    cancelRun: vi.fn(async () => true),
+    generateCommitMessage: vi.fn(async () => 'chore: update'),
+    openInFinder: vi.fn(async () => undefined)
+  };
+
+  const reset = () => {
+    threadState = [{ ...baseThread }];
+    Object.values(api).forEach((fn) => {
+      if (typeof fn === 'function' && 'mockClear' in fn) {
+        (fn as { mockClear: () => void }).mockClear();
+      }
+    });
+  };
+
+  return {
+    api,
+    reset,
+    openDialog: vi.fn(async () => null),
+    onRunStream: vi.fn(async () => () => undefined),
+    onRunExit: vi.fn(async () => () => undefined),
+    onTerminalData: vi.fn(async () => () => undefined),
+    onTerminalExit: vi.fn(async () => () => undefined)
+  };
+});
+
+vi.mock('../../src/lib/api', () => ({
+  api: mocks.api,
+  onRunStream: mocks.onRunStream,
+  onRunExit: mocks.onRunExit,
+  onTerminalData: mocks.onTerminalData,
+  onTerminalExit: mocks.onTerminalExit
+}));
+
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: mocks.openDialog
+}));
+
+import App from '../../src/App';
+
+describe('App slash palette and layout', () => {
+  beforeEach(() => {
+    mocks.reset();
+  });
+
+  it('uses terminal-only interaction surface for active threads', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByText('Read-only terminal log')).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('Ask Claude Desk')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Resume' }));
+    expect(mocks.api.terminalStartSession).toHaveBeenCalled();
+  });
+
+  it('keeps Codex-like core layout constraints', async () => {
+    render(<App />);
+
+    const header = await screen.findByTestId('header');
+    const sidebar = screen.getByTestId('sidebar');
+    const mainPanel = screen.getByTestId('main-panel');
+    const composer = screen.queryByTestId('composer');
+
+    expect(getComputedStyle(header).height).toBe('44px');
+    expect(getComputedStyle(sidebar).width).toBe('280px');
+
+    expect(getComputedStyle(mainPanel).display).toBe('grid');
+    expect(getComputedStyle(mainPanel).gridTemplateRows).toContain('44px');
+    expect(composer).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByText('Read-only terminal log')).toBeInTheDocument();
+    });
+  });
+});
