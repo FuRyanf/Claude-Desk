@@ -12,3 +12,5 @@
 10. Repository may not have a Git history available in this environment; "small commits" intent is treated as small incremental code changes that keep builds passing.
 11. Interactive terminal mode should mirror native `claude` behavior, so composer input is written directly into PTY without additional prompt wrapping.
 12. UI layer may focus on one active PTY session at a time while backend supports multiple concurrent sessions.
+13. Opening/selecting a thread should auto-start a fresh PTY session so users can type immediately without a separate Resume step.
+14. Codex-like simplification means left-rail threads/workspaces and header run status are prioritized; non-essential skill/context controls stay out of main flow.

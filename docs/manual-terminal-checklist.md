@@ -2,11 +2,11 @@
 
 1. Start session
 - Open a workspace and thread.
-- Click `Resume`.
-- Confirm terminal panel is interactive and status changes to `Running`.
+- Click `New thread` (or open an existing thread).
+- Confirm terminal panel is interactive automatically and header status changes to `Running`.
 
 2. Type a prompt
-- Click inside terminal and type a follow-up prompt directly.
+- Type in the bottom composer and press `Enter` (or type directly in terminal).
 - Confirm interactive Claude output appears (not just final one-shot text).
 
 3. Interrupt with `Cmd+C`
@@ -21,8 +21,6 @@
 - Paste multiple lines into terminal input.
 - Confirm text arrives in Claude session and executes correctly.
 
-6. Toggle Full Access and confirm flag
-- Toggle `Full Access ON` in header for the thread.
-- Start/resume a new session.
-- Confirm `--dangerously-skip-permissions` appears in that session run manifest:
-  - `~/Library/Application Support/ClaudeDesk/threads/<workspaceId>/<threadId>/runs/<sessionId>/input_manifest.json`
+6. Open native Terminal in workspace
+- Click `Terminal` in the header.
+- Confirm macOS Terminal opens in the selected workspace path.
