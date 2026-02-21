@@ -19,7 +19,11 @@ const mocks = vi.hoisted(() => {
     enabledSkills: [] as string[],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    title: 'First thread'
+    title: 'First thread',
+    isArchived: false,
+    lastRunStatus: 'Idle' as const,
+    lastRunStartedAt: null,
+    lastRunEndedAt: null
   };
 
   const skill = {
@@ -105,7 +109,8 @@ const mocks = vi.hoisted(() => {
     runClaude: vi.fn(async () => ({ runId: 'run-1' })),
     cancelRun: vi.fn(async () => true),
     generateCommitMessage: vi.fn(async () => 'chore: update'),
-    openInFinder: vi.fn(async () => undefined)
+    openInFinder: vi.fn(async () => undefined),
+    openInTerminal: vi.fn(async () => undefined)
   };
 
   const reset = () => {
@@ -142,20 +147,22 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 
 import App from '../../src/App';
 
-describe('App slash palette and layout', () => {
+describe('App terminal-first layout', () => {
   beforeEach(() => {
     mocks.reset();
   });
 
-  it('uses terminal-only interaction surface for active threads', async () => {
+  it('auto-starts interactive terminal when a new thread is created', async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    expect(await screen.findByText('Read-only terminal log')).toBeInTheDocument();
-    expect(screen.queryByPlaceholderText('Ask Claude Desk')).not.toBeInTheDocument();
+    expect(await screen.findByText('Create a thread to start typing.')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Type and press Enter')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Resume' }));
-    expect(mocks.api.terminalStartSession).toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'New thread' }));
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalled();
+    });
   });
 
   it('keeps Codex-like core layout constraints', async () => {
@@ -171,10 +178,8 @@ describe('App slash palette and layout', () => {
 
     expect(getComputedStyle(mainPanel).display).toBe('grid');
     expect(getComputedStyle(mainPanel).gridTemplateRows).toContain('44px');
-    expect(composer).not.toBeInTheDocument();
+    expect(composer).toBeInTheDocument();
 
-    await waitFor(() => {
-      expect(screen.getByText('Read-only terminal log')).toBeInTheDocument();
-    });
+    expect(document.querySelector('.terminal-panel')).toBeTruthy();
   });
 });

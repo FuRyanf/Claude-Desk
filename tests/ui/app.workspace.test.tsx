@@ -54,7 +54,8 @@ const mocks = vi.hoisted(() => {
     runClaude: vi.fn(async () => ({ runId: 'run-1' })),
     cancelRun: vi.fn(async () => true),
     generateCommitMessage: vi.fn(async () => 'chore: update'),
-    openInFinder: vi.fn(async () => undefined)
+    openInFinder: vi.fn(async () => undefined),
+    openInTerminal: vi.fn(async () => undefined)
   };
 
   const reset = () => {
@@ -117,6 +118,6 @@ describe('Workspace add flow', () => {
     await user.click(screen.getByRole('button', { name: 'Add Workspace' }));
 
     expect(mocks.api.addWorkspace).toHaveBeenCalledWith('/tmp/workspace-added');
-    expect(await screen.findByRole('option', { name: 'workspace-added' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /workspace-added/i })).toBeInTheDocument();
   });
 });

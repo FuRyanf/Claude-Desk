@@ -137,7 +137,7 @@ async function captureScreenshots() {
     await page.goto('http://127.0.0.1:4173', { waitUntil: 'networkidle' });
     await page.screenshot({ path: path.join(e2eDir, 'landing.png'), fullPage: true });
 
-    const input = page.getByPlaceholder('Ask Claude Desk');
+    const input = page.getByPlaceholder('Type and press Enter');
     if (await input.count()) {
       await input.click();
       await input.type('/');
@@ -155,7 +155,7 @@ function summarizeRootCause(stepId) {
   if (stepId.includes('ui-tests')) {
     return [
       '- UI behavior regressed against expected interactions.',
-      '- Check `/Users/rfu/Claude Desk/src/App.tsx`, `/Users/rfu/Claude Desk/src/components/Composer.tsx`, and `/Users/rfu/Claude Desk/src/components/LeftRail.tsx`.'
+      '- Check `/Users/rfu/Claude Desk/src/App.tsx`, `/Users/rfu/Claude Desk/src/components/SimpleComposer.tsx`, and `/Users/rfu/Claude Desk/src/components/LeftRail.tsx`.'
     ];
   }
   if (stepId.includes('rust-tests')) {
