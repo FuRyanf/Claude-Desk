@@ -4,56 +4,21 @@ import { open } from '@tauri-apps/plugin-dialog';
 
 import './styles.css';
 import { AddWorkspaceModal } from './components/AddWorkspaceModal';
-import { CommandPalette, type CommandPaletteItem } from './components/CommandPalette';
-import { CommitModal } from './components/CommitModal';
-import { Composer, type SlashPaletteItem } from './components/Composer';
-import { FullAccessWarningModal } from './components/FullAccessWarningModal';
 import { HeaderBar } from './components/HeaderBar';
-import { LandingView } from './components/LandingView';
 import { LeftRail } from './components/LeftRail';
 import { SettingsModal } from './components/SettingsModal';
+import { SimpleComposer } from './components/SimpleComposer';
 import { TerminalPanel } from './components/TerminalPanel';
 import { ToastRegion, type ToastItem } from './components/ToastRegion';
 import { api, onTerminalExit } from './lib/api';
-import type {
-  ContextPack,
-  GitDiffSummary,
-  GitInfo,
-  Settings,
-  SkillInfo,
-  TerminalExitEvent,
-  ThreadMetadata,
-  TranscriptEntry,
-  Workspace
-} from './types';
+import { useRunStore } from './stores/runStore';
+import { useThreadStore } from './stores/threadStore';
+import type { GitInfo, RunStatus, Settings, TerminalExitEvent, ThreadMetadata, Workspace } from './types';
 
-const FULL_ACCESS_WARNING_KEY = 'claude-desk-full-access-warning-seen';
+const SELECTED_WORKSPACE_KEY = 'claude-desk:selected-workspace';
 
-function sortThreads(threads: ThreadMetadata[]): ThreadMetadata[] {
-  return [...threads].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
-}
-
-function upsertThread(map: Record<string, ThreadMetadata[]>, thread: ThreadMetadata) {
-  const existing = map[thread.workspaceId] ?? [];
-  const filtered = existing.filter((item) => item.id !== thread.id);
-  return {
-    ...map,
-    [thread.workspaceId]: sortThreads([thread, ...filtered])
-  };
-}
-
-function resolveContextPack(value: string): ContextPack | null {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'minimal') {
-    return 'Minimal';
-  }
-  if (normalized === 'git diff' || normalized === 'git-diff' || normalized === 'git_diff' || normalized === 'git') {
-    return 'Git Diff';
-  }
-  if (normalized === 'debug') {
-    return 'Debug';
-  }
-  return null;
+function threadSelectionKey(workspaceId: string) {
+  return `claude-desk:selected-thread:${workspaceId}`;
 }
 
 function todayId() {
@@ -64,49 +29,62 @@ function normalizeComposerInput(input: string): string {
   return input.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n+$/g, '');
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
+function formatDurationShort(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+
+  if (hours > 0) {
+    return `${hours}h ${minutes % 60}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds % 60}s`;
+  }
+  return `${seconds}s`;
 }
 
-interface TerminalStartResult {
-  sessionId: string;
-  startedNew: boolean;
+function statusFromExit(event: TerminalExitEvent): RunStatus {
+  if (event.signal || event.code === 130) {
+    return 'Canceled';
+  }
+  if (event.code === 0) {
+    return 'Succeeded';
+  }
+  if (typeof event.code === 'number') {
+    return 'Failed';
+  }
+  return 'Idle';
 }
 
 export default function App() {
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [threadsByWorkspace, setThreadsByWorkspace] = useState<Record<string, ThreadMetadata[]>>({});
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | undefined>();
-  const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
-  const [threadSearch, setThreadSearch] = useState('');
+  const threadStore = useThreadStore();
+  const runStore = useRunStore();
 
-  const [skillsByWorkspace, setSkillsByWorkspace] = useState<Record<string, SkillInfo[]>>({});
+  const {
+    threadsByWorkspace,
+    selectedWorkspaceId,
+    selectedThreadId,
+    listThreads,
+    createThread,
+    renameThread,
+    setSelectedWorkspace,
+    setSelectedThread,
+    setThreadRunState
+  } = threadStore;
+
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [threadSearch, setThreadSearch] = useState('');
   const [gitInfo, setGitInfo] = useState<GitInfo | null>(null);
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
-  const [composerText, setComposerText] = useState('');
-  const [contextPack, setContextPack] = useState<ContextPack>('Minimal');
-  const [status, setStatus] = useState<'Idle' | 'Running'>('Idle');
-  const [activeRunId, setActiveRunId] = useState<string | null>(null);
-  const [threadSessions, setThreadSessions] = useState<Record<string, string>>({});
-  const [sessionLive, setSessionLive] = useState<Record<string, boolean>>({});
   const [terminalFocused, setTerminalFocused] = useState(false);
   const [terminalSize, setTerminalSize] = useState({ cols: 120, rows: 32 });
   const [lastTerminalLogByThread, setLastTerminalLogByThread] = useState<Record<string, string>>({});
-
-  const [commitOpen, setCommitOpen] = useState(false);
-  const [commitSummary, setCommitSummary] = useState<GitDiffSummary | null>(null);
-  const [generatedCommitMessage, setGeneratedCommitMessage] = useState('');
-  const [loadingCommitMessage, setLoadingCommitMessage] = useState(false);
+  const [composerText, setComposerText] = useState('');
+  const [sendingComposer, setSendingComposer] = useState(false);
 
   const [settings, setSettings] = useState<Settings>({ claudeCliPath: null });
   const [detectedCliPath, setDetectedCliPath] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [blockingError, setBlockingError] = useState<string | null>(null);
-
-  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [fullAccessWarningOpen, setFullAccessWarningOpen] = useState(false);
 
   const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
   const [addWorkspacePath, setAddWorkspacePath] = useState('');
@@ -114,15 +92,12 @@ export default function App() {
   const [addingWorkspace, setAddingWorkspace] = useState(false);
 
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [nowMs, setNowMs] = useState(Date.now());
 
-  const sessionThreadMapRef = useRef<Record<string, string>>({});
-  const threadSessionsRef = useRef<Record<string, string>>({});
-  const sessionLiveRef = useRef<Record<string, boolean>>({});
-  const activeRunIdRef = useRef<string | null>(null);
-  const selectedThreadIdRef = useRef<string | undefined>(undefined);
   const selectedWorkspaceIdRef = useRef<string | undefined>(undefined);
-  const refreshThreadsForWorkspaceRef = useRef<((workspaceId: string) => Promise<void>) | null>(null);
-  const refreshTranscriptRef = useRef<(() => Promise<void>) | null>(null);
+  const selectedThreadIdRef = useRef<string | undefined>(undefined);
+  const startingSessionByThreadRef = useRef<Record<string, Promise<string>>>({});
+  const pendingInputByThreadRef = useRef<Record<string, string>>({});
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
 
   const selectedWorkspace = useMemo(
@@ -134,16 +109,8 @@ export default function App() {
     if (!selectedWorkspaceId) {
       return [];
     }
-    return sortThreads(threadsByWorkspace[selectedWorkspaceId] ?? []);
+    return threadsByWorkspace[selectedWorkspaceId] ?? [];
   }, [selectedWorkspaceId, threadsByWorkspace]);
-
-  const filteredThreads = useMemo(() => {
-    const query = threadSearch.trim().toLowerCase();
-    if (!query) {
-      return selectedThreads;
-    }
-    return selectedThreads.filter((thread) => thread.title.toLowerCase().includes(query));
-  }, [selectedThreads, threadSearch]);
 
   const selectedThread = useMemo(() => {
     if (!selectedThreadId) {
@@ -152,126 +119,73 @@ export default function App() {
     return selectedThreads.find((thread) => thread.id === selectedThreadId);
   }, [selectedThreadId, selectedThreads]);
 
-  const skills = useMemo(() => {
-    if (!selectedWorkspace) {
-      return [];
-    }
-    return skillsByWorkspace[selectedWorkspace.path] ?? [];
-  }, [selectedWorkspace, skillsByWorkspace]);
-
-  const enabledSkillInfos = useMemo(() => {
-    const enabled = selectedThread?.enabledSkills ?? [];
-    const byId = new Map(skills.map((skill) => [skill.id, skill]));
-    return enabled.map((skillId) => {
-      const resolved = byId.get(skillId);
-      if (resolved) {
-        return resolved;
-      }
-      return {
-        id: skillId,
-        name: skillId,
-        description: 'Enabled skill not currently indexed in this workspace',
-        entryPoints: [],
-        path: ''
-      } satisfies SkillInfo;
-    });
-  }, [selectedThread, skills]);
-
-  const selectedSessionId = useMemo(() => {
-    if (activeRunId) {
-      return activeRunId;
-    }
-    if (selectedThreadId && threadSessions[selectedThreadId]) {
-      return threadSessions[selectedThreadId];
-    }
-    return null;
-  }, [activeRunId, selectedThreadId, threadSessions]);
-
-  const selectedSessionLive = useMemo(() => {
-    if (!selectedSessionId) {
-      return false;
-    }
-    return sessionLive[selectedSessionId] ?? false;
-  }, [selectedSessionId, sessionLive]);
+  const selectedSessionId = runStore.sessionForThread(selectedThreadId);
 
   const selectedTerminalContent = useMemo(() => {
-    if (selectedThreadId) {
-      return lastTerminalLogByThread[selectedThreadId] ?? '';
+    if (!selectedThreadId) {
+      return '';
     }
-    return '';
+    return lastTerminalLogByThread[selectedThreadId] ?? '';
   }, [lastTerminalLogByThread, selectedThreadId]);
 
-  const removeToast = useCallback((id: string) => {
-    setToasts((current) => current.filter((toast) => toast.id !== id));
-  }, []);
-
-  const pushToast = useCallback(
-    (message: string, type: 'error' | 'info' = 'error') => {
-      const id = todayId();
-      setToasts((current) => [...current, { id, type, message }]);
-      window.setTimeout(() => removeToast(id), 4500);
-    },
-    [removeToast]
-  );
-
-  useEffect(() => {
-    threadSessionsRef.current = threadSessions;
-  }, [threadSessions]);
-
-  useEffect(() => {
-    sessionLiveRef.current = sessionLive;
-  }, [sessionLive]);
-
-  useEffect(() => {
-    activeRunIdRef.current = activeRunId;
-  }, [activeRunId]);
-
-  useEffect(() => {
-    selectedThreadIdRef.current = selectedThreadId;
-  }, [selectedThreadId]);
+  const activeRunCount = Object.keys(runStore.activeRunsByThread).length;
 
   useEffect(() => {
     selectedWorkspaceIdRef.current = selectedWorkspaceId;
   }, [selectedWorkspaceId]);
 
+  useEffect(() => {
+    selectedThreadIdRef.current = selectedThreadId;
+  }, [selectedThreadId]);
+
+  const pushToast = useCallback((message: string, type: 'error' | 'info' = 'error') => {
+    const id = todayId();
+    setToasts((current) => [...current, { id, type, message }]);
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((toast) => toast.id !== id));
+    }, 4500);
+  }, []);
 
   const refreshWorkspaces = useCallback(async () => {
     const all = await api.listWorkspaces();
     setWorkspaces(all);
-
     if (all.length === 0) {
-      setSelectedWorkspaceId(undefined);
-      setSelectedThreadId(undefined);
+      setSelectedWorkspace(undefined);
+      setSelectedThread(undefined);
       return;
     }
 
-    if (!selectedWorkspaceId || !all.some((workspace) => workspace.id === selectedWorkspaceId)) {
-      setSelectedWorkspaceId(all[0].id);
-    }
-  }, [selectedWorkspaceId]);
+    const persisted = window.localStorage.getItem(SELECTED_WORKSPACE_KEY) ?? '';
+    const current = selectedWorkspaceIdRef.current;
+
+    const nextWorkspaceId =
+      (current && all.some((workspace) => workspace.id === current) && current) ||
+      (persisted && all.some((workspace) => workspace.id === persisted) && persisted) ||
+      all[0].id;
+
+    setSelectedWorkspace(nextWorkspaceId);
+  }, [setSelectedThread, setSelectedWorkspace]);
 
   const refreshThreadsForWorkspace = useCallback(
     async (workspaceId: string) => {
-      const threads = await api.listThreads(workspaceId);
-      setThreadsByWorkspace((current) => ({
-        ...current,
-        [workspaceId]: sortThreads(threads)
-      }));
+      const threads = await listThreads(workspaceId);
 
-      if (workspaceId !== selectedWorkspaceId) {
-        return;
+      if (selectedWorkspaceIdRef.current !== workspaceId) {
+        return threads;
       }
 
-      if (!selectedThreadId && threads.length > 0) {
-        setSelectedThreadId(threads[0].id);
-        return;
-      }
+      const persistedThreadId = window.localStorage.getItem(threadSelectionKey(workspaceId)) ?? '';
+      const currentThreadId = selectedThreadIdRef.current;
 
-      if (selectedThreadId && !threads.some((thread) => thread.id === selectedThreadId)) {
-        setSelectedThreadId(threads[0]?.id);
-      }
+      const nextThreadId =
+        (currentThreadId && threads.some((thread) => thread.id === currentThreadId) && currentThreadId) ||
+        (persistedThreadId && threads.some((thread) => thread.id === persistedThreadId) && persistedThreadId) ||
+        threads[0]?.id;
+
+      setSelectedThread(nextThreadId);
+      return threads;
     },
-    [selectedThreadId, selectedWorkspaceId]
+    [listThreads, setSelectedThread]
   );
 
   const refreshGitInfo = useCallback(async () => {
@@ -279,184 +193,78 @@ export default function App() {
       setGitInfo(null);
       return;
     }
-    const next = await api.getGitInfo(selectedWorkspace.path);
-    setGitInfo(next);
+    const info = await api.getGitInfo(selectedWorkspace.path);
+    setGitInfo(info);
   }, [selectedWorkspace]);
 
-  const loadSkillsForWorkspace = useCallback(
-    async (workspacePath: string, force = false) => {
-      if (!force && skillsByWorkspace[workspacePath]) {
-        return;
+  const flushPendingThreadInput = useCallback(async (threadId: string, sessionId: string) => {
+    const pending = pendingInputByThreadRef.current[threadId];
+    if (!pending) {
+      return;
+    }
+    delete pendingInputByThreadRef.current[threadId];
+    await api.terminalWrite(sessionId, pending);
+  }, []);
+
+  const ensureSessionForThread = useCallback(
+    async (thread: ThreadMetadata): Promise<string> => {
+      const existing = runStore.sessionForThread(thread.id);
+      if (existing) {
+        await flushPendingThreadInput(thread.id, existing);
+        return existing;
       }
 
-      const next = await api.listSkills(workspacePath);
-      setSkillsByWorkspace((current) => ({
-        ...current,
-        [workspacePath]: next
-      }));
-    },
-    [skillsByWorkspace]
-  );
-
-  const refreshTranscript = useCallback(async () => {
-    if (!selectedWorkspaceId || !selectedThreadId) {
-      setTranscript([]);
-      return;
-    }
-    const entries = await api.loadTranscript(selectedWorkspaceId, selectedThreadId);
-    setTranscript(entries);
-  }, [selectedThreadId, selectedWorkspaceId]);
-
-  useEffect(() => {
-    refreshThreadsForWorkspaceRef.current = refreshThreadsForWorkspace;
-  }, [refreshThreadsForWorkspace]);
-
-  useEffect(() => {
-    refreshTranscriptRef.current = refreshTranscript;
-  }, [refreshTranscript]);
-
-  useEffect(() => {
-    const init = async () => {
-      try {
-        await api.getAppStorageRoot();
-        await refreshWorkspaces();
-        const savedSettings = await api.getSettings();
-        setSettings(savedSettings);
-        const detected = await api.detectClaudeCliPath();
-        setDetectedCliPath(detected);
-        if (!detected && !savedSettings.claudeCliPath) {
-          setBlockingError('Claude CLI is missing. Open Settings to configure the CLI path.');
-        }
-      } catch (error) {
-        setBlockingError(String(error));
+      const inFlight = startingSessionByThreadRef.current[thread.id];
+      if (inFlight) {
+        return inFlight;
       }
-    };
 
-    void init();
-  }, [refreshWorkspaces]);
+      const workspace = workspaces.find((item) => item.id === thread.workspaceId);
+      if (!workspace) {
+        throw new Error('Workspace not found for thread.');
+      }
 
-  useEffect(() => {
-    if (!selectedWorkspaceId) {
-      setTranscript([]);
-      return;
-    }
+      const startPromise = (async () => {
+        const response = await api.terminalStartSession({
+          workspacePath: workspace.path,
+          initialCwd: workspace.path,
+          envVars: null,
+          fullAccessFlag: thread.fullAccess,
+          threadId: thread.id
+        });
 
-    void refreshThreadsForWorkspace(selectedWorkspaceId);
-  }, [refreshThreadsForWorkspace, selectedWorkspaceId]);
+        const sessionId = response.sessionId;
+        const startedAt = new Date().toISOString();
+        runStore.bindSession(thread.id, sessionId, startedAt);
+        setThreadRunState(thread.id, 'Running', startedAt, null);
 
-  useEffect(() => {
-    if (!selectedWorkspace) {
-      setGitInfo(null);
-      return;
-    }
-
-    void refreshGitInfo();
-    void loadSkillsForWorkspace(selectedWorkspace.path);
-  }, [loadSkillsForWorkspace, refreshGitInfo, selectedWorkspace]);
-
-  useEffect(() => {
-    void refreshTranscript();
-  }, [refreshTranscript]);
-
-  useEffect(() => {
-    if (!selectedWorkspaceId || !selectedThreadId) {
-      return;
-    }
-    if (lastTerminalLogByThread[selectedThreadId] !== undefined) {
-      return;
-    }
-
-    void api
-      .terminalGetLastLog(selectedWorkspaceId, selectedThreadId)
-      .then((log) => {
-        setLastTerminalLogByThread((current) => ({
-          ...current,
-          [selectedThreadId]: log
-        }));
-      })
-      .catch(() => {
-        setLastTerminalLogByThread((current) => ({
-          ...current,
-          [selectedThreadId]: ''
-        }));
-      });
-  }, [lastTerminalLogByThread, selectedThreadId, selectedWorkspaceId]);
-
-  useEffect(() => {
-    if (!selectedThreadId || !selectedSessionId || !selectedSessionLive) {
-      return;
-    }
-
-    void api
-      .terminalReadOutput(selectedSessionId)
-      .then((snapshot) => {
-        setLastTerminalLogByThread((current) => ({
-          ...current,
-          [selectedThreadId]: snapshot
-        }));
-      })
-      .catch(() => undefined);
-  }, [selectedSessionId, selectedSessionLive, selectedThreadId]);
-
-  useEffect(() => {
-    if (!selectedWorkspace) {
-      return;
-    }
-
-    const id = window.setInterval(() => {
-      void refreshGitInfo();
-    }, 4000);
-
-    return () => window.clearInterval(id);
-  }, [refreshGitInfo, selectedWorkspace]);
-
-  useEffect(() => {
-    let unlistenExit: (() => void) | null = null;
-
-    const setup = async () => {
-      unlistenExit = await onTerminalExit((event: TerminalExitEvent) => {
-        setSessionLive((current) => ({
-          ...current,
-          [event.sessionId]: false
-        }));
-
-        if (activeRunIdRef.current && event.sessionId === activeRunIdRef.current) {
-          setStatus('Idle');
-          setActiveRunId(null);
-        }
-
-        const threadId = sessionThreadMapRef.current[event.sessionId];
-        if (threadId) {
+        void api.terminalResize(sessionId, terminalSize.cols, terminalSize.rows);
+        await flushPendingThreadInput(thread.id, sessionId);
+        window.setTimeout(() => {
           void api
-            .terminalReadOutput(event.sessionId)
+            .terminalReadOutput(sessionId)
             .then((snapshot) => {
+              if (!snapshot) {
+                return;
+              }
               setLastTerminalLogByThread((current) => ({
                 ...current,
-                [threadId]: snapshot
+                [thread.id]: snapshot
               }));
             })
             .catch(() => undefined);
-        }
+        }, 350);
+        return sessionId;
+      })()
+        .finally(() => {
+          delete startingSessionByThreadRef.current[thread.id];
+        });
 
-        if (selectedThreadIdRef.current && threadId === selectedThreadIdRef.current) {
-          void refreshTranscriptRef.current?.();
-        }
-        if (selectedWorkspaceIdRef.current) {
-          void refreshThreadsForWorkspaceRef.current?.(selectedWorkspaceIdRef.current);
-        }
-      });
-    };
-
-    void setup();
-
-    return () => {
-      unlistenExit?.();
-    };
-  }, []);
-
-  const applyThreadUpdate = useCallback((thread: ThreadMetadata) => {
-    setThreadsByWorkspace((current) => upsertThread(current, thread));
-  }, []);
+      startingSessionByThreadRef.current[thread.id] = startPromise;
+      return startPromise;
+    },
+    [flushPendingThreadInput, runStore, setThreadRunState, terminalSize.cols, terminalSize.rows, workspaces]
+  );
 
   const addWorkspaceByPath = useCallback(
     async (path: string) => {
@@ -472,21 +280,13 @@ export default function App() {
         }
         return [...current, workspace];
       });
-      setSelectedWorkspaceId(workspace.id);
-      setSelectedThreadId(undefined);
+      setSelectedWorkspace(workspace.id);
+      setSelectedThread(undefined);
       await refreshThreadsForWorkspace(workspace.id);
-      await loadSkillsForWorkspace(workspace.path, true);
-      const nextGit = await api.getGitInfo(workspace.path);
-      setGitInfo(nextGit);
       return workspace;
     },
-    [loadSkillsForWorkspace, refreshThreadsForWorkspace]
+    [refreshThreadsForWorkspace, setSelectedThread, setSelectedWorkspace]
   );
-
-  const openManualWorkspaceModal = useCallback(() => {
-    setAddWorkspaceError(null);
-    setAddWorkspaceOpen(true);
-  }, []);
 
   const openWorkspacePicker = useCallback(async () => {
     try {
@@ -534,433 +334,233 @@ export default function App() {
     [addWorkspaceByPath, pushToast]
   );
 
-  const onSelectThread = useCallback((threadId: string) => {
-    setSelectedThreadId(threadId);
-  }, []);
-
   const onNewThread = useCallback(async () => {
     if (!selectedWorkspaceId) {
       pushToast('Select a workspace first.', 'error');
       return;
     }
 
+    const thread = await createThread(selectedWorkspaceId);
+    setSelectedThread(thread.id);
+    await refreshThreadsForWorkspace(selectedWorkspaceId);
+  }, [createThread, pushToast, refreshThreadsForWorkspace, selectedWorkspaceId, setSelectedThread]);
+
+  const onRenameThread = useCallback(
+    async (workspaceId: string, threadId: string, title: string) => {
+      await renameThread(workspaceId, threadId, title);
+      await refreshThreadsForWorkspace(workspaceId);
+    },
+    [refreshThreadsForWorkspace, renameThread]
+  );
+
+  const sendComposerMessage = useCallback(async () => {
+    const text = normalizeComposerInput(composerText).trim();
+    if (!text) {
+      return;
+    }
+
+    if (!selectedWorkspaceId) {
+      pushToast('Select a workspace first.', 'error');
+      return;
+    }
+
+    setSendingComposer(true);
     try {
-      const thread = await api.createThread(selectedWorkspaceId, 'claude-code');
-      applyThreadUpdate(thread);
-      setSelectedThreadId(thread.id);
-      setTranscript([]);
-    } catch (error) {
-      pushToast(String(error), 'error');
-    }
-  }, [applyThreadUpdate, pushToast, selectedWorkspaceId]);
-
-  const toggleSkill = useCallback(
-    async (skillToken: string) => {
-      if (!selectedThread || !selectedWorkspaceId) {
-        pushToast('Create or select a thread before toggling skills.', 'error');
-        return;
-      }
-
-      const matchedSkill = skills.find(
-        (skill) => skill.name.toLowerCase() === skillToken.toLowerCase() || skill.id.toLowerCase() === skillToken.toLowerCase()
-      );
-      const skillId = matchedSkill?.id ?? skillToken;
-      const enabled = new Set(selectedThread.enabledSkills);
-      const toggledOn = !enabled.has(skillId);
-
-      if (toggledOn) {
-        enabled.add(skillId);
-      } else {
-        enabled.delete(skillId);
-      }
-
-      const updated = await api.setThreadSkills(selectedWorkspaceId, selectedThread.id, [...enabled]);
-      applyThreadUpdate(updated);
-      setTranscript((current) => [
-        ...current,
-        {
-          id: `system-skill-${todayId()}`,
-          role: 'system',
-          content: `${toggledOn ? 'Enabled' : 'Disabled'} skill: ${skillId}`,
-          createdAt: new Date().toISOString(),
-          runId: null
-        }
-      ]);
-    },
-    [applyThreadUpdate, pushToast, selectedThread, selectedWorkspaceId, skills]
-  );
-
-  const toggleFullAccess = useCallback(async () => {
-    if (!selectedWorkspaceId || !selectedThread) {
-      return;
-    }
-
-    if (selectedThread.fullAccess) {
-      const updated = await api.setThreadFullAccess(selectedWorkspaceId, selectedThread.id, false);
-      applyThreadUpdate(updated);
-      return;
-    }
-
-    const warningSeen = window.localStorage.getItem(FULL_ACCESS_WARNING_KEY) === 'true';
-    if (!warningSeen) {
-      setFullAccessWarningOpen(true);
-      return;
-    }
-
-    const updated = await api.setThreadFullAccess(selectedWorkspaceId, selectedThread.id, true);
-    applyThreadUpdate(updated);
-  }, [applyThreadUpdate, selectedThread, selectedWorkspaceId]);
-
-  const enableFullAccessAfterWarning = useCallback(async () => {
-    if (!selectedWorkspaceId || !selectedThread) {
-      return;
-    }
-    window.localStorage.setItem(FULL_ACCESS_WARNING_KEY, 'true');
-    const updated = await api.setThreadFullAccess(selectedWorkspaceId, selectedThread.id, true);
-    applyThreadUpdate(updated);
-    setFullAccessWarningOpen(false);
-  }, [applyThreadUpdate, selectedThread, selectedWorkspaceId]);
-
-  const appendStatusMessage = useCallback(() => {
-    const branch = gitInfo ? gitInfo.branch : 'N/A';
-    const dirty = gitInfo ? (gitInfo.isDirty ? 'dirty' : 'clean') : 'N/A';
-    const aheadBehind = gitInfo ? `ahead ${gitInfo.ahead}, behind ${gitInfo.behind}` : 'ahead 0, behind 0';
-    const skillsLabel = selectedThread?.enabledSkills.length ? selectedThread.enabledSkills.join(', ') : 'none';
-    const message = [
-      `Workspace: ${selectedWorkspace?.name ?? 'none'}`,
-      `Branch: ${branch}`,
-      `Git state: ${dirty} (${aheadBehind})`,
-      `Full Access: ${selectedThread?.fullAccess ? 'enabled' : 'disabled'}`,
-      `Agent: ${selectedThread?.agentId ?? 'claude-code'}`,
-      `Context pack: ${contextPack}`,
-      `Enabled skills: ${skillsLabel}`
-    ].join('\n');
-
-    setTranscript((current) => [
-      ...current,
-      {
-        id: `system-status-${todayId()}`,
-        role: 'system',
-        content: message,
-        createdAt: new Date().toISOString(),
-        runId: null
-      }
-    ]);
-  }, [contextPack, gitInfo, selectedThread, selectedWorkspace]);
-
-  const openCommitModal = useCallback(async () => {
-    if (!selectedWorkspace) {
-      return;
-    }
-
-    const summary = await api.getGitDiffSummary(selectedWorkspace.path);
-    setCommitSummary(summary);
-    setGeneratedCommitMessage('');
-    setCommitOpen(true);
-  }, [selectedWorkspace]);
-
-  const onSlashCommand = useCallback(
-    async (command: string) => {
-      const normalized = command.trim();
-
-      if (normalized === '/new' || normalized === '/new thread') {
-        await onNewThread();
-        return;
-      }
-
-      if (normalized === '/open') {
-        if (selectedWorkspace) {
-          await api.openInFinder(selectedWorkspace.path);
-        }
-        return;
-      }
-
-      if (normalized.startsWith('/context ')) {
-        const requested = normalized.replace('/context ', '');
-        const next = resolveContextPack(requested);
-        if (!next) {
-          pushToast('Unknown context pack. Use Minimal, Git Diff, or Debug.', 'error');
-          return;
-        }
-        setContextPack(next);
-        return;
-      }
-
-      if (normalized === '/status') {
-        appendStatusMessage();
-        return;
-      }
-
-      if (normalized === '/commit') {
-        await openCommitModal();
-        return;
-      }
-
-      if (normalized === '/help') {
-        setTranscript((current) => [
-          ...current,
-          {
-            id: `system-help-${todayId()}`,
-            role: 'system',
-            content:
-              '/new\n/open\n/context <minimal|git diff|debug>\n/agent <id>\n/status\n/commit\n/skill <name>\n/help',
-            createdAt: new Date().toISOString(),
-            runId: null
-          }
-        ]);
-        return;
-      }
-
-      if (normalized.startsWith('/agent ') || normalized.startsWith('/switch agent ')) {
-        if (!selectedWorkspaceId || !selectedThread) {
-          pushToast('Select a thread before changing agents.', 'error');
-          return;
-        }
-        const agentId = normalized.includes('/switch agent ')
-          ? normalized.replace('/switch agent ', '').trim()
-          : normalized.replace('/agent ', '').trim();
-        if (!agentId) {
-          pushToast('Agent id is required.', 'error');
-          return;
-        }
-        const updated = await api.setThreadAgent(selectedWorkspaceId, selectedThread.id, agentId);
-        applyThreadUpdate(updated);
-        return;
-      }
-
-      if (normalized.startsWith('/skill ')) {
-        const skillToken = normalized.replace('/skill ', '').trim();
-        if (!skillToken) {
-          return;
-        }
-        await toggleSkill(skillToken);
-        return;
-      }
-
-      if (normalized.startsWith('/toggle skill ')) {
-        const skillToken = normalized.replace('/toggle skill ', '').trim();
-        if (!skillToken) {
-          return;
-        }
-        await toggleSkill(skillToken);
-        return;
-      }
-
-      pushToast(`Unknown command: ${normalized}`, 'error');
-    },
-    [
-      appendStatusMessage,
-      applyThreadUpdate,
-      onNewThread,
-      openCommitModal,
-      pushToast,
-      selectedThread,
-      selectedWorkspace,
-      selectedWorkspaceId,
-      toggleSkill
-    ]
-  );
-
-  const startTerminalSessionForThread = useCallback(
-    async (thread: ThreadMetadata): Promise<TerminalStartResult> => {
-      if (!selectedWorkspace) {
-        throw new Error('Select a workspace before starting terminal.');
-      }
-
-      const existing = threadSessionsRef.current[thread.id];
-      if (existing && sessionLiveRef.current[existing]) {
-        return { sessionId: existing, startedNew: false };
-      }
-
-      const response = await api.terminalStartSession({
-        workspacePath: selectedWorkspace.path,
-        initialCwd: selectedWorkspace.path,
-        envVars: null,
-        fullAccessFlag: thread.fullAccess,
-        threadId: thread.id
-      });
-
-      const sessionId = response.sessionId;
-      sessionThreadMapRef.current[sessionId] = thread.id;
-      setSelectedThreadId(thread.id);
-
-      setThreadSessions((current) => ({
-        ...current,
-        [thread.id]: sessionId
-      }));
-      setSessionLive((current) => ({
-        ...current,
-        [sessionId]: true
-      }));
-      setStatus('Running');
-      setActiveRunId(sessionId);
-      setLastTerminalLogByThread((current) => ({
-        ...current,
-        [thread.id]: ''
-      }));
-
-      void api
-        .terminalReadOutput(sessionId)
-        .then((snapshot) => {
-          setLastTerminalLogByThread((current) => ({
-            ...current,
-            [thread.id]: snapshot
-          }));
-        })
-        .catch(() => undefined);
-
-      void api.terminalResize(sessionId, terminalSize.cols, terminalSize.rows);
-      return { sessionId, startedNew: true };
-    },
-    [selectedWorkspace, terminalSize.cols, terminalSize.rows]
-  );
-
-  const sendComposerInputToTerminal = useCallback(async (sessionId: string, message: string) => {
-    const normalized = normalizeComposerInput(message);
-    if (normalized.length > 0) {
-      await api.terminalWrite(sessionId, normalized.replace(/\n/g, '\r'));
-    }
-
-    // Claude Code's prompt supports multi-line composition. Submit with an empty line.
-    await api.terminalWrite(sessionId, '\r');
-    await delay(24);
-    await api.terminalWrite(sessionId, '\r');
-  }, []);
-
-  const waitForSessionPrompt = useCallback(async (sessionId: string): Promise<'ready' | 'trust-prompt' | 'timeout'> => {
-    const deadline = Date.now() + 8_000;
-    while (Date.now() < deadline) {
-      try {
-        const snapshot = await api.terminalReadOutput(sessionId);
-        const normalized = snapshot.toLowerCase();
-
-        if (normalized.includes('quick safety check') || normalized.includes('enter to confirm')) {
-          return 'trust-prompt';
-        }
-
-        if (
-          snapshot.includes('❯') ||
-          normalized.includes('? for shortcuts') ||
-          normalized.includes('esc to interrupt') ||
-          normalized.includes('message from')
-        ) {
-          return 'ready';
-        }
-      } catch {
-        // Continue retrying until timeout.
-      }
-
-      await delay(90);
-    }
-
-    return 'timeout';
-  }, []);
-
-  const submitComposerMessage = useCallback(
-    async (message: string): Promise<boolean> => {
-      if (!selectedWorkspace || !selectedWorkspaceId) {
-        pushToast('Select a workspace before running Claude.', 'error');
-        return false;
-      }
-
-      if (!message.trim()) {
-        return false;
-      }
-
       let thread = selectedThread;
       if (!thread) {
-        thread = await api.createThread(selectedWorkspaceId, 'claude-code');
-        applyThreadUpdate(thread);
-        setSelectedThreadId(thread.id);
+        thread = await createThread(selectedWorkspaceId);
+        setSelectedThread(thread.id);
       }
 
-      const optimisticId = `optimistic-user-${todayId()}`;
-      const optimisticEntry: TranscriptEntry = {
-        id: optimisticId,
-        role: 'user',
-        content: message,
-        createdAt: new Date().toISOString(),
-        runId: null
-      };
-      setTranscript((current) => [...current, optimisticEntry]);
+      const sessionId = await ensureSessionForThread(thread);
+      await api.terminalWrite(sessionId, text.replace(/\n/g, '\r'));
+      await api.terminalWrite(sessionId, '\r');
 
-      let sentToTerminal = false;
+      await api.appendUserMessage(thread.workspaceId, thread.id, text);
+      await refreshThreadsForWorkspace(thread.workspaceId);
+      setComposerText('');
+    } catch (error) {
+      const errorText = String(error);
+      if (errorText.includes('Claude CLI not found')) {
+        setBlockingError('Claude CLI not found. Configure the path in Settings.');
+        setSettingsOpen(true);
+      } else {
+        pushToast(errorText, 'error');
+      }
+    } finally {
+      setSendingComposer(false);
+    }
+  }, [composerText, createThread, ensureSessionForThread, pushToast, refreshThreadsForWorkspace, selectedThread, selectedWorkspaceId, setSelectedThread]);
+
+  useEffect(() => {
+    const init = async () => {
       try {
-        const { sessionId, startedNew } = await startTerminalSessionForThread(thread);
-        if (startedNew) {
-          const readiness = await waitForSessionPrompt(sessionId);
-          if (readiness === 'trust-prompt') {
-            setTranscript((current) => current.filter((entry) => entry.id !== optimisticId));
-            pushToast('Claude is waiting for workspace trust confirmation in terminal. Press Enter there first.', 'error');
-            return false;
-          }
-          if (readiness === 'timeout') {
-            setTranscript((current) => current.filter((entry) => entry.id !== optimisticId));
-            pushToast('Claude terminal is still starting. Try again in a second.', 'error');
-            return false;
-          }
+        await api.getAppStorageRoot();
+        await refreshWorkspaces();
+        const savedSettings = await api.getSettings();
+        setSettings(savedSettings);
+        const detected = await api.detectClaudeCliPath();
+        setDetectedCliPath(detected);
+        if (!detected && !savedSettings.claudeCliPath) {
+          setBlockingError('Claude CLI is missing. Open Settings to configure the CLI path.');
         }
-
-        await sendComposerInputToTerminal(sessionId, message);
-        sentToTerminal = true;
-
-        const userEntry = await api.appendUserMessage(selectedWorkspaceId, thread.id, message);
-        setTranscript((current) => current.map((entry) => (entry.id === optimisticId ? userEntry : entry)));
-        return true;
       } catch (error) {
-        const errorText = String(error);
-        if (!sentToTerminal) {
-          setTranscript((current) => current.filter((entry) => entry.id !== optimisticId));
-        }
-        if (errorText.includes('Claude CLI not found')) {
-          setBlockingError('Claude CLI not found. Configure the path in Settings.');
-          setSettingsOpen(true);
-        } else {
-          pushToast(errorText, 'error');
-        }
-        return false;
-      } finally {
-        void refreshThreadsForWorkspace(selectedWorkspaceId);
+        setBlockingError(String(error));
       }
-    },
-    [
-      applyThreadUpdate,
-      pushToast,
-      refreshThreadsForWorkspace,
-      selectedThread,
-      selectedWorkspace,
-      selectedWorkspaceId,
-      sendComposerInputToTerminal,
-      waitForSessionPrompt,
-      startTerminalSessionForThread
-    ]
-  );
+    };
 
-  const resumeSelectedThread = useCallback(async () => {
+    void init();
+  }, [refreshWorkspaces]);
+
+  useEffect(() => {
+    if (!selectedWorkspaceId) {
+      setSelectedThread(undefined);
+      return;
+    }
+
+    window.localStorage.setItem(SELECTED_WORKSPACE_KEY, selectedWorkspaceId);
+    void refreshThreadsForWorkspace(selectedWorkspaceId);
+  }, [refreshThreadsForWorkspace, selectedWorkspaceId, setSelectedThread]);
+
+  useEffect(() => {
+    if (!selectedWorkspace) {
+      setGitInfo(null);
+      return;
+    }
+
+    void refreshGitInfo();
+    const id = window.setInterval(() => {
+      void refreshGitInfo();
+    }, 4000);
+
+    return () => window.clearInterval(id);
+  }, [refreshGitInfo, selectedWorkspace]);
+
+  useEffect(() => {
+    if (!selectedWorkspaceId || !selectedThreadId) {
+      return;
+    }
+    window.localStorage.setItem(threadSelectionKey(selectedWorkspaceId), selectedThreadId);
+  }, [selectedThreadId, selectedWorkspaceId]);
+
+  useEffect(() => {
+    if (!selectedWorkspaceId || !selectedThreadId) {
+      return;
+    }
+    if (lastTerminalLogByThread[selectedThreadId] !== undefined) {
+      return;
+    }
+
+    void api
+      .terminalGetLastLog(selectedWorkspaceId, selectedThreadId)
+      .then((log) => {
+        setLastTerminalLogByThread((current) => ({
+          ...current,
+          [selectedThreadId]: log
+        }));
+      })
+      .catch(() => {
+        setLastTerminalLogByThread((current) => ({
+          ...current,
+          [selectedThreadId]: ''
+        }));
+      });
+  }, [lastTerminalLogByThread, selectedThreadId, selectedWorkspaceId]);
+
+  useEffect(() => {
     if (!selectedThread) {
       return;
     }
-    try {
-      await startTerminalSessionForThread(selectedThread);
-    } catch (error) {
-      pushToast(String(error), 'error');
-    }
-  }, [pushToast, selectedThread, startTerminalSessionForThread]);
 
-  const generateCommitMessage = useCallback(async () => {
-    if (!selectedWorkspace || !selectedThread) {
+    void ensureSessionForThread(selectedThread).catch((error) => {
+      pushToast(String(error), 'error');
+    });
+  }, [ensureSessionForThread, pushToast, selectedThread]);
+
+  useEffect(() => {
+    let unlistenExit: (() => void) | null = null;
+
+    const setup = async () => {
+      unlistenExit = await onTerminalExit((event: TerminalExitEvent) => {
+        const endedThreadId = runStore.finishSession(event.sessionId);
+        if (!endedThreadId) {
+          return;
+        }
+
+        const endedAt = new Date().toISOString();
+        setThreadRunState(endedThreadId, statusFromExit(event), null, endedAt);
+
+        const workspaceId = Object.values(threadsByWorkspace)
+          .flat()
+          .find((thread) => thread.id === endedThreadId)?.workspaceId;
+        if (workspaceId) {
+          void refreshThreadsForWorkspace(workspaceId);
+        }
+
+        void api
+          .terminalReadOutput(event.sessionId)
+          .then((snapshot) => {
+            setLastTerminalLogByThread((current) => ({
+              ...current,
+              [endedThreadId]: snapshot
+            }));
+          })
+          .catch(() => undefined);
+      });
+    };
+
+    void setup();
+    return () => {
+      unlistenExit?.();
+    };
+  }, [refreshThreadsForWorkspace, runStore, setThreadRunState, threadsByWorkspace]);
+
+  useEffect(() => {
+    if (activeRunCount === 0) {
       return;
     }
-    setLoadingCommitMessage(true);
-    try {
-      const message = await api.generateCommitMessage(selectedWorkspace.path, selectedThread.fullAccess);
-      setGeneratedCommitMessage(message);
-    } catch (error) {
-      setGeneratedCommitMessage(`Error: ${String(error)}`);
-    } finally {
-      setLoadingCommitMessage(false);
-    }
-  }, [selectedThread, selectedWorkspace]);
+    const id = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [activeRunCount]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+
+      if (terminalFocused && event.metaKey && key === 'c' && selectedSessionId) {
+        event.preventDefault();
+        void api.terminalSendSignal(selectedSessionId, 'SIGINT');
+        return;
+      }
+
+      if (event.metaKey && key === 'n') {
+        event.preventDefault();
+        void onNewThread();
+        return;
+      }
+
+      if (event.key === 'Escape' && selectedSessionId) {
+        event.preventDefault();
+        const now = Date.now();
+        if (
+          escapeSignalRef.current &&
+          escapeSignalRef.current.sessionId === selectedSessionId &&
+          now - escapeSignalRef.current.at < 1500
+        ) {
+          void api.terminalKill(selectedSessionId);
+          escapeSignalRef.current = null;
+        } else {
+          void api.terminalSendSignal(selectedSessionId, 'SIGINT');
+          escapeSignalRef.current = { sessionId: selectedSessionId, at: now };
+        }
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onNewThread, selectedSessionId, terminalFocused]);
 
   const saveSettings = useCallback(async (cliPath: string) => {
     const saved = await api.saveSettings({ claudeCliPath: cliPath || null });
@@ -973,305 +573,58 @@ export default function App() {
     }
   }, []);
 
-  const slashItems = useMemo<SlashPaletteItem[]>(() => {
-    const commandItems: SlashPaletteItem[] = [
-      {
-        id: 'cmd-new-thread',
-        group: 'Commands',
-        command: '/new',
-        label: '/new',
-        description: 'Create a new thread'
-      },
-      {
-        id: 'cmd-open',
-        group: 'Commands',
-        command: '/open',
-        label: '/open',
-        description: 'Open workspace in Finder'
-      },
-      {
-        id: 'cmd-context-min',
-        group: 'Commands',
-        command: '/context minimal',
-        label: '/context minimal',
-        description: 'Set context pack to Minimal'
-      },
-      {
-        id: 'cmd-context-diff',
-        group: 'Commands',
-        command: '/context git diff',
-        label: '/context git diff',
-        description: 'Set context pack to Git Diff'
-      },
-      {
-        id: 'cmd-context-debug',
-        group: 'Commands',
-        command: '/context debug',
-        label: '/context debug',
-        description: 'Set context pack to Debug'
-      },
-      {
-        id: 'cmd-agent',
-        group: 'Commands',
-        command: '/agent claude-code',
-        label: '/agent claude-code',
-        description: 'Switch agent'
-      },
-      {
-        id: 'cmd-status',
-        group: 'Commands',
-        command: '/status',
-        label: '/status',
-        description: 'Show branch, skills, context, and full access'
-      },
-      {
-        id: 'cmd-commit',
-        group: 'Commands',
-        command: '/commit',
-        label: '/commit',
-        description: 'Open commit assistant'
-      },
-      {
-        id: 'cmd-help',
-        group: 'Commands',
-        command: '/help',
-        label: '/help',
-        description: 'List available commands'
-      }
-    ];
-
-    const skillItems: SlashPaletteItem[] = skills.map((skill) => ({
-      id: `skill-${skill.id}`,
-      group: 'Skills',
-      command: `/skill ${skill.name}`,
-      label: `/skill ${skill.name}`,
-      description: skill.description || 'Toggle skill for this thread'
-    }));
-
-    return [...commandItems, ...skillItems];
-  }, [skills]);
-
-  const commandItems = useMemo<CommandPaletteItem[]>(() => {
-    const shared: CommandPaletteItem[] = [
-      {
-        id: 'new-thread',
-        title: 'New Thread',
-        subtitle: 'Create a new thread in the selected workspace',
-        group: 'Commands',
-        keywords: ['thread'],
-        action: () => void onNewThread()
-      },
-      {
-        id: 'add-workspace',
-        title: 'Add Workspace',
-        subtitle: 'Pick a workspace folder using the native dialog',
-        group: 'Commands',
-        keywords: ['workspace', 'open'],
-        action: () => void openWorkspacePicker()
-      },
-      {
-        id: 'add-workspace-path',
-        title: 'Add Workspace by Path',
-        subtitle: 'Open manual path entry modal',
-        group: 'Commands',
-        keywords: ['workspace', 'path'],
-        action: () => openManualWorkspaceModal()
-      },
-      {
-        id: 'toggle-full-access',
-        title: 'Toggle Full Access',
-        subtitle: 'Switch per-thread Full Access mode',
-        group: 'Commands',
-        keywords: ['permissions'],
-        action: () => void toggleFullAccess()
-      },
-      {
-        id: 'open-settings',
-        title: 'Open Settings',
-        subtitle: 'Configure Claude CLI path',
-        group: 'Commands',
-        action: () => setSettingsOpen(true)
-      },
-      {
-        id: 'open-workspace',
-        title: 'Open Workspace',
-        subtitle: 'Open current workspace in Finder',
-        group: 'Commands',
-        action: () => {
-          if (selectedWorkspace) {
-            void api.openInFinder(selectedWorkspace.path);
-          }
-        }
-      },
-      {
-        id: 'status',
-        title: 'Insert Status Message',
-        subtitle: 'Post current branch/skills/context status',
-        group: 'Commands',
-        action: appendStatusMessage
-      }
-    ];
-
-    const workspaceItems: CommandPaletteItem[] = workspaces.map((workspace) => ({
-      id: `workspace-${workspace.id}`,
-      title: workspace.name,
-      subtitle: workspace.path,
-      group: 'Workspaces',
-      keywords: [workspace.path],
-      action: () => {
-        setSelectedWorkspaceId(workspace.id);
-        setSelectedThreadId((threadsByWorkspace[workspace.id] ?? [])[0]?.id);
-      }
-    }));
-
-    return [...shared, ...workspaceItems];
-  }, [
-    appendStatusMessage,
-    onNewThread,
-    openManualWorkspaceModal,
-    openWorkspacePicker,
-    selectedWorkspace,
-    threadsByWorkspace,
-    toggleFullAccess,
-    workspaces
-  ]);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const key = event.key.toLowerCase();
-
-      if (terminalFocused && event.metaKey && key === 'c' && activeRunId) {
-        event.preventDefault();
-        void api.terminalSendSignal(activeRunId, 'SIGINT');
-        return;
-      }
-
-      if (terminalFocused && !event.metaKey && event.key !== 'Escape') {
-        return;
-      }
-
-      if (terminalFocused && event.metaKey && key !== 'c') {
-        return;
-      }
-
-      if (event.metaKey && event.key.toLowerCase() === 'k') {
-        event.preventDefault();
-        setCommandPaletteOpen(true);
-        return;
-      }
-
-      if (event.metaKey && event.key.toLowerCase() === 'n') {
-        event.preventDefault();
-        void onNewThread();
-        return;
-      }
-
-      if (event.metaKey && event.shiftKey && event.key.toLowerCase() === 'f') {
-        event.preventDefault();
-        void toggleFullAccess();
-        return;
-      }
-
-      if (event.key === 'Escape') {
-        if (activeRunId) {
-          const now = Date.now();
-          if (
-            escapeSignalRef.current &&
-            escapeSignalRef.current.sessionId === activeRunId &&
-            now - escapeSignalRef.current.at < 1500
-          ) {
-            void api.terminalKill(activeRunId);
-            escapeSignalRef.current = null;
-          } else {
-            void api.terminalSendSignal(activeRunId, 'SIGINT');
-            escapeSignalRef.current = { sessionId: activeRunId, at: now };
-          }
-          return;
-        }
-
-        if (settingsOpen) {
-          setSettingsOpen(false);
-          return;
-        }
-
-        if (addWorkspaceOpen) {
-          setAddWorkspaceOpen(false);
-          setAddWorkspaceError(null);
-          return;
-        }
-
-        if (commandPaletteOpen) {
-          setCommandPaletteOpen(false);
-        }
-      }
-    };
-
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [
-    activeRunId,
-    addWorkspaceOpen,
-    commandPaletteOpen,
-    onNewThread,
-    settingsOpen,
-    terminalFocused,
-    toggleFullAccess
-  ]);
-
-  useEffect(() => {
-    // Dev-only automation hook used by verify scripts.
-    if (!import.meta.env.DEV) {
-      return;
-    }
-
-    (window as Window & { __claudeDeskAddWorkspacePath?: (path: string) => void }).__claudeDeskAddWorkspacePath = (
-      path: string
-    ) => {
-      void confirmManualWorkspace(path);
-    };
-  }, [confirmManualWorkspace]);
+  const selectedThreadStartedAt = runStore.startedAtForThread(selectedThreadId);
+  const runningForLabel = selectedThreadStartedAt
+    ? formatDurationShort((nowMs - Date.parse(selectedThreadStartedAt)) / 1000)
+    : undefined;
+  const statusLabel = selectedThread?.lastRunStatus ?? 'Idle';
 
   return (
     <div className="app-shell">
       <LeftRail
         workspaces={workspaces}
-        threads={filteredThreads}
+        threadsByWorkspace={threadsByWorkspace}
         selectedWorkspaceId={selectedWorkspaceId}
         selectedThreadId={selectedThreadId}
         threadSearch={threadSearch}
+        nowMs={nowMs}
+        activeRunsByThread={Object.fromEntries(
+          Object.entries(runStore.activeRunsByThread).map(([threadId, run]) => [threadId, { startedAt: run.startedAt }])
+        )}
         onSelectWorkspace={(workspaceId) => {
-          setSelectedWorkspaceId(workspaceId);
+          setSelectedWorkspace(workspaceId);
+          setSelectedThread(undefined);
           setThreadSearch('');
-          const firstThread = threadsByWorkspace[workspaceId]?.[0];
-          setSelectedThreadId(firstThread?.id);
         }}
         onOpenWorkspacePicker={() => void openWorkspacePicker()}
-        onOpenManualWorkspaceModal={openManualWorkspaceModal}
+        onOpenManualWorkspaceModal={() => {
+          setAddWorkspaceError(null);
+          setAddWorkspaceOpen(true);
+        }}
         onNewThread={() => void onNewThread()}
         onThreadSearchChange={setThreadSearch}
-        onSelectThread={onSelectThread}
+        onSelectThread={setSelectedThread}
+        onRenameThread={onRenameThread}
+        getSearchTextForThread={(threadId) => lastTerminalLogByThread[threadId] ?? ''}
       />
 
       <main className={blockingError ? 'main-panel has-blocking-error' : 'main-panel'} data-testid="main-panel">
         <HeaderBar
           workspace={selectedWorkspace}
           gitInfo={gitInfo}
-          thread={selectedThread}
-          status={status}
-          onToggleFullAccess={() => void toggleFullAccess()}
+          statusLabel={statusLabel}
+          runningForLabel={runningForLabel}
           onOpenWorkspace={() => {
             if (selectedWorkspace) {
               void api.openInFinder(selectedWorkspace.path);
             }
           }}
-          onOpenCommit={() => void openCommitModal()}
-          onAgentChange={async (agentId) => {
-            if (!selectedWorkspaceId || !selectedThread) {
-              return;
+          onOpenTerminal={() => {
+            if (selectedWorkspace) {
+              void api.openInTerminal(selectedWorkspace.path);
             }
-            const updated = await api.setThreadAgent(selectedWorkspaceId, selectedThread.id, agentId);
-            applyThreadUpdate(updated);
           }}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
 
         {blockingError ? (
@@ -1283,65 +636,48 @@ export default function App() {
           </div>
         ) : null}
 
-        {selectedThread ? (
-          <section className="terminal-region">
-            {!selectedSessionLive ? (
-              <div className="terminal-banner">
-                <span>Read-only terminal log</span>
-                <button type="button" className="ghost-button" onClick={() => void resumeSelectedThread()}>
-                  Resume
-                </button>
-              </div>
-            ) : null}
+        <section className="terminal-region">
+          {selectedThread ? (
             <TerminalPanel
               sessionId={selectedSessionId}
               content={selectedTerminalContent}
-              readOnly={!selectedSessionLive}
+              readOnly={false}
               onData={(data) => {
-                if (!selectedSessionId || !selectedSessionLive) {
+                if (!selectedThread) {
                   return;
                 }
-                void api.terminalWrite(selectedSessionId, data);
+
+                const sessionId = runStore.sessionForThread(selectedThread.id);
+                if (sessionId) {
+                  void api.terminalWrite(sessionId, data);
+                  return;
+                }
+
+                pendingInputByThreadRef.current[selectedThread.id] = `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${data}`;
+                void ensureSessionForThread(selectedThread);
               }}
               onResize={(cols, rows) => {
                 setTerminalSize({ cols, rows });
-                if (!selectedSessionId || !selectedSessionLive) {
+                if (!selectedSessionId) {
                   return;
                 }
                 void api.terminalResize(selectedSessionId, cols, rows);
               }}
               onFocusChange={setTerminalFocused}
             />
-          </section>
-        ) : (
-          <LandingView
-            workspace={selectedWorkspace}
-            gitInfo={gitInfo}
-            onSuggestion={(text) => {
-              if (!selectedWorkspaceId) {
-                pushToast('Add a workspace first.', 'error');
-                return;
-              }
+          ) : (
+            <div className="terminal-empty">Create a thread to start typing.</div>
+          )}
+        </section>
 
-              if (!selectedThread) {
-                void onNewThread();
-              }
-
-              setComposerText(text);
-            }}
-          />
-        )}
-
+        <SimpleComposer
+          value={composerText}
+          disabled={!selectedWorkspace || Boolean(blockingError)}
+          sending={sendingComposer}
+          onChange={setComposerText}
+          onSend={sendComposerMessage}
+        />
       </main>
-
-      <CommitModal
-        open={commitOpen}
-        summary={commitSummary}
-        generatedMessage={generatedCommitMessage}
-        loadingMessage={loadingCommitMessage}
-        onClose={() => setCommitOpen(false)}
-        onGenerateMessage={() => void generateCommitMessage()}
-      />
 
       <SettingsModal
         open={settingsOpen}
@@ -1362,14 +698,6 @@ export default function App() {
         }}
         onPickDirectory={() => void openWorkspacePicker()}
         onConfirm={(path) => void confirmManualWorkspace(path)}
-      />
-
-      <CommandPalette open={commandPaletteOpen} items={commandItems} onClose={() => setCommandPaletteOpen(false)} />
-
-      <FullAccessWarningModal
-        open={fullAccessWarningOpen}
-        onCancel={() => setFullAccessWarningOpen(false)}
-        onEnable={() => void enableFullAccessAfterWarning()}
       />
 
       <ToastRegion toasts={toasts} />

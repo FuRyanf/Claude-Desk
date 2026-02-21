@@ -30,6 +30,9 @@ export function TerminalPanel({
   const onResizeRef = useRef(onResize);
   const onFocusChangeRef = useRef(onFocusChange);
   const readOnlyRef = useRef(readOnly);
+  const sessionRef = useRef<string | null>(sessionId);
+  const hydratedSessionRef = useRef<string | null>(null);
+  const hasLiveDataRef = useRef(false);
   const writeBufferRef = useRef('');
   const flushTimerRef = useRef<number | null>(null);
   const writingRef = useRef(false);
@@ -182,6 +185,34 @@ export function TerminalPanel({
   }, [readOnly]);
 
   useEffect(() => {
+    const term = terminalRef.current;
+    if (!term) {
+      sessionRef.current = sessionId;
+      return;
+    }
+
+    if (sessionRef.current === sessionId) {
+      return;
+    }
+
+    sessionRef.current = sessionId;
+    hasLiveDataRef.current = false;
+    hydratedSessionRef.current = null;
+    writeBufferRef.current = '';
+    writingRef.current = false;
+    if (flushTimerRef.current !== null) {
+      window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+
+    term.reset();
+    if (contentRef.current.length > 0) {
+      term.write(contentRef.current);
+      hydratedSessionRef.current = sessionId;
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
     if (!readOnly && sessionId) {
       return;
     }
@@ -202,6 +233,25 @@ export function TerminalPanel({
       return;
     }
 
+    if (content.length === 0 || hasLiveDataRef.current || hydratedSessionRef.current === sessionId) {
+      return;
+    }
+
+    const term = terminalRef.current;
+    if (!term) {
+      return;
+    }
+
+    term.reset();
+    term.write(content);
+    hydratedSessionRef.current = sessionId;
+  }, [content, fallback, readOnly, sessionId]);
+
+  useEffect(() => {
+    if (fallback || readOnly || !sessionId) {
+      return;
+    }
+
     let disposed = false;
     let unlisten: (() => void) | null = null;
 
@@ -209,6 +259,7 @@ export function TerminalPanel({
       if (event.sessionId !== sessionId) {
         return;
       }
+      hasLiveDataRef.current = true;
       queueWrite(event.data);
     }).then((cleanup) => {
       if (disposed) {

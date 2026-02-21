@@ -211,6 +211,23 @@ fn open_in_finder(path: String) -> Result<(), String> {
         })
 }
 
+#[tauri::command]
+fn open_in_terminal(path: String) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("-a")
+        .arg("Terminal")
+        .arg(path)
+        .status()
+        .map_err(|error| error.to_string())
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err("Failed to open terminal".to_string())
+            }
+        })
+}
+
 fn main() {
     let _ = storage::ensure_base_dirs();
 
@@ -254,7 +271,8 @@ fn main() {
             terminal_get_last_log,
             terminal_read_output,
             generate_commit_message,
-            open_in_finder
+            open_in_finder,
+            open_in_terminal
         ])
         .run(tauri::generate_context!())
         .expect("error while running Claude Desk");

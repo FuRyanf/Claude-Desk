@@ -1,3 +1,4 @@
+export type RunStatus = 'Idle' | 'Running' | 'Succeeded' | 'Failed' | 'Canceled';
 export type ContextPack = 'Minimal' | 'Git Diff' | 'Debug';
 
 export interface Workspace {
@@ -11,12 +12,16 @@ export interface Workspace {
 export interface ThreadMetadata {
   id: string;
   workspaceId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  isArchived: boolean;
+  lastRunStatus: RunStatus;
+  lastRunStartedAt?: string | null;
+  lastRunEndedAt?: string | null;
   agentId: string;
   fullAccess: boolean;
   enabledSkills: string[];
-  createdAt: string;
-  updatedAt: string;
-  title: string;
 }
 
 export interface TranscriptEntry {

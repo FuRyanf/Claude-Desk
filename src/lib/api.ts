@@ -38,6 +38,8 @@ export const api = {
     invoke<ThreadMetadata[]>('list_threads', { workspaceId }),
   createThread: (workspaceId: string, agentId?: string) =>
     invoke<ThreadMetadata>('create_thread', { workspaceId, agentId }),
+  renameThread: (workspaceId: string, threadId: string, title: string) =>
+    invoke<ThreadMetadata>('rename_thread', { workspaceId, threadId, title }),
   setThreadFullAccess: (workspaceId: string, threadId: string, fullAccess: boolean) =>
     invoke<ThreadMetadata>('set_thread_full_access', { workspaceId, threadId, fullAccess }),
   setThreadSkills: (workspaceId: string, threadId: string, enabledSkills: string[]) =>
@@ -79,7 +81,8 @@ export const api = {
     invoke<string>('terminal_read_output', { sessionId }),
   generateCommitMessage: (workspacePath: string, fullAccess: boolean) =>
     invoke<string>('generate_commit_message', { workspacePath, fullAccess }),
-  openInFinder: (path: string) => invoke<void>('open_in_finder', { path })
+  openInFinder: (path: string) => invoke<void>('open_in_finder', { path }),
+  openInTerminal: (path: string) => invoke<void>('open_in_terminal', { path })
 };
 
 export const onRunStream = async (
