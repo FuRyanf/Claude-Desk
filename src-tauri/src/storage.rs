@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -9,6 +10,50 @@ use uuid::Uuid;
 use crate::models::{Settings, ThreadMetadata, ThreadRunStatus, TranscriptEntry, Workspace};
 
 const APP_SUPPORT_SUBDIR: &str = "Library/Application Support/ClaudeDesk";
+
+fn thread_metadata_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn validate_storage_segment<'a>(value: &'a str, label: &str) -> Result<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("{label} cannot be empty"));
+    }
+    if trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains('\0')
+    {
+        return Err(anyhow!("Invalid {label}"));
+    }
+    Ok(trimmed)
+}
+
+fn write_file_atomic(path: &Path, raw: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .ok_or_else(|| {
+            anyhow!(
+                "Cannot write file without a name: {}",
+                path.to_string_lossy()
+            )
+        })?;
+    let temp_path = path.with_file_name(format!(".{file_name}.tmp-{}", Uuid::new_v4()));
+    fs::write(&temp_path, raw)?;
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
+    Ok(())
+}
 
 pub fn app_support_root() -> Result<PathBuf> {
     if let Ok(override_root) = std::env::var("CLAUDE_DESK_APP_SUPPORT_ROOT") {
@@ -25,11 +70,11 @@ pub fn ensure_base_dirs() -> Result<PathBuf> {
     fs::create_dir_all(root.join("agents"))?;
     fs::create_dir_all(root.join("threads"))?;
     if !root.join("workspaces.json").exists() {
-        fs::write(root.join("workspaces.json"), "[]")?;
+        write_file_atomic(&root.join("workspaces.json"), b"[]")?;
     }
     if !root.join("settings.json").exists() {
         let settings = serde_json::to_string_pretty(&Settings::default())?;
-        fs::write(root.join("settings.json"), settings)?;
+        write_file_atomic(&root.join("settings.json"), settings.as_bytes())?;
     }
     Ok(root)
 }
@@ -52,7 +97,7 @@ pub fn load_settings() -> Result<Settings> {
 pub fn save_settings(settings: &Settings) -> Result<()> {
     let file = settings_file()?;
     let raw = serde_json::to_string_pretty(settings)?;
-    fs::write(file, raw)?;
+    write_file_atomic(&file, raw.as_bytes())?;
     Ok(())
 }
 
@@ -66,7 +111,7 @@ pub fn load_workspaces() -> Result<Vec<Workspace>> {
 pub fn save_workspaces(workspaces: &[Workspace]) -> Result<()> {
     let file = workspaces_file()?;
     let raw = serde_json::to_string_pretty(workspaces)?;
-    fs::write(file, raw)?;
+    write_file_atomic(&file, raw.as_bytes())?;
     Ok(())
 }
 
@@ -76,7 +121,10 @@ pub fn add_workspace(path: &str) -> Result<Workspace> {
     let canonical = canonical_path.to_string_lossy().to_string();
 
     let mut workspaces = load_workspaces()?;
-    if let Some(existing) = workspaces.iter().find(|workspace| workspace.path == canonical) {
+    if let Some(existing) = workspaces
+        .iter()
+        .find(|workspace| workspace.path == canonical)
+    {
         return Ok(existing.clone());
     }
 
@@ -100,10 +148,12 @@ pub fn add_workspace(path: &str) -> Result<Workspace> {
 }
 
 pub fn thread_workspace_dir(workspace_id: &str) -> Result<PathBuf> {
+    let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
     Ok(ensure_base_dirs()?.join("threads").join(workspace_id))
 }
 
 pub fn thread_dir(workspace_id: &str, thread_id: &str) -> Result<PathBuf> {
+    let thread_id = validate_storage_segment(thread_id, "thread id")?;
     Ok(thread_workspace_dir(workspace_id)?.join(thread_id))
 }
 
@@ -146,17 +196,48 @@ fn thread_metadata_path(workspace_id: &str, thread_id: &str) -> Result<PathBuf> 
     Ok(thread_dir(workspace_id, thread_id)?.join("thread.json"))
 }
 
-pub fn write_thread_metadata(thread: &ThreadMetadata) -> Result<()> {
+fn write_thread_metadata_unlocked(thread: &ThreadMetadata) -> Result<()> {
     let dir = thread_dir(&thread.workspace_id, &thread.id)?;
     fs::create_dir_all(&dir)?;
     let raw = serde_json::to_string_pretty(thread)?;
-    fs::write(thread_metadata_path(&thread.workspace_id, &thread.id)?, raw)?;
+    write_file_atomic(
+        &thread_metadata_path(&thread.workspace_id, &thread.id)?,
+        raw.as_bytes(),
+    )?;
     Ok(())
 }
 
-pub fn read_thread_metadata(workspace_id: &str, thread_id: &str) -> Result<ThreadMetadata> {
+fn read_thread_metadata_unlocked(workspace_id: &str, thread_id: &str) -> Result<ThreadMetadata> {
     let raw = fs::read_to_string(thread_metadata_path(workspace_id, thread_id)?)?;
     Ok(serde_json::from_str(&raw)?)
+}
+
+fn mutate_thread_metadata<F>(
+    workspace_id: &str,
+    thread_id: &str,
+    mutate: F,
+) -> Result<ThreadMetadata>
+where
+    F: FnOnce(&mut ThreadMetadata) -> Result<()>,
+{
+    let _guard = thread_metadata_lock()
+        .lock()
+        .map_err(|_| anyhow!("Thread metadata lock poisoned"))?;
+    let mut thread = read_thread_metadata_unlocked(workspace_id, thread_id)?;
+    mutate(&mut thread)?;
+    write_thread_metadata_unlocked(&thread)?;
+    Ok(thread)
+}
+
+pub fn write_thread_metadata(thread: &ThreadMetadata) -> Result<()> {
+    let _guard = thread_metadata_lock()
+        .lock()
+        .map_err(|_| anyhow!("Thread metadata lock poisoned"))?;
+    write_thread_metadata_unlocked(thread)
+}
+
+pub fn read_thread_metadata(workspace_id: &str, thread_id: &str) -> Result<ThreadMetadata> {
+    read_thread_metadata_unlocked(workspace_id, thread_id)
 }
 
 pub fn list_threads(workspace_id: &str) -> Result<Vec<ThreadMetadata>> {
@@ -192,20 +273,24 @@ pub fn list_threads(workspace_id: &str) -> Result<Vec<ThreadMetadata>> {
     Ok(threads)
 }
 
-pub fn set_thread_full_access(workspace_id: &str, thread_id: &str, full_access: bool) -> Result<ThreadMetadata> {
-    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
-    thread.full_access = full_access;
-    thread.updated_at = Utc::now();
-    write_thread_metadata(&thread)?;
-    Ok(thread)
+pub fn set_thread_full_access(
+    workspace_id: &str,
+    thread_id: &str,
+    full_access: bool,
+) -> Result<ThreadMetadata> {
+    mutate_thread_metadata(workspace_id, thread_id, |thread| {
+        thread.full_access = full_access;
+        thread.updated_at = Utc::now();
+        Ok(())
+    })
 }
 
 pub fn clear_thread_claude_session(workspace_id: &str, thread_id: &str) -> Result<ThreadMetadata> {
-    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
-    thread.claude_session_id = None;
-    thread.updated_at = Utc::now();
-    write_thread_metadata(&thread)?;
-    Ok(thread)
+    mutate_thread_metadata(workspace_id, thread_id, |thread| {
+        thread.claude_session_id = None;
+        thread.updated_at = Utc::now();
+        Ok(())
+    })
 }
 
 pub fn set_thread_claude_session_id_if_missing(
@@ -218,14 +303,17 @@ pub fn set_thread_claude_session_id_if_missing(
         return Ok(None);
     }
 
-    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
+    let _guard = thread_metadata_lock()
+        .lock()
+        .map_err(|_| anyhow!("Thread metadata lock poisoned"))?;
+    let mut thread = read_thread_metadata_unlocked(workspace_id, thread_id)?;
     if thread.claude_session_id.is_some() {
         return Ok(None);
     }
 
     thread.claude_session_id = Some(normalized.to_string());
     thread.updated_at = Utc::now();
-    write_thread_metadata(&thread)?;
+    write_thread_metadata_unlocked(&thread)?;
     Ok(Some(thread))
 }
 
@@ -234,39 +322,43 @@ pub fn set_thread_skills(
     thread_id: &str,
     enabled_skills: Vec<String>,
 ) -> Result<ThreadMetadata> {
-    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
-    thread.enabled_skills = enabled_skills;
-    thread.updated_at = Utc::now();
-    write_thread_metadata(&thread)?;
-    Ok(thread)
+    mutate_thread_metadata(workspace_id, thread_id, |thread| {
+        thread.enabled_skills = enabled_skills;
+        thread.updated_at = Utc::now();
+        Ok(())
+    })
 }
 
-pub fn set_thread_agent(workspace_id: &str, thread_id: &str, agent_id: String) -> Result<ThreadMetadata> {
-    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
-    thread.agent_id = agent_id;
-    thread.updated_at = Utc::now();
-    write_thread_metadata(&thread)?;
-    Ok(thread)
+pub fn set_thread_agent(
+    workspace_id: &str,
+    thread_id: &str,
+    agent_id: String,
+) -> Result<ThreadMetadata> {
+    mutate_thread_metadata(workspace_id, thread_id, |thread| {
+        thread.agent_id = agent_id;
+        thread.updated_at = Utc::now();
+        Ok(())
+    })
 }
 
 pub fn rename_thread(workspace_id: &str, thread_id: &str, title: String) -> Result<ThreadMetadata> {
-    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
     let trimmed = title.trim();
     if trimmed.is_empty() {
         return Err(anyhow!("Thread title cannot be empty"));
     }
-    thread.title = trimmed.chars().take(80).collect();
-    thread.updated_at = Utc::now();
-    write_thread_metadata(&thread)?;
-    Ok(thread)
+    mutate_thread_metadata(workspace_id, thread_id, |thread| {
+        thread.title = trimmed.chars().take(80).collect();
+        thread.updated_at = Utc::now();
+        Ok(())
+    })
 }
 
 pub fn archive_thread(workspace_id: &str, thread_id: &str) -> Result<ThreadMetadata> {
-    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
-    thread.is_archived = true;
-    thread.updated_at = Utc::now();
-    write_thread_metadata(&thread)?;
-    Ok(thread)
+    mutate_thread_metadata(workspace_id, thread_id, |thread| {
+        thread.is_archived = true;
+        thread.updated_at = Utc::now();
+        Ok(())
+    })
 }
 
 pub fn delete_thread(workspace_id: &str, thread_id: &str) -> Result<()> {
@@ -296,24 +388,28 @@ pub fn set_thread_run_state(
     started_at: Option<chrono::DateTime<Utc>>,
     ended_at: Option<chrono::DateTime<Utc>>,
 ) -> Result<ThreadMetadata> {
-    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
-    thread.last_run_status = status;
-    if started_at.is_some() {
-        thread.last_run_started_at = started_at;
-    }
-    if ended_at.is_some() {
-        thread.last_run_ended_at = ended_at;
-    }
-    thread.updated_at = Utc::now();
-    write_thread_metadata(&thread)?;
-    Ok(thread)
+    mutate_thread_metadata(workspace_id, thread_id, |thread| {
+        thread.last_run_status = status;
+        if started_at.is_some() {
+            thread.last_run_started_at = started_at;
+        }
+        if ended_at.is_some() {
+            thread.last_run_ended_at = ended_at;
+        }
+        thread.updated_at = Utc::now();
+        Ok(())
+    })
 }
 
 fn transcript_path(workspace_id: &str, thread_id: &str) -> Result<PathBuf> {
     Ok(thread_dir(workspace_id, thread_id)?.join("transcript.jsonl"))
 }
 
-pub fn append_transcript_entry(workspace_id: &str, thread_id: &str, entry: &TranscriptEntry) -> Result<()> {
+pub fn append_transcript_entry(
+    workspace_id: &str,
+    thread_id: &str,
+    entry: &TranscriptEntry,
+) -> Result<()> {
     let path = transcript_path(workspace_id, thread_id)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -325,15 +421,16 @@ pub fn append_transcript_entry(workspace_id: &str, thread_id: &str, entry: &Tran
     let serialized = serde_json::to_string(entry)?;
     writeln!(file, "{serialized}")?;
 
-    let mut thread = read_thread_metadata(workspace_id, thread_id)?;
-    thread.updated_at = Utc::now();
-    if entry.role == "user" {
-        let first_line = entry.content.lines().next().unwrap_or("New thread").trim();
-        if thread.title == "New thread" && !first_line.is_empty() {
-            thread.title = first_line.chars().take(50).collect();
+    mutate_thread_metadata(workspace_id, thread_id, |thread| {
+        thread.updated_at = Utc::now();
+        if entry.role == "user" {
+            let first_line = entry.content.lines().next().unwrap_or("New thread").trim();
+            if thread.title == "New thread" && !first_line.is_empty() {
+                thread.title = first_line.chars().take(50).collect();
+            }
         }
-    }
-    write_thread_metadata(&thread)?;
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -356,7 +453,11 @@ pub fn load_transcript(workspace_id: &str, thread_id: &str) -> Result<Vec<Transc
     Ok(entries)
 }
 
-pub fn append_user_message(workspace_id: &str, thread_id: &str, content: &str) -> Result<TranscriptEntry> {
+pub fn append_user_message(
+    workspace_id: &str,
+    thread_id: &str,
+    content: &str,
+) -> Result<TranscriptEntry> {
     let entry = TranscriptEntry {
         id: Uuid::new_v4().to_string(),
         role: "user".to_string(),
@@ -381,6 +482,7 @@ pub fn resolve_workspace_id_by_path(workspace_path: &str) -> Result<Option<Strin
 }
 
 pub fn find_thread_workspace(thread_id: &str) -> Result<Option<String>> {
+    let thread_id = validate_storage_segment(thread_id, "thread id")?;
     let threads_root = ensure_base_dirs()?.join("threads");
     if !threads_root.exists() {
         return Ok(None);
@@ -408,11 +510,8 @@ pub fn find_thread_workspace(thread_id: &str) -> Result<Option<String>> {
 }
 
 pub fn write_json_file<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let raw = serde_json::to_string_pretty(value)?;
-    fs::write(path, raw)?;
+    write_file_atomic(path, raw.as_bytes())?;
     Ok(())
 }
 
@@ -436,7 +535,8 @@ mod tests {
 
         std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
 
-        let added = add_workspace(workspace_path.to_string_lossy().as_ref()).expect("workspace should be added");
+        let added = add_workspace(workspace_path.to_string_lossy().as_ref())
+            .expect("workspace should be added");
         let first_load = load_workspaces().expect("workspaces should load");
         let second_load = load_workspaces().expect("workspaces should load after reload");
 
@@ -453,19 +553,24 @@ mod tests {
     fn full_access_persists_per_thread() {
         let _guard = test_lock().lock().expect("lock poisoned");
 
-        let temp_root = std::env::temp_dir().join(format!("claude-desk-thread-test-{}", Uuid::new_v4()));
+        let temp_root =
+            std::env::temp_dir().join(format!("claude-desk-thread-test-{}", Uuid::new_v4()));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
 
         std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
 
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref()).expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string())).expect("thread should be created");
+        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
+            .expect("workspace should be added");
+        let thread = create_thread(&workspace.id, Some("claude-code".to_string()))
+            .expect("thread should be created");
 
-        let updated = set_thread_full_access(&workspace.id, &thread.id, true).expect("full access should update");
+        let updated = set_thread_full_access(&workspace.id, &thread.id, true)
+            .expect("full access should update");
         assert!(updated.full_access);
 
-        let reloaded = read_thread_metadata(&workspace.id, &thread.id).expect("thread should reload");
+        let reloaded =
+            read_thread_metadata(&workspace.id, &thread.id).expect("thread should reload");
         assert!(reloaded.full_access);
 
         std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
@@ -476,14 +581,17 @@ mod tests {
     fn claude_session_id_persists_per_thread() {
         let _guard = test_lock().lock().expect("lock poisoned");
 
-        let temp_root = std::env::temp_dir().join(format!("claude-desk-session-test-{}", Uuid::new_v4()));
+        let temp_root =
+            std::env::temp_dir().join(format!("claude-desk-session-test-{}", Uuid::new_v4()));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
 
         std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
 
-        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref()).expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string())).expect("thread should be created");
+        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
+            .expect("workspace should be added");
+        let thread = create_thread(&workspace.id, Some("claude-code".to_string()))
+            .expect("thread should be created");
 
         let captured = set_thread_claude_session_id_if_missing(
             &workspace.id,
@@ -503,16 +611,101 @@ mod tests {
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         )
         .expect("duplicate capture should not error");
-        assert!(duplicate.is_none(), "capture should not overwrite existing session id");
+        assert!(
+            duplicate.is_none(),
+            "capture should not overwrite existing session id"
+        );
 
-        let reloaded = read_thread_metadata(&workspace.id, &thread.id).expect("thread should reload");
+        let reloaded =
+            read_thread_metadata(&workspace.id, &thread.id).expect("thread should reload");
         assert_eq!(
             reloaded.claude_session_id.as_deref(),
             Some("123e4567-e89b-12d3-a456-426614174000")
         );
 
-        let cleared = clear_thread_claude_session(&workspace.id, &thread.id).expect("clear should succeed");
+        let cleared =
+            clear_thread_claude_session(&workspace.id, &thread.id).expect("clear should succeed");
         assert!(cleared.claude_session_id.is_none());
+
+        std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn rejects_invalid_thread_path_segments() {
+        let _guard = test_lock().lock().expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "claude-desk-invalid-thread-id-test-{}",
+            Uuid::new_v4()
+        ));
+        let workspace_path = temp_root.join("workspace");
+        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
+
+        std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
+        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
+            .expect("workspace should be added");
+
+        let error = read_thread_metadata(&workspace.id, "../escape")
+            .expect_err("invalid thread id should fail");
+        assert!(
+            error.to_string().contains("Invalid thread id"),
+            "unexpected error: {error}"
+        );
+
+        std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn set_thread_claude_session_id_is_atomic_across_threads() {
+        let _guard = test_lock().lock().expect("lock poisoned");
+
+        let temp_root =
+            std::env::temp_dir().join(format!("claude-desk-session-race-test-{}", Uuid::new_v4()));
+        let workspace_path = temp_root.join("workspace");
+        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
+
+        std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
+
+        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
+            .expect("workspace should be added");
+        let thread = create_thread(&workspace.id, Some("claude-code".to_string()))
+            .expect("thread should be created");
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let workspace_id = workspace.id.clone();
+            let thread_id = thread.id.clone();
+            let session_candidate = Uuid::new_v4().to_string();
+            handles.push(std::thread::spawn(move || {
+                set_thread_claude_session_id_if_missing(
+                    &workspace_id,
+                    &thread_id,
+                    &session_candidate,
+                )
+                .expect("capture should not fail")
+                .and_then(|metadata| metadata.claude_session_id)
+            }));
+        }
+
+        let mut captured = Vec::new();
+        for handle in handles {
+            if let Some(session_id) = handle.join().expect("capture worker panicked") {
+                captured.push(session_id);
+            }
+        }
+
+        assert_eq!(
+            captured.len(),
+            1,
+            "exactly one concurrent capture should succeed"
+        );
+        let stored = read_thread_metadata(&workspace.id, &thread.id)
+            .expect("thread should reload")
+            .claude_session_id
+            .expect("session id should be stored");
+        assert_eq!(stored, captured[0]);
 
         std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
