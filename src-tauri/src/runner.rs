@@ -144,6 +144,32 @@ fn build_claude_shell_command(
     parts.join(" ")
 }
 
+fn should_use_terminal_demo(env_vars: Option<&HashMap<String, String>>) -> bool {
+    env_vars
+        .and_then(|vars| vars.get("CLAUDE_DESK_TERMINAL_DEMO"))
+        .map(|value| {
+            value == "1"
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+                || value.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false)
+}
+
+fn build_terminal_demo_shell_command() -> String {
+    [
+        "printf '\\n[Claude Desk PTY demo] starting...\\n'",
+        "i=1; while [ \"$i\" -le 120 ]; do printf 'line %03d quick stream output\\n' \"$i\"; i=$((i+1)); sleep 0.015; done",
+        "long=''; n=1; while [ \"$n\" -le 36 ]; do long=\"${long}0123456789\"; n=$((n+1)); done; printf 'wrapped: %s\\n' \"$long\"",
+        "pct=0; while [ \"$pct\" -le 100 ]; do printf '\\rprogress %3d%%' \"$pct\"; pct=$((pct+2)); sleep 0.025; done; printf '\\n'",
+        "printf 'cursor demo line A\\ncursor demo line B\\n'; printf '\\033[1A\\033[2Kcursor demo line B (rewritten)\\n'",
+        "j=1; while [ \"$j\" -le 80 ]; do printf 'burst %03d ........................................................................\\n' \"$j\"; j=$((j+1)); done",
+        "printf '[Claude Desk PTY demo] complete\\n'",
+        "exec ${SHELL:-/bin/zsh} -i",
+    ]
+    .join("; ")
+}
+
 fn is_uuid_like(value: &str) -> bool {
     if value.len() != 36 {
         return false;
@@ -676,6 +702,7 @@ pub async fn terminal_start_session(
     full_access_flag: bool,
     thread_id: String,
 ) -> Result<TerminalStartResponse> {
+    let demo_mode = should_use_terminal_demo(env_vars.as_ref());
     let workspace_id =
         storage::resolve_workspace_id_by_path(&workspace_path)?.ok_or_else(|| {
             anyhow!("Workspace not registered. Add workspace before starting terminal.")
@@ -740,9 +767,15 @@ pub async fn terminal_start_session(
     thread.updated_at = started_at;
     storage::write_thread_metadata(&thread)?;
 
-    let settings = storage::load_settings()?;
-    let cli_path = detect_claude_cli_path(&settings)
-        .ok_or_else(|| anyhow!("Claude CLI not found. Configure the CLI path in Settings."))?;
+    let cli_path = if demo_mode {
+        None
+    } else {
+        let settings = storage::load_settings()?;
+        Some(
+            detect_claude_cli_path(&settings)
+                .ok_or_else(|| anyhow!("Claude CLI not found. Configure the CLI path in Settings."))?,
+        )
+    };
 
     let cwd = initial_cwd.unwrap_or_else(|| workspace_path.clone());
     let session_id = Uuid::new_v4().to_string();
@@ -750,12 +783,16 @@ pub async fn terminal_start_session(
     fs::create_dir_all(&run_dir)?;
 
     let shell_path = resolve_login_shell();
-    let shell_command = build_claude_shell_command(
-        &cli_path,
-        &launch_session_id,
-        session_mode == TerminalSessionMode::Resumed,
-        full_access_flag,
-    );
+    let shell_command = if demo_mode {
+        build_terminal_demo_shell_command()
+    } else {
+        build_claude_shell_command(
+            cli_path.as_deref().unwrap_or("claude"),
+            &launch_session_id,
+            session_mode == TerminalSessionMode::Resumed,
+            full_access_flag,
+        )
+    };
     let command_manifest = vec![
         shell_path.clone(),
         "-lic".to_string(),
@@ -779,7 +816,7 @@ pub async fn terminal_start_session(
             "shell": shell_path,
             "shellCommand": shell_command,
             "startedAt": started_at,
-            "mode": "interactive-terminal"
+            "mode": if demo_mode { "interactive-terminal-demo" } else { "interactive-terminal" }
         }),
     )?;
 

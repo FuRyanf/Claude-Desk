@@ -11,8 +11,13 @@ interface BottomBarProps {
   workspace?: Workspace;
   selectedThread?: ThreadMetadata;
   fullAccessUpdating?: boolean;
+  devMode?: boolean;
+  terminalDemoMode?: boolean;
+  terminalDebugLogging?: boolean;
   gitInfo: GitInfo | null;
   onToggleFullAccess: () => Promise<void>;
+  onToggleTerminalDemoMode: () => Promise<void>;
+  onToggleTerminalDebugLogging: () => void;
   onLoadBranchSwitcher: () => Promise<BranchSwitcherSnapshot>;
   onCheckoutBranch: (branchName: string) => Promise<boolean>;
   onCreateAndCheckoutBranch: (branchName: string) => Promise<boolean>;
@@ -39,8 +44,13 @@ export function BottomBar({
   workspace,
   selectedThread,
   fullAccessUpdating = false,
+  devMode = false,
+  terminalDemoMode = false,
+  terminalDebugLogging = false,
   gitInfo,
   onToggleFullAccess,
+  onToggleTerminalDemoMode,
+  onToggleTerminalDebugLogging,
   onLoadBranchSwitcher,
   onCheckoutBranch,
   onCreateAndCheckoutBranch
@@ -305,6 +315,30 @@ export function BottomBar({
       </div>
 
       <div className="bottom-bar-right">
+        {devMode ? (
+          <>
+            <button
+              type="button"
+              className={terminalDemoMode ? 'dev-toggle-button enabled' : 'dev-toggle-button'}
+              data-testid="terminal-demo-toggle"
+              aria-pressed={terminalDemoMode}
+              onClick={() => void onToggleTerminalDemoMode()}
+              title="Run PTY terminal demo command instead of Claude (dev only)"
+            >
+              Demo PTY
+            </button>
+            <button
+              type="button"
+              className={terminalDebugLogging ? 'dev-toggle-button enabled' : 'dev-toggle-button'}
+              data-testid="terminal-debug-toggle"
+              aria-pressed={terminalDebugLogging}
+              onClick={onToggleTerminalDebugLogging}
+              title="Log PTY and xterm queue diagnostics in dev tools"
+            >
+              Term Logs
+            </button>
+          </>
+        ) : null}
         <button
           type="button"
           className={selectedThread?.fullAccess ? 'full-access-toggle enabled' : 'full-access-toggle'}
