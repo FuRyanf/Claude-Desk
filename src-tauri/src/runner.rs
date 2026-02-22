@@ -833,6 +833,7 @@ pub async fn terminal_start_session(
     command.arg(shell_command.clone());
     command.cwd(cwd.clone());
     command.env("TERM", "xterm-256color");
+    command.env("ZSH_DISABLE_COMPFIX", "true");
     for (key, value) in env::vars() {
         command.env(key, value);
     }

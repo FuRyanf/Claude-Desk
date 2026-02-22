@@ -84,7 +84,7 @@ export function TerminalPanel({
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
   const debugMetricsRef = useRef<TerminalDebugMetrics>(emptyDebugMetrics());
   const writeQueueRef = useRef<TerminalWriteQueue>(new TerminalWriteQueue());
-  const shouldScrollToBottomRef = useRef(true);
+  const shouldAutoFollowRef = useRef(true);
   const startupNoiseSuppressorRef = useRef<TerminalStartupNoiseSuppressor>(
     createTerminalStartupNoiseSuppressor(suppressStartupNoise)
   );
@@ -161,7 +161,6 @@ export function TerminalPanel({
       return;
     }
 
-    shouldScrollToBottomRef.current = false;
     term.scrollToBottom();
     window.requestAnimationFrame(() => {
       terminalRef.current?.scrollToBottom();
@@ -262,7 +261,12 @@ export function TerminalPanel({
       terminalRef.current = term;
       writeQueueRef.current.setSink({
         write: (chunk, done) => {
-          term.write(chunk, done);
+          term.write(chunk, () => {
+            if (shouldAutoFollowRef.current) {
+              term.scrollToBottom();
+            }
+            done();
+          });
         }
       });
 
@@ -315,6 +319,9 @@ export function TerminalPanel({
           scheduleOutgoingInputFlush();
         }
       });
+      const onScrollDisposable = term.onScroll((position) => {
+        shouldAutoFollowRef.current = position >= term.buffer.active.baseY;
+      });
 
       const onFocusIn = () => onFocusChangeRef.current?.(true);
       const onFocusOut = () => onFocusChangeRef.current?.(false);
@@ -341,6 +348,7 @@ export function TerminalPanel({
         setTerminalReady(false);
         observer.disconnect();
         onDataDisposable.dispose();
+        onScrollDisposable.dispose();
         host.removeEventListener('focusin', onFocusIn);
         host.removeEventListener('focusout', onFocusOut);
         if (resizeDebounceTimerRef.current !== null) {
@@ -362,7 +370,7 @@ export function TerminalPanel({
           inputFlushTimerRef.current = null;
         }
         lastSentSizeRef.current = null;
-        shouldScrollToBottomRef.current = true;
+        shouldAutoFollowRef.current = true;
       };
     } catch {
       setFallback(true);
@@ -403,7 +411,7 @@ export function TerminalPanel({
     sessionRef.current = sessionId;
     hasLiveDataRef.current = false;
     hydratedSessionRef.current = null;
-    shouldScrollToBottomRef.current = true;
+    shouldAutoFollowRef.current = true;
     startupNoiseSuppressorRef.current = createTerminalStartupNoiseSuppressor(suppressStartupNoise);
     clearPendingWrites();
     inputBufferRef.current = '';
@@ -439,7 +447,7 @@ export function TerminalPanel({
     }
 
     resetTerminalContent(content);
-    shouldScrollToBottomRef.current = true;
+    shouldAutoFollowRef.current = true;
     scrollTerminalToBottom();
   }, [content, readOnly, resetTerminalContent, scrollTerminalToBottom, sessionId, terminalReady]);
 
@@ -460,7 +468,7 @@ export function TerminalPanel({
     resetTerminalContent(content);
     hydratedSessionRef.current = sessionId;
     writeQueueRef.current.flushImmediate();
-    shouldScrollToBottomRef.current = true;
+    shouldAutoFollowRef.current = true;
     scrollTerminalToBottom();
     logDebugSnapshot('hydrate-content');
   }, [
@@ -495,9 +503,6 @@ export function TerminalPanel({
       debugMetricsRef.current.ptyBytes += filteredChunk.length;
       onOutputRef.current?.(filteredChunk);
       queueWrite(filteredChunk);
-      if (shouldScrollToBottomRef.current) {
-        scrollTerminalToBottom();
-      }
       logDebugSnapshot('pty-data');
     }).then((cleanup) => {
       if (disposed) {
