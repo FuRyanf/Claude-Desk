@@ -25,8 +25,6 @@ interface LeftRailProps {
   onRenameThread: (workspaceId: string, threadId: string, title: string) => Promise<void>;
   onArchiveThread: (workspaceId: string, threadId: string) => Promise<void>;
   onDeleteThread: (workspaceId: string, threadId: string) => Promise<void>;
-  onResumeThreadSession: (thread: ThreadMetadata) => Promise<void>;
-  onStartFreshThreadSession: (thread: ThreadMetadata) => Promise<void>;
   onCopyResumeCommand: (thread: ThreadMetadata) => Promise<void>;
   getSearchTextForThread?: (threadId: string) => string;
 }
@@ -173,8 +171,6 @@ export function LeftRail({
   onRenameThread,
   onArchiveThread,
   onDeleteThread,
-  onResumeThreadSession,
-  onStartFreshThreadSession,
   onCopyResumeCommand,
   getSearchTextForThread
 }: LeftRailProps) {
@@ -514,25 +510,6 @@ export function LeftRail({
             }}
           >
             New thread
-          </button>
-          <button
-            type="button"
-            disabled={!contextMenu.thread.claudeSessionId}
-            onClick={async () => {
-              await onResumeThreadSession(contextMenu.thread);
-              setContextMenu(null);
-            }}
-          >
-            Resume session
-          </button>
-          <button
-            type="button"
-            onClick={async () => {
-              await onStartFreshThreadSession(contextMenu.thread);
-              setContextMenu(null);
-            }}
-          >
-            Start fresh session
           </button>
           <button
             type="button"

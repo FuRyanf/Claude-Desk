@@ -247,8 +247,11 @@ describe('Thread actions', () => {
     render(<App />);
 
     const row = await screen.findByRole('button', { name: /Rename me/i });
-    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
-    await user.click(await screen.findByRole('button', { name: 'Start fresh session' }));
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-1' })
+      );
+    });
 
     await user.pointer([{ target: row, keys: '[MouseRight]' }]);
     await user.click(await screen.findByRole('button', { name: 'Delete' }));

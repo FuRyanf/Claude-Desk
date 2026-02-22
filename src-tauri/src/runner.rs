@@ -50,14 +50,17 @@ fn resolve_login_shell() -> String {
 
 fn build_claude_shell_command(
     cli_path: &str,
-    resume_session_id: Option<&str>,
+    session_id: &str,
+    resume_existing_session: bool,
     full_access_flag: bool,
 ) -> String {
     let mut parts = vec![shell_escape_arg(cli_path)];
-    if let Some(session_id) = resume_session_id {
+    if resume_existing_session {
         parts.push("--resume".to_string());
-        parts.push(shell_escape_arg(session_id));
+    } else {
+        parts.push("--session-id".to_string());
     }
+    parts.push(shell_escape_arg(session_id));
     if full_access_flag {
         parts.push("--dangerously-skip-permissions".to_string());
     }
@@ -147,6 +150,14 @@ fn extract_resume_session_id_from_chunk(parse_buffer: &mut String, chunk: &str) 
     }
 
     extract_claude_resume_session_id(parse_buffer)
+}
+
+fn recover_session_id_from_logs(workspace_id: &str, thread_id: &str) -> Option<String> {
+    let snapshot = terminal_get_last_log(workspace_id, thread_id).ok()?;
+    if snapshot.trim().is_empty() {
+        return None;
+    }
+    extract_claude_resume_session_id(&strip_ansi_sequences(&snapshot))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -532,16 +543,41 @@ pub async fn terminal_start_session(
         thread.claude_session_id = None;
     }
 
-    let resume_session_id = thread
+    let mut launch_session_id = thread
         .claude_session_id
         .clone()
         .filter(|session_id| is_uuid_like(session_id));
-    let session_mode = if resume_session_id.is_some() {
+    let mut recovered_from_logs = false;
+    if launch_session_id.is_none() {
+        if let Some(recovered) = recover_session_id_from_logs(&workspace_id, &thread_id) {
+            launch_session_id = Some(recovered);
+            recovered_from_logs = true;
+        }
+    }
+    let generated_session_id = if launch_session_id.is_none() {
+        launch_session_id = Some(Uuid::new_v4().to_string());
+        true
+    } else {
+        false
+    };
+    thread.claude_session_id = launch_session_id.clone();
+
+    let has_prior_launch = thread.last_new_session_at.is_some() || thread.last_resume_at.is_some();
+    let session_mode = if generated_session_id {
+        thread.last_new_session_at = Some(started_at);
+        TerminalSessionMode::New
+    } else if recovered_from_logs || has_prior_launch {
         thread.last_resume_at = Some(started_at);
         TerminalSessionMode::Resumed
     } else {
         thread.last_new_session_at = Some(started_at);
         TerminalSessionMode::New
+    };
+    let launch_session_id = launch_session_id.ok_or_else(|| anyhow!("Missing Claude session id"))?;
+    let resume_session_id = if session_mode == TerminalSessionMode::Resumed {
+        Some(launch_session_id.clone())
+    } else {
+        None
     };
     thread.updated_at = started_at;
     storage::write_thread_metadata(&thread)?;
@@ -556,7 +592,12 @@ pub async fn terminal_start_session(
     fs::create_dir_all(&run_dir)?;
 
     let shell_path = resolve_login_shell();
-    let shell_command = build_claude_shell_command(&cli_path, resume_session_id.as_deref(), full_access_flag);
+    let shell_command = build_claude_shell_command(
+        &cli_path,
+        &launch_session_id,
+        session_mode == TerminalSessionMode::Resumed,
+        full_access_flag,
+    );
     let command_manifest = vec![shell_path.clone(), "-lic".to_string(), shell_command.clone()];
     storage::write_json_file(
         &run_dir.join("input_manifest.json"),
@@ -569,6 +610,7 @@ pub async fn terminal_start_session(
             "sessionMode": session_mode.as_str(),
             "resumeSessionId": resume_session_id.clone(),
             "claudeSessionId": thread.claude_session_id.clone(),
+            "launchSessionId": launch_session_id,
             "cwd": cwd,
             "envVars": env_vars,
             "command": command_manifest,
@@ -635,7 +677,7 @@ pub async fn terminal_start_session(
     let data_thread_id = thread_id.clone();
     let data_output_log = output_log.clone();
     let data_app = app.clone();
-    let mut should_capture_session_id = thread.claude_session_id.is_none();
+    let mut should_capture_session_id = false;
     std::thread::spawn(move || {
         let mut buffer = [0u8; 4096];
         let mut utf8_carry = Vec::<u8>::new();

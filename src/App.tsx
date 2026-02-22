@@ -550,6 +550,7 @@ export default function App() {
           }
           return '';
         }
+        applyThreadUpdate(response.thread);
 
         const startedAt = new Date().toISOString();
         runStore.bindSession(thread.id, sessionId, startedAt);
@@ -583,6 +584,7 @@ export default function App() {
       return startPromise;
     },
     [
+      applyThreadUpdate,
       bumpSessionStartRequestId,
       flushPendingThreadInput,
       hydrateSessionSnapshot,
@@ -855,17 +857,6 @@ export default function App() {
       });
     },
     [ensureSessionForThread, pushToast, setSelectedThread, setSelectedWorkspace, stopThreadSession]
-  );
-
-  const onResumeThreadSession = useCallback(
-    async (thread: ThreadMetadata) => {
-      if (!thread.claudeSessionId) {
-        pushToast('No saved Claude session id for this thread yet.', 'error');
-        return;
-      }
-      await restartThreadSession(thread);
-    },
-    [pushToast, restartThreadSession]
   );
 
   const onStartFreshThreadSession = useCallback(
@@ -1301,18 +1292,33 @@ export default function App() {
       : normalizedStatus;
   const selectedSessionMode = selectedThreadId ? sessionModeByThread[selectedThreadId] : undefined;
   const sessionModeLabel = useMemo(() => {
+    const sessionHint = selectedThread?.claudeSessionId?.slice(0, 8);
+    const hasSessionHistory = Boolean(selectedThread?.lastNewSessionAt || selectedThread?.lastResumeAt);
+
+    if (isSelectedThreadStarting) {
+      if (hasSessionHistory) {
+        return sessionHint ? `Resuming ${sessionHint}` : 'Resuming';
+      }
+      return sessionHint ? `Starting ${sessionHint}` : 'Starting session';
+    }
+
     if (selectedSessionMode === 'resumed') {
-      const sessionHint = selectedThread?.claudeSessionId?.slice(0, 8);
       return sessionHint ? `Resumed ${sessionHint}` : 'Resumed';
     }
     if (selectedSessionMode === 'new') {
-      return 'New session';
+      return sessionHint ? `New session ${sessionHint}` : 'New session';
     }
     if (selectedThread?.claudeSessionId) {
-      return 'Resume ready';
+      return sessionHint ? `Session ${sessionHint}` : 'Session linked';
     }
     return undefined;
-  }, [selectedSessionMode, selectedThread?.claudeSessionId]);
+  }, [
+    isSelectedThreadStarting,
+    selectedSessionMode,
+    selectedThread?.claudeSessionId,
+    selectedThread?.lastNewSessionAt,
+    selectedThread?.lastResumeAt
+  ]);
   const appShellStyle = useMemo(
     () =>
       ({
@@ -1352,8 +1358,6 @@ export default function App() {
         onRenameThread={onRenameThread}
         onArchiveThread={onArchiveThread}
         onDeleteThread={onDeleteThread}
-        onResumeThreadSession={onResumeThreadSession}
-        onStartFreshThreadSession={onStartFreshThreadSession}
         onCopyResumeCommand={onCopyResumeCommand}
         getSearchTextForThread={(threadId) => lastTerminalLogByThread[threadId] ?? ''}
       />

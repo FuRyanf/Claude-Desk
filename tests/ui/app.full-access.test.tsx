@@ -190,12 +190,9 @@ describe('Terminal launch flags', () => {
   });
 
   it('always starts terminal sessions without dangerous permissions flag', async () => {
-    const user = userEvent.setup();
     render(<App />);
 
-    const row = await screen.findByRole('button', { name: /Full Access Thread/i });
-    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
-    await user.click(await screen.findByRole('button', { name: 'Start fresh session' }));
+    await screen.findByRole('button', { name: /Full Access Thread/i });
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
