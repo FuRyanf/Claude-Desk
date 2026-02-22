@@ -6,6 +6,7 @@ interface ActiveRunInfo {
 }
 
 interface LeftRailProps {
+  sidebarWidth: number;
   workspaces: Workspace[];
   threadsByWorkspace: Record<string, ThreadMetadata[]>;
   selectedWorkspaceId?: string;
@@ -133,6 +134,7 @@ function formatRelativeShort(iso: string, nowMs: number): string {
 }
 
 export function LeftRail({
+  sidebarWidth,
   workspaces,
   threadsByWorkspace,
   selectedWorkspaceId,
@@ -232,7 +234,7 @@ export function LeftRail({
   );
 
   return (
-    <aside className="left-rail" data-testid="sidebar" aria-label="Workspace sidebar" style={{ width: 320 }}>
+    <aside className="left-rail" data-testid="sidebar" aria-label="Workspace sidebar" style={{ width: sidebarWidth }}>
       <div className="workspace-controls codex-rail-header">
         <div className="codex-rail-title-row">
           <label>Threads</label>

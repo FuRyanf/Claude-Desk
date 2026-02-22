@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -227,5 +227,23 @@ describe('App terminal-first layout', () => {
     expect(composer).toBeNull();
 
     expect(document.querySelector('.terminal-panel')).toBeTruthy();
+  });
+
+  it('supports dragging the sidebar resizer and persists width', async () => {
+    render(<App />);
+
+    const sidebar = await screen.findByTestId('sidebar');
+    const resizer = await screen.findByTestId('sidebar-resizer');
+
+    expect(getComputedStyle(sidebar).width).toBe('320px');
+
+    fireEvent.mouseDown(resizer, { button: 0, clientX: 320 });
+    fireEvent.mouseMove(window, { clientX: 392 });
+    fireEvent.mouseUp(window);
+
+    await waitFor(() => {
+      expect(getComputedStyle(sidebar).width).toBe('392px');
+      expect(window.localStorage.getItem('claude-desk:sidebar-width')).toBe('392');
+    });
   });
 });

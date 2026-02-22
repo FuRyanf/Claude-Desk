@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent
+} from 'react';
 
 import { open } from '@tauri-apps/plugin-dialog';
 
@@ -26,6 +35,10 @@ import type {
 
 const SELECTED_WORKSPACE_KEY = 'claude-desk:selected-workspace';
 const FULL_ACCESS_CONFIRM_KEY = 'claude-desk:full-access-confirmed';
+const SIDEBAR_WIDTH_KEY = 'claude-desk:sidebar-width';
+const SIDEBAR_WIDTH_DEFAULT = 320;
+const SIDEBAR_WIDTH_MIN = 260;
+const SIDEBAR_WIDTH_MAX = 460;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
 interface PendingSessionStart {
@@ -104,6 +117,10 @@ function looksLikeResumeFailureOutput(output: string): boolean {
   );
 }
 
+function clampSidebarWidth(width: number): number {
+  return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, Math.round(width)));
+}
+
 export default function App() {
   const threadStore = useThreadStore();
   const runStore = useRunStore();
@@ -124,6 +141,17 @@ export default function App() {
   } = threadStore;
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const savedRaw = window.localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    if (savedRaw !== null) {
+      const saved = Number(savedRaw);
+      if (Number.isFinite(saved)) {
+        return clampSidebarWidth(saved);
+      }
+    }
+    return SIDEBAR_WIDTH_DEFAULT;
+  });
+  const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const [threadSearch, setThreadSearch] = useState('');
   const [gitInfo, setGitInfo] = useState<GitInfo | null>(null);
   const [terminalFocused, setTerminalFocused] = useState(false);
@@ -155,6 +183,7 @@ export default function App() {
 
   const selectedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const selectedThreadIdRef = useRef<string | undefined>(undefined);
+  const sidebarResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const startingSessionByThreadRef = useRef<Record<string, PendingSessionStart>>({});
   const sessionStartRequestIdByThreadRef = useRef<Record<string, number>>({});
   const threadsByWorkspaceRef = useRef<Record<string, ThreadMetadata[]>>({});
@@ -214,6 +243,58 @@ export default function App() {
     threadsByWorkspaceRef.current = threadsByWorkspace;
   }, [threadsByWorkspace]);
 
+  useEffect(() => {
+    window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (!isSidebarResizing) {
+      return;
+    }
+
+    const onMove = (clientX: number) => {
+      const state = sidebarResizeStateRef.current;
+      if (!state) {
+        return;
+      }
+      const safeClientX = Number.isFinite(clientX) ? clientX : state.startX;
+      const nextWidth = clampSidebarWidth(state.startWidth + (safeClientX - state.startX));
+      if (!Number.isFinite(nextWidth)) {
+        return;
+      }
+      setSidebarWidth(nextWidth);
+    };
+
+    const onPointerMove = (event: PointerEvent) => {
+      onMove(event.clientX);
+    };
+
+    const onMouseMove = (event: MouseEvent) => {
+      onMove(event.clientX);
+    };
+
+    const finishResize = () => {
+      sidebarResizeStateRef.current = null;
+      setIsSidebarResizing(false);
+    };
+
+    document.body.classList.add('sidebar-resizing');
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('pointerup', finishResize);
+    window.addEventListener('pointercancel', finishResize);
+    window.addEventListener('mouseup', finishResize);
+
+    return () => {
+      document.body.classList.remove('sidebar-resizing');
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('pointerup', finishResize);
+      window.removeEventListener('pointercancel', finishResize);
+      window.removeEventListener('mouseup', finishResize);
+    };
+  }, [isSidebarResizing]);
+
   const pushToast = useCallback((message: string, type: 'error' | 'info' = 'error') => {
     const id = todayId();
     setToasts((current) => [...current, { id, type, message }]);
@@ -221,6 +302,40 @@ export default function App() {
       setToasts((current) => current.filter((toast) => toast.id !== id));
     }, 4500);
   }, []);
+
+  const beginSidebarResize = useCallback(
+    (clientX: number) => {
+      const safeClientX = Number.isFinite(clientX) ? clientX : 0;
+      sidebarResizeStateRef.current = {
+        startX: safeClientX,
+        startWidth: sidebarWidth
+      };
+      setIsSidebarResizing(true);
+    },
+    [sidebarWidth]
+  );
+
+  const startSidebarResize = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (typeof event.button === 'number' && event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      beginSidebarResize(event.clientX);
+    },
+    [beginSidebarResize]
+  );
+
+  const startSidebarResizeWithMouse = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (typeof event.button === 'number' && event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      beginSidebarResize(event.clientX);
+    },
+    [beginSidebarResize]
+  );
 
   const refreshWorkspaces = useCallback(async () => {
     const all = await api.listWorkspaces();
@@ -1021,10 +1136,18 @@ export default function App() {
   const selectedSessionMode = selectedThreadId ? sessionModeByThread[selectedThreadId] : undefined;
   const sessionModeLabel =
     selectedSessionMode === 'resumed' ? 'Resumed' : selectedSessionMode === 'new' ? 'New session' : undefined;
+  const appShellStyle = useMemo(
+    () =>
+      ({
+        '--sidebar-width': `${sidebarWidth}px`
+      }) as CSSProperties,
+    [sidebarWidth]
+  );
 
   return (
-    <div className="app-shell">
+    <div className={isSidebarResizing ? 'app-shell sidebar-resizing' : 'app-shell'} style={appShellStyle}>
       <LeftRail
+        sidebarWidth={sidebarWidth}
         workspaces={workspaces}
         threadsByWorkspace={threadsByWorkspace}
         selectedWorkspaceId={selectedWorkspaceId}
@@ -1055,6 +1178,15 @@ export default function App() {
         onStartFreshThreadSession={onStartFreshThreadSession}
         onCopyResumeCommand={onCopyResumeCommand}
         getSearchTextForThread={(threadId) => lastTerminalLogByThread[threadId] ?? ''}
+      />
+      <div
+        className="sidebar-resizer"
+        data-testid="sidebar-resizer"
+        role="separator"
+        aria-label="Resize sidebar"
+        aria-orientation="vertical"
+        onPointerDown={startSidebarResize}
+        onMouseDown={startSidebarResizeWithMouse}
       />
 
       <main className={blockingError ? 'main-panel has-blocking-error' : 'main-panel'} data-testid="main-panel">
