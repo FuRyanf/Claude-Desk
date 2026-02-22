@@ -1,53 +1,52 @@
 # Claude Desk
 
-Claude Desk is a native macOS Tauri app that wraps the local Claude Code CLI.
+Claude Desk is a native macOS Tauri app that wraps the local Claude Code CLI in an embedded terminal UI.
 
-It does not call Anthropic APIs directly. It starts your local `claude` binary in an interactive PTY and renders terminal output in-app.
+The app does not call Anthropic APIs directly. It launches your local `claude` binary in an interactive PTY and renders output in-app.
 
-## Product Scope
+## Requirements
 
-This app is intentionally minimal:
+- macOS (desktop build target)
+- Node.js + Yarn
+- Rust toolchain (for Tauri build)
+- Claude Code CLI installed (`claude` on PATH or configured in app settings)
 
-- workspace groups
-- threads per workspace
-- git branch + dirty state in header
-- running/idle status
-- embedded interactive terminal panel
+## Install
 
-No skills or context-pack controls are required for normal use.
+```bash
+yarn install --ignore-engines
+```
 
-## Core Behavior
+## Run In Development
 
-- `New thread` creates a distinct thread record (`thread.json`).
-- Selecting/opening a thread auto-starts a PTY session so you can type immediately.
-- Runs are stored under `runs/<runId>/` as children of a single thread.
-- Thread list is always driven by thread metadata, not by run logs.
-- Thread actions are available from right-click context menu: `Rename`, `Archive`, `Delete`.
+```bash
+yarn tauri dev
+```
 
-## Interactive Terminal Mode
+Optional frontend-only dev server:
 
-### How it works
+```bash
+yarn dev
+```
 
-- Backend starts `claude` in interactive mode inside a PTY (`portable-pty`).
-- PTY startup uses the same login shell path as Terminal (`$SHELL -lic`) for environment parity (MCP reliability).
-- Frontend uses `xterm.js` + fit addon for ANSI rendering and resize.
-- Keystrokes/paste are forwarded to PTY.
-- `Cmd+C` sends SIGINT to the PTY process.
-- Terminal is the primary input surface (no separate composer input).
+## Build
 
-### Session controls
+```bash
+yarn build
+yarn tauri build
+```
 
-- `Esc`: send SIGINT once; press again quickly to hard kill.
-- `Open`: open selected workspace in Finder.
-- `Terminal`: open selected workspace in native macOS Terminal.
+Built app output:
 
-### Persistence
+- `/Users/rfu/Claude Desk/src-tauri/target/release/bundle/macos/Claude Desk.app`
 
-Data path:
+## Data Storage
+
+Claude Desk stores data under:
 
 - `~/Library/Application Support/ClaudeDesk/`
 
-Important files:
+Important files/directories:
 
 - `workspaces.json`
 - `settings.json`
@@ -55,68 +54,99 @@ Important files:
 - `threads/<workspaceId>/<threadId>/runs/<runId>/output.log`
 - `threads/<workspaceId>/<threadId>/runs/<runId>/metadata.json`
 
-## Build and Run
+## Core Runtime Model
 
-```bash
-yarn install --ignore-engines
-yarn build
-yarn tauri dev
-```
+- Workspace and thread list state is driven by persisted thread metadata.
+- Selecting/opening a thread starts or resumes a PTY session for that thread.
+- Threads are first-class entities; runs are children under each thread.
+- Thread actions (`Rename`, `Archive`, `Delete`) mutate thread metadata/persistence only.
+- Per-thread `Full access` state is persisted and applied at session start.
 
-## How to build a macOS `.app`
+## Resume Behavior (High Level)
 
-```bash
-yarn build
-yarn tauri build
-```
+- Each thread can persist a Claude session id in `thread.json`.
+- On thread open/start:
+  - With session id: launches `claude --resume <sessionId>`
+  - Without session id: launches `claude`
+- Startup uses login shell parity (`$SHELL -lic`, fallback `/bin/zsh`) so env/path behavior matches Terminal.
+- If `Full access` is enabled for a thread, startup appends `--dangerously-skip-permissions`.
 
-Output:
+## Icons
 
-- `/Users/rfu/Claude Desk/src-tauri/target/release/bundle/macos/Claude Desk.app`
+Canonical source image:
 
-## How to update the icon
+- `/Users/rfu/Claude Desk/app icon.jpg`
 
-Source icon:
+Generated base icon:
 
 - `/Users/rfu/Claude Desk/assets/icon.png`
 
-Regenerate icon set:
+Regenerate all icons:
 
 ```bash
-yarn icons
+yarn generate:icons
 ```
 
-Generated icons:
+This updates platform icons under:
 
 - `/Users/rfu/Claude Desk/src-tauri/icons`
+- `/Users/rfu/Claude Desk/src-tauri/icons/macos`
 
-Rebuild app bundle after icon updates:
+## Verification
+
+UI tests:
+
+```bash
+yarn test:ui
+```
+
+Full app build:
 
 ```bash
 yarn tauri build
 ```
 
-## Verification Loop
-
-Run all checks with one command:
+Optional local verification loop:
 
 ```bash
 make verify
 ```
 
-This runs frontend build, UI tests, Rust tests, and a PTY smoke test.
+`make verify` runs frontend build, UI tests, Rust tests, and a Claude PTY smoke test, then writes logs under `artifacts/e2e/`.
+It also writes a summary report to `artifacts/last_diagnosis.txt`.
 
-Artifacts:
+## Troubleshooting
 
-- `artifacts/e2e/*.log`
-- `artifacts/last_diagnosis.md`
+### Claude CLI path not detected
 
-## Docs
+- Open app `Settings`.
+- Set `Claude CLI Path` explicitly (for example `/usr/local/bin/claude` or your local install path).
+- Re-open a thread to start a new PTY session.
 
-- `/Users/rfu/Claude Desk/docs/debug-notes.md`
-- `/Users/rfu/Claude Desk/docs/iteration-loop.md`
-- `/Users/rfu/Claude Desk/docs/threads-model.md`
-- `/Users/rfu/Claude Desk/docs/manual-left-rail.md`
-- `/Users/rfu/Claude Desk/docs/manual-terminal.md`
-- `/Users/rfu/Claude Desk/docs/mcp-debugging.md`
-- `/Users/rfu/Claude Desk/docs/assumptions.md`
+### MCP works in Terminal but not in Claude Desk
+
+- Confirm Claude Desk launches via login shell path (`$SHELL -lic`) by using the in-app diagnostics copy action.
+- Compare PATH/env output between Claude Desk diagnostics and native Terminal.
+- Ensure shell startup files that initialize MCP dependencies are valid (`~/.zprofile`, `~/.zshrc`, etc.).
+
+### Permissions and Full Access mode
+
+- Default behavior is standard Claude permission prompts.
+- Enable `Full access` per-thread to launch with `--dangerously-skip-permissions`.
+- Toggling `Full access` restarts the current thread session so the new mode takes effect immediately.
+
+### Workspace add or picker issues
+
+- Use `Add new project` and select a directory in the native folder picker.
+- If picker fails/unavailable, use manual path entry in the fallback modal.
+
+## Parity Checklist
+
+Validated in this cleanup pass:
+
+- [x] `yarn test:ui` passes.
+- [x] `yarn tauri build` succeeds.
+- [x] Thread/session model unchanged (create/select/rename/archive/delete).
+- [x] Resume/new-session behavior unchanged.
+- [x] Git branch switcher behavior unchanged.
+- [x] Full access toggle behavior unchanged.
