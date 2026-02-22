@@ -1,10 +1,6 @@
 import * as React from 'react';
 import type { ThreadMetadata, Workspace } from '../types';
 
-interface ActiveRunInfo {
-  startedAt: string;
-}
-
 interface LeftRailProps {
   sidebarWidth: number;
   workspaces: Workspace[];
@@ -12,20 +8,15 @@ interface LeftRailProps {
   selectedWorkspaceId?: string;
   selectedThreadId?: string;
   threadSearch: string;
-  nowMs: number;
-  activeRunsByThread: Record<string, ActiveRunInfo>;
-  onSelectWorkspace: (workspaceId: string) => void;
   onOpenWorkspacePicker: () => void;
-  onOpenManualWorkspaceModal: () => void;
   onOpenSettings: () => void;
-  onNewThread: () => void;
   onNewThreadInWorkspace: (workspaceId: string) => Promise<void>;
   onThreadSearchChange: (value: string) => void;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onRenameThread: (workspaceId: string, threadId: string, title: string) => Promise<void>;
-  onArchiveThread: (workspaceId: string, threadId: string) => Promise<void>;
   onDeleteThread: (workspaceId: string, threadId: string) => Promise<void>;
-  onCopyResumeCommand: (thread: ThreadMetadata) => Promise<void>;
+  onOpenWorkspaceInFinder: (workspacePath: string) => void;
+  onOpenWorkspaceInTerminal: (workspacePath: string) => void;
   getSearchTextForThread?: (threadId: string) => string;
 }
 
@@ -57,12 +48,8 @@ function FolderIcon() {
 
 function ChevronIcon({ expanded }: { expanded: boolean }) {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      {expanded ? (
-        <path d="M6 9.5 12 15l6-5.5" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-      ) : (
-        <path d="m9 6 5.5 6L9 18" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-      )}
+    <svg viewBox="0 0 24 24" aria-hidden="true" className={expanded ? 'workspace-chevron-icon expanded' : 'workspace-chevron-icon'}>
+      <path d="m9 6 5.5 6L9 18" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
     </svg>
   );
 }
@@ -75,14 +62,24 @@ function PlusIcon() {
   );
 }
 
-function PathIcon() {
+function DotsIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="6" cy="12" r="1.6" fill="currentColor" />
+      <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+      <circle cx="18" cy="12" r="1.6" fill="currentColor" />
+    </svg>
+  );
+}
+
+function ComposeIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path
-        d="M5.5 18.5 18.5 5.5M8.75 5.5h9.75v9.75"
+        d="M14.3 4.5h4.2c.55 0 1 .45 1 1v4.2M19 5 11 13M6.25 8h2.6M5.5 19h13c.55 0 1-.45 1-1V11M5.5 19a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h4.5"
         fill="none"
         stroke="currentColor"
-        strokeWidth="1.8"
+        strokeWidth="1.65"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
@@ -90,43 +87,28 @@ function PathIcon() {
   );
 }
 
-function ThreadIcon() {
+function TrashIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path
-        d="M12 6v12M6 12h12"
+        d="M4.8 7.2h14.4M9.5 4.8h5M8.3 7.2l.7 10.4a1.2 1.2 0 0 0 1.2 1.1h3.6a1.2 1.2 0 0 0 1.2-1.1l.7-10.4M10.3 10.4v5.8M13.7 10.4v5.8"
         fill="none"
         stroke="currentColor"
-        strokeWidth="1.9"
+        strokeWidth="1.7"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.7" />
     </svg>
   );
 }
 
-function formatDurationShort(totalSeconds: number): string {
-  const seconds = Math.max(0, Math.floor(totalSeconds));
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-
-  if (hours > 0) {
-    const remMinutes = minutes % 60;
-    return `${hours}h ${remMinutes}m`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${seconds % 60}s`;
-  }
-  return `${seconds}s`;
-}
-
-function formatRelativeShort(iso: string, nowMs: number): string {
+function formatRelativeShort(iso: string): string {
   const sourceMs = Date.parse(iso);
   if (!Number.isFinite(sourceMs)) {
     return 'now';
   }
 
+  const nowMs = Date.now();
   const diffSeconds = Math.max(1, Math.floor((nowMs - sourceMs) / 1000));
   if (diffSeconds < 60) {
     return `${diffSeconds}s`;
@@ -151,27 +133,128 @@ function formatRelativeShort(iso: string, nowMs: number): string {
   return `${diffWeeks}w`;
 }
 
-export function LeftRail({
+interface ThreadRowProps {
+  thread: ThreadMetadata;
+  active: boolean;
+  relativeTime: string;
+  isEditing: boolean;
+  editingValue: string;
+  onEditingValueChange: (value: string) => void;
+  onStartRename: (thread: ThreadMetadata) => void;
+  onCommitRename: (thread: ThreadMetadata) => Promise<void>;
+  onCancelRename: () => void;
+  onSelectThread: (workspaceId: string, threadId: string) => void;
+  onOpenThreadContextMenu: (event: React.MouseEvent, thread: ThreadMetadata) => void;
+  onDeleteThread: (workspaceId: string, threadId: string) => Promise<void>;
+}
+
+const ThreadRow = React.memo(function ThreadRow({
+  thread,
+  active,
+  relativeTime,
+  isEditing,
+  editingValue,
+  onEditingValueChange,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
+  onSelectThread,
+  onOpenThreadContextMenu,
+  onDeleteThread
+}: ThreadRowProps) {
+  return (
+    <li
+      key={thread.id}
+      className={active ? 'thread-item active' : 'thread-item'}
+      onContextMenu={(event) => {
+        onOpenThreadContextMenu(event, thread);
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => onSelectThread(thread.workspaceId, thread.id)}
+        onDoubleClick={(event) => {
+          event.preventDefault();
+          onStartRename(thread);
+        }}
+        className={active ? 'thread-button active' : 'thread-button'}
+      >
+        <span className="thread-main-row">
+          <span className="thread-main-leading">
+            {isEditing ? (
+              <input
+                className="thread-rename-input"
+                value={editingValue}
+                maxLength={80}
+                autoFocus
+                onChange={(event) => onEditingValueChange(event.target.value)}
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={async (event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    onCancelRename();
+                  }
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    await onCommitRename(thread);
+                  }
+                }}
+                onBlur={async () => {
+                  await onCommitRename(thread);
+                }}
+              />
+            ) : (
+              <span
+                className="thread-title"
+                onDoubleClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onStartRename(thread);
+                }}
+              >
+                {thread.title}
+              </span>
+            )}
+          </span>
+          <span className="thread-main-trailing">
+            <span className="thread-time">{relativeTime}</span>
+          </span>
+        </span>
+      </button>
+      <button
+        type="button"
+        className="thread-delete-button"
+        aria-label="Delete thread"
+        title={`Delete ${thread.title}`}
+        tabIndex={-1}
+        onClick={async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          await onDeleteThread(thread.workspaceId, thread.id);
+        }}
+      >
+        <TrashIcon />
+      </button>
+    </li>
+  );
+});
+
+function LeftRailComponent({
   sidebarWidth,
   workspaces,
   threadsByWorkspace,
   selectedWorkspaceId,
   selectedThreadId,
   threadSearch,
-  nowMs,
-  activeRunsByThread,
-  onSelectWorkspace,
   onOpenWorkspacePicker,
-  onOpenManualWorkspaceModal,
   onOpenSettings,
-  onNewThread,
   onNewThreadInWorkspace,
   onThreadSearchChange,
   onSelectThread,
   onRenameThread,
-  onArchiveThread,
   onDeleteThread,
-  onCopyResumeCommand,
+  onOpenWorkspaceInFinder,
+  onOpenWorkspaceInTerminal,
   getSearchTextForThread
 }: LeftRailProps) {
   const [editingThreadId, setEditingThreadId] = React.useState<string | null>(null);
@@ -182,6 +265,8 @@ export function LeftRail({
   const [expandedWorkspaceIds, setExpandedWorkspaceIds] = React.useState<Record<string, boolean>>({});
   const contextMenuRef = React.useRef<HTMLDivElement | null>(null);
   const workspaceContextMenuRef = React.useRef<HTMLDivElement | null>(null);
+  const renderCountRef = React.useRef(0);
+  renderCountRef.current += 1;
 
   const query = threadSearch.trim().toLowerCase();
 
@@ -249,59 +334,48 @@ export function LeftRail({
     [editingOriginal, editingValue, onRenameThread]
   );
 
-  const summarizeThreadStatus = React.useCallback(
-    (thread: ThreadMetadata, runningFor: string | null) => {
-      if (runningFor) {
-        return `Running ${runningFor}`;
-      }
-      if (thread.lastRunStatus === 'Failed') {
-        return 'Failed';
-      }
-      if (thread.lastRunStatus === 'Canceled') {
-        return 'Canceled';
-      }
-      if (thread.lastRunStatus === 'Succeeded') {
-        return 'Succeeded';
-      }
-      return null;
-    },
-    []
-  );
+  const onOpenThreadContextMenu = React.useCallback((event: React.MouseEvent, thread: ThreadMetadata) => {
+    event.preventDefault();
+    const x = Math.min(event.clientX, window.innerWidth - 180);
+    const y = Math.min(event.clientY, window.innerHeight - 160);
+    setWorkspaceContextMenu(null);
+    setContextMenu({ thread, x, y });
+  }, []);
+
+  const onStartRename = React.useCallback((thread: ThreadMetadata) => {
+    setEditingThreadId(thread.id);
+    setEditingValue(thread.title);
+    setEditingOriginal(thread.title);
+  }, []);
+
+  const onCancelRename = React.useCallback(() => {
+    setEditingThreadId(null);
+    setEditingValue('');
+    setEditingOriginal('');
+  }, []);
 
   return (
-    <aside className="left-rail" data-testid="sidebar" aria-label="Workspace sidebar" style={{ width: sidebarWidth }}>
+    <aside
+      className="left-rail"
+      data-testid="sidebar"
+      aria-label="Workspace sidebar"
+      style={{ width: sidebarWidth }}
+      data-render-count={import.meta.env.MODE === 'test' ? renderCountRef.current : undefined}
+    >
       <div className="workspace-controls codex-rail-header">
         <div className="codex-rail-title-row">
           <label>Threads</label>
           <div className="codex-rail-toolbar">
-            <button type="button" className="icon-ghost-button" onClick={onOpenWorkspacePicker} title="Add workspace">
+            <button
+              type="button"
+              className="icon-ghost-button add-project-button"
+              onClick={onOpenWorkspacePicker}
+              title="Add new project"
+            >
               <span className="rail-icon" aria-hidden="true">
                 <PlusIcon />
               </span>
-              <span>Add</span>
-            </button>
-            <button
-              type="button"
-              className="icon-ghost-button"
-              onClick={onOpenManualWorkspaceModal}
-              title="Add workspace by path"
-            >
-              <span className="rail-icon" aria-hidden="true">
-                <PathIcon />
-              </span>
-              <span>Path</span>
-            </button>
-            <button
-              type="button"
-              className="icon-primary-button"
-              onClick={onNewThread}
-              disabled={!selectedWorkspaceId}
-              title="New thread"
-            >
-              <span className="rail-icon" aria-hidden="true">
-                <ThreadIcon />
-              </span>
-              <span>New thread</span>
+              <span>Add new project</span>
             </button>
           </div>
         </div>
@@ -327,6 +401,7 @@ export function LeftRail({
         <ul className="workspace-groups">
           {workspaces.map((workspace) => {
             const isSelectedWorkspace = workspace.id === selectedWorkspaceId;
+            const isExpanded = expandedWorkspaceIds[workspace.id] !== false;
             const allThreads = threadsByWorkspace[workspace.id] ?? [];
             const visibleThreads = allThreads.filter((thread) => {
               if (!query) {
@@ -338,156 +413,129 @@ export function LeftRail({
             });
 
             return (
-              <li key={workspace.id} className={isSelectedWorkspace ? 'workspace-group selected' : 'workspace-group'}>
-                <button
-                  type="button"
-                  className="workspace-group-button"
-                  onClick={() => {
-                    onSelectWorkspace(workspace.id);
-                    setExpandedWorkspaceIds((current) => ({
-                      ...current,
-                      [workspace.id]: true
-                    }));
-                  }}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    const x = Math.min(event.clientX, window.innerWidth - 180);
-                    const y = Math.min(event.clientY, window.innerHeight - 140);
-                    setContextMenu(null);
-                    setWorkspaceContextMenu({ workspace, x, y });
-                  }}
-                  title={workspace.path}
-                >
-                  <span className="workspace-group-leading">
-                    <span
-                      className="workspace-chevron workspace-chevron-button"
-                      role="button"
-                      tabIndex={0}
-                      aria-label={expandedWorkspaceIds[workspace.id] === false ? 'Expand folder' : 'Collapse folder'}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
+              <li
+                key={workspace.id}
+                className={isSelectedWorkspace ? 'workspace-group selected' : 'workspace-group'}
+                data-expanded={isExpanded ? 'true' : 'false'}
+              >
+                <div className="workspace-group-container">
+                  <div className="workspace-group-row">
+                    <button
+                      type="button"
+                      className="workspace-group-button"
+                      onClick={() => {
                         setExpandedWorkspaceIds((current) => ({
                           ...current,
                           [workspace.id]: !(current[workspace.id] ?? true)
                         }));
                       }}
-                      onKeyDown={(event) => {
-                        if (event.key !== 'Enter' && event.key !== ' ') {
-                          return;
-                        }
+                      onContextMenu={(event) => {
                         event.preventDefault();
-                        event.stopPropagation();
-                        setExpandedWorkspaceIds((current) => ({
-                          ...current,
-                          [workspace.id]: !(current[workspace.id] ?? true)
-                        }));
+                        const x = Math.min(event.clientX, window.innerWidth - 180);
+                        const y = Math.min(event.clientY, window.innerHeight - 140);
+                        setContextMenu(null);
+                        setWorkspaceContextMenu({ workspace, x, y });
                       }}
                     >
-                      <ChevronIcon expanded={expandedWorkspaceIds[workspace.id] !== false} />
-                    </span>
-                    <span className="workspace-folder-icon" aria-hidden="true">
-                      <FolderIcon />
-                    </span>
-                    <span className="workspace-group-name">{workspace.name}</span>
-                  </span>
-                  <span className="workspace-group-count">{allThreads.length}</span>
-                </button>
-
-                {expandedWorkspaceIds[workspace.id] === false ? null : visibleThreads.length === 0 ? (
-                  <p className="muted workspace-group-empty">No matching threads.</p>
-                ) : (
-                  <ul className="workspace-thread-list">
-                    {visibleThreads.map((thread) => {
-                      const active = thread.id === selectedThreadId;
-                      const activeRun = activeRunsByThread[thread.id];
-                      const runningFor = activeRun
-                        ? formatDurationShort((nowMs - Date.parse(activeRun.startedAt)) / 1000)
-                        : null;
-                      const statusLine = summarizeThreadStatus(thread, runningFor);
-
-                      return (
-                        <li
-                          key={thread.id}
-                          onContextMenu={(event) => {
+                      <span className="workspace-group-leading">
+                        <span
+                          className="workspace-chevron workspace-chevron-button"
+                          role="button"
+                          tabIndex={0}
+                          aria-label={isExpanded ? 'Collapse folder' : 'Expand folder'}
+                          onClick={(event) => {
                             event.preventDefault();
-                            const x = Math.min(event.clientX, window.innerWidth - 180);
-                            const y = Math.min(event.clientY, window.innerHeight - 160);
-                            setWorkspaceContextMenu(null);
-                            setContextMenu({ thread, x, y });
+                            event.stopPropagation();
+                            setExpandedWorkspaceIds((current) => ({
+                              ...current,
+                              [workspace.id]: !(current[workspace.id] ?? true)
+                            }));
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== 'Enter' && event.key !== ' ') {
+                              return;
+                            }
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setExpandedWorkspaceIds((current) => ({
+                              ...current,
+                              [workspace.id]: !(current[workspace.id] ?? true)
+                            }));
                           }}
                         >
-                          <button
-                            type="button"
-                            onClick={() => onSelectThread(thread.workspaceId, thread.id)}
-                            onDoubleClick={(event) => {
-                              event.preventDefault();
-                              setEditingThreadId(thread.id);
-                              setEditingValue(thread.title);
-                              setEditingOriginal(thread.title);
-                            }}
-                            className={active ? 'thread-button active' : 'thread-button'}
-                          >
-                            <span className="thread-main-row">
-                              {editingThreadId === thread.id ? (
-                                <input
-                                  className="thread-rename-input"
-                                  value={editingValue}
-                                  maxLength={80}
-                                  autoFocus
-                                  onChange={(event) => setEditingValue(event.target.value)}
-                                  onClick={(event) => event.stopPropagation()}
-                                  onKeyDown={async (event) => {
-                                    if (event.key === 'Escape') {
-                                      event.preventDefault();
-                                      setEditingThreadId(null);
-                                      setEditingValue('');
-                                      setEditingOriginal('');
-                                    }
-                                    if (event.key === 'Enter') {
-                                      event.preventDefault();
-                                      await commitRename(thread);
-                                    }
-                                  }}
-                                  onBlur={async () => {
-                                    await commitRename(thread);
-                                  }}
-                                />
-                              ) : (
-                                <span
-                                  className="thread-title"
-                                  onDoubleClick={(event) => {
-                                    event.preventDefault();
-                                    event.stopPropagation();
-                                    setEditingThreadId(thread.id);
-                                    setEditingValue(thread.title);
-                                    setEditingOriginal(thread.title);
-                                  }}
-                                >
-                                  {thread.title}
-                                </span>
-                              )}
-                              <span className="thread-time">{formatRelativeShort(thread.updatedAt, nowMs)}</span>
-                            </span>
+                          <ChevronIcon expanded={isExpanded} />
+                        </span>
+                        <span className="workspace-folder-icon" aria-hidden="true">
+                          <FolderIcon />
+                        </span>
+                        <span className="workspace-group-name">{workspace.name}</span>
+                      </span>
+                    </button>
+                    <span className="workspace-group-actions">
+                      <button
+                        type="button"
+                        className="workspace-action-button"
+                        aria-label="Workspace actions"
+                        tabIndex={-1}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          const rect = event.currentTarget.getBoundingClientRect();
+                          const x = Math.min(rect.left, window.innerWidth - 180);
+                          const y = Math.min(rect.bottom + 8, window.innerHeight - 140);
+                          setContextMenu(null);
+                          setWorkspaceContextMenu({ workspace, x, y });
+                        }}
+                      >
+                        <DotsIcon />
+                      </button>
+                      <button
+                        type="button"
+                        className="workspace-action-button"
+                        aria-label="Create thread"
+                        data-testid={`workspace-compose-${workspace.id}`}
+                        tabIndex={-1}
+                        onClick={async (event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          await onNewThreadInWorkspace(workspace.id);
+                        }}
+                      >
+                        <ComposeIcon />
+                      </button>
+                    </span>
+                  </div>
 
-                            {statusLine ? (
-                              <span className="thread-status-row">
-                                {activeRun ? (
-                                  <span className="thread-running" title="Claude is processing a response">
-                                    <span className="spinner-dot" />
-                                    <span>{statusLine}</span>
-                                  </span>
-                                ) : (
-                                  <span className="thread-last-status">{statusLine}</span>
-                                )}
-                              </span>
-                            ) : null}
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
+                  {!isExpanded ? null : (
+                    <div className="workspace-group-children">
+                      {visibleThreads.length === 0 ? (
+                        <p className="muted workspace-group-empty">No matching threads.</p>
+                      ) : (
+                        <ul className="workspace-thread-list">
+                          {visibleThreads.map((thread) => {
+                            return (
+                              <ThreadRow
+                                key={thread.id}
+                                thread={thread}
+                                active={thread.id === selectedThreadId}
+                                relativeTime={formatRelativeShort(thread.updatedAt)}
+                                isEditing={editingThreadId === thread.id}
+                                editingValue={editingValue}
+                                onEditingValueChange={setEditingValue}
+                                onStartRename={onStartRename}
+                                onCommitRename={commitRename}
+                                onCancelRename={onCancelRename}
+                                onSelectThread={onSelectThread}
+                                onOpenThreadContextMenu={onOpenThreadContextMenu}
+                                onDeleteThread={onDeleteThread}
+                              />
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
               </li>
             );
           })}
@@ -504,43 +552,12 @@ export function LeftRail({
         <div className="thread-context-menu" ref={contextMenuRef} style={{ left: contextMenu.x, top: contextMenu.y }}>
           <button
             type="button"
-            onClick={async () => {
-              await onNewThreadInWorkspace(contextMenu.thread.workspaceId);
-              setContextMenu(null);
-            }}
-          >
-            New thread
-          </button>
-          <button
-            type="button"
-            disabled={!contextMenu.thread.claudeSessionId}
-            onClick={async () => {
-              await onCopyResumeCommand(contextMenu.thread);
-              setContextMenu(null);
-            }}
-          >
-            Copy resume command
-          </button>
-          <div className="thread-context-divider" />
-          <button
-            type="button"
             onClick={() => {
-              setEditingThreadId(contextMenu.thread.id);
-              setEditingValue(contextMenu.thread.title);
-              setEditingOriginal(contextMenu.thread.title);
+              onStartRename(contextMenu.thread);
               setContextMenu(null);
             }}
           >
             Rename
-          </button>
-          <button
-            type="button"
-            onClick={async () => {
-              await onArchiveThread(contextMenu.thread.workspaceId, contextMenu.thread.id);
-              setContextMenu(null);
-            }}
-          >
-            Archive
           </button>
           <button
             type="button"
@@ -563,15 +580,26 @@ export function LeftRail({
         >
           <button
             type="button"
-            onClick={async () => {
-              await onNewThreadInWorkspace(workspaceContextMenu.workspace.id);
+            onClick={() => {
+              onOpenWorkspaceInFinder(workspaceContextMenu.workspace.path);
               setWorkspaceContextMenu(null);
             }}
           >
-            New thread
+            Open folder
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onOpenWorkspaceInTerminal(workspaceContextMenu.workspace.path);
+              setWorkspaceContextMenu(null);
+            }}
+          >
+            Open terminal
           </button>
         </div>
       ) : null}
     </aside>
   );
 }
+
+export const LeftRail = React.memo(LeftRailComponent);
