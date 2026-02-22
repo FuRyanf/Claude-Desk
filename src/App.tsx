@@ -172,6 +172,7 @@ export default function App() {
     selectedThreadId,
     listThreads,
     createThread,
+    setThreadFullAccess,
     renameThread,
     deleteThread,
     setSelectedWorkspace,
@@ -211,6 +212,7 @@ export default function App() {
   const [addingWorkspace, setAddingWorkspace] = useState(false);
 
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [fullAccessUpdating, setFullAccessUpdating] = useState(false);
   const [startingByThread, setStartingByThread] = useState<Record<string, boolean>>({});
   const [readyByThread, setReadyByThread] = useState<Record<string, boolean>>({});
   const [resumeFailureModal, setResumeFailureModal] = useState<{
@@ -570,7 +572,7 @@ export default function App() {
           workspacePath: workspace.path,
           initialCwd: workspace.path,
           envVars: null,
-          fullAccessFlag: false,
+          fullAccessFlag: thread.fullAccess,
           threadId: thread.id
         });
 
@@ -1301,6 +1303,37 @@ export default function App() {
     [switchToThread]
   );
 
+  const toggleFullAccess = useCallback(async () => {
+    if (!selectedThread || fullAccessUpdating) {
+      return;
+    }
+
+    const nextValue = !selectedThread.fullAccess;
+    setFullAccessUpdating(true);
+    try {
+      const updatedThread = await setThreadFullAccess(selectedThread.workspaceId, selectedThread.id, nextValue);
+      await stopThreadSession(updatedThread.id);
+      if (selectedWorkspaceIdRef.current !== updatedThread.workspaceId) {
+        setSelectedWorkspace(updatedThread.workspaceId);
+      }
+      setSelectedThread(updatedThread.id);
+      await ensureSessionForThread(updatedThread);
+    } catch (error) {
+      pushToast(`Failed to update Full access: ${String(error)}`, 'error');
+    } finally {
+      setFullAccessUpdating(false);
+    }
+  }, [
+    ensureSessionForThread,
+    fullAccessUpdating,
+    pushToast,
+    selectedThread,
+    setSelectedThread,
+    setSelectedWorkspace,
+    setThreadFullAccess,
+    stopThreadSession
+  ]);
+
   const openWorkspaceInFinder = useCallback((workspacePath: string) => {
     void api.openInFinder(workspacePath);
   }, []);
@@ -1439,7 +1472,10 @@ export default function App() {
         </section>
         <BottomBar
           workspace={selectedWorkspace}
+          selectedThread={selectedThread}
+          fullAccessUpdating={fullAccessUpdating}
           gitInfo={gitInfo}
+          onToggleFullAccess={toggleFullAccess}
           onLoadBranchSwitcher={onLoadBranchSwitcher}
           onCheckoutBranch={onCheckoutBranch}
           onCreateAndCheckoutBranch={onCreateAndCheckoutBranch}

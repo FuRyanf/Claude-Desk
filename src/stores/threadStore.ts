@@ -69,6 +69,7 @@ export interface ThreadStore {
   selectedThreadId?: string;
   listThreads: (workspaceId: string) => Promise<ThreadMetadata[]>;
   createThread: (workspaceId: string) => Promise<ThreadMetadata>;
+  setThreadFullAccess: (workspaceId: string, threadId: string, fullAccess: boolean) => Promise<ThreadMetadata>;
   renameThread: (workspaceId: string, threadId: string, title: string) => Promise<ThreadMetadata>;
   archiveThread: (workspaceId: string, threadId: string) => Promise<void>;
   deleteThread: (workspaceId: string, threadId: string) => Promise<void>;
@@ -120,6 +121,12 @@ export function useThreadStore(): ThreadStore {
     delete removedThreadIdsRef.current[thread.id];
     setThreadsByWorkspace((current) => upsertThread(current, lastUserInputAtByThreadRef.current, thread));
     setSelectedThreadId(thread.id);
+    return thread;
+  }, []);
+
+  const setThreadFullAccess = useCallback(async (workspaceId: string, threadId: string, fullAccess: boolean) => {
+    const thread = await api.setThreadFullAccess(workspaceId, threadId, fullAccess);
+    setThreadsByWorkspace((current) => upsertThread(current, lastUserInputAtByThreadRef.current, thread));
     return thread;
   }, []);
 
@@ -286,6 +293,7 @@ export function useThreadStore(): ThreadStore {
       selectedThreadId,
       listThreads,
       createThread,
+      setThreadFullAccess,
       renameThread,
       archiveThread,
       deleteThread,
@@ -304,6 +312,7 @@ export function useThreadStore(): ThreadStore {
       applyThreadUpdate,
       clearThreadLastOutputAt,
       createThread,
+      setThreadFullAccess,
       listThreads,
       renameThread,
       archiveThread,

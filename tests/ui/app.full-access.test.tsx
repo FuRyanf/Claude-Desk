@@ -189,7 +189,7 @@ describe('Terminal launch flags', () => {
     window.localStorage.clear();
   });
 
-  it('always starts terminal sessions without dangerous permissions flag', async () => {
+  it('starts terminal sessions with full access flag from thread metadata', async () => {
     render(<App />);
 
     await screen.findByRole('button', { name: /Full Access Thread/i });
@@ -197,17 +197,48 @@ describe('Terminal launch flags', () => {
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
         expect.objectContaining({
-          fullAccessFlag: false,
+          fullAccessFlag: true,
           threadId: 'thread-1'
         })
       );
     });
   });
 
-  it('does not render a Full Access control', async () => {
+  it('renders a Full Access toggle in the bottom bar', async () => {
     render(<App />);
     await screen.findByRole('button', { name: /Full Access Thread/i });
-    expect(screen.queryByRole('button', { name: /Full Access OFF/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Full Access ON/i })).not.toBeInTheDocument();
+    expect(screen.getByTestId('full-access-toggle')).toBeInTheDocument();
+    expect(screen.getByTestId('full-access-toggle')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('restarts the active session after toggling full access', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 'thread-1',
+          fullAccessFlag: true
+        })
+      );
+    });
+
+    await user.click(screen.getByTestId('full-access-toggle'));
+
+    await waitFor(() => {
+      expect(mocks.api.setThreadFullAccess).toHaveBeenCalledWith('ws-1', 'thread-1', false);
+    });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 'thread-1',
+          fullAccessFlag: false
+        })
+      );
+    });
+    expect(mocks.api.terminalKill).toHaveBeenCalledWith('session-1');
+    expect(screen.getByTestId('full-access-toggle')).toHaveAttribute('aria-pressed', 'false');
   });
 });

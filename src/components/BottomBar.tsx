@@ -1,6 +1,6 @@
 import * as React from 'react';
 
-import type { GitBranchEntry, GitInfo, GitWorkspaceStatus, Workspace } from '../types';
+import type { GitBranchEntry, GitInfo, GitWorkspaceStatus, ThreadMetadata, Workspace } from '../types';
 
 interface BranchSwitcherSnapshot {
   branches: GitBranchEntry[];
@@ -9,7 +9,10 @@ interface BranchSwitcherSnapshot {
 
 interface BottomBarProps {
   workspace?: Workspace;
+  selectedThread?: ThreadMetadata;
+  fullAccessUpdating?: boolean;
   gitInfo: GitInfo | null;
+  onToggleFullAccess: () => Promise<void>;
   onLoadBranchSwitcher: () => Promise<BranchSwitcherSnapshot>;
   onCheckoutBranch: (branchName: string) => Promise<boolean>;
   onCreateAndCheckoutBranch: (branchName: string) => Promise<boolean>;
@@ -34,7 +37,10 @@ function BranchGlyph() {
 
 export function BottomBar({
   workspace,
+  selectedThread,
+  fullAccessUpdating = false,
   gitInfo,
+  onToggleFullAccess,
   onLoadBranchSwitcher,
   onCheckoutBranch,
   onCreateAndCheckoutBranch
@@ -298,7 +304,37 @@ export function BottomBar({
         </div>
       </div>
 
-      <div className="bottom-bar-right" />
+      <div className="bottom-bar-right">
+        <button
+          type="button"
+          className={selectedThread?.fullAccess ? 'full-access-toggle enabled' : 'full-access-toggle'}
+          data-testid="full-access-toggle"
+          aria-label="Toggle full access"
+          aria-pressed={selectedThread?.fullAccess ?? false}
+          disabled={!selectedThread || fullAccessUpdating}
+          onClick={() => void onToggleFullAccess()}
+          title={!selectedThread ? 'Select a thread' : selectedThread.fullAccess ? 'Disable full access' : 'Enable full access'}
+        >
+          <span className="full-access-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path
+                d="M12 3.8A8.2 8.2 0 1 0 20.2 12 8.2 8.2 0 0 0 12 3.8Zm0 4.4v6.1M12 17.4h.01"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.9"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </span>
+          <span className="full-access-label">{fullAccessUpdating ? 'Updating...' : 'Full access'}</span>
+          <span className="full-access-chevron" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M7 10.5 12 15l5-4.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+            </svg>
+          </span>
+        </button>
+      </div>
     </footer>
   );
 }
