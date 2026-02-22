@@ -21,6 +21,8 @@ jobs:
     env:
       NPM_CONFIG_PACKAGE_MANAGER_STRICT: "false"
       NPM_CONFIG_FROZEN_LOCKFILE: "false"
+      NPM_CONFIG_PRODUCTION: "false"
+      NODE_ENV: development
 
     steps:
       - name: Checkout repository
@@ -64,10 +66,20 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --force
 
       - name: Setup Yarn (Tauri beforeBuildCommand)
         run: npm install -g yarn@1.22.22
+
+      - name: Ensure Tauri CLI is available
+        shell: bash
+        run: |
+          if pnpm exec tauri --version; then
+            echo "Using project-local Tauri CLI"
+          else
+            npm install -g @tauri-apps/cli@2.1.0
+            tauri --version
+          fi
 
       - name: Build app
         run: pnpm tauri build
