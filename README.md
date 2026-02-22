@@ -62,12 +62,44 @@ Important files/directories:
 - Thread actions (`Rename`, `Archive`, `Delete`) mutate thread metadata/persistence only.
 - Per-thread `Full access` state is persisted and applied at session start.
 
+## Technology
+
+Claude Desk is a three-layer local architecture:
+
+- Frontend (`React` + `TypeScript`): manages workspace/thread UX and terminal hydration state.
+- Backend (`Tauri` + `Rust`): exposes command handlers for thread persistence, PTY control, git, and settings.
+- PTY layer (`portable_pty` + local shell): runs Claude in an actual pseudo-terminal and streams bytes to the UI.
+
+Claude is started through `terminal_start_session`, which launches your login shell as `$SHELL -lic` (fallback `/bin/zsh`) and runs either:
+
+- `claude --session-id <uuid>` for a new thread session
+- `claude --resume <uuid>` for a resumed thread session
+- optional `--dangerously-skip-permissions` when thread `Full access` is enabled
+
+Terminal rendering is PTY-native: Rust reads PTY output, appends to `output.log`, emits `terminal:data` events, and the UI writes buffered chunks into `xterm.js`. On open/switch, the app hydrates from a snapshot (`terminal_read_output` / `terminal_get_last_log`) instead of replaying historical events.
+
+Session resume is thread-scoped. `thread.json` stores `claudeSessionId`, `lastResumeAt`, and `lastNewSessionAt`; startup decides new vs resumed mode from this metadata (with log-based session-id recovery fallback). If resume likely failed, the UI offers `Start fresh` (clears the saved Claude session id, then restarts).
+
+Threads are persisted independently of live PTY processes (`thread.json` + `runs/<runId>/output.log` + `runs/<runId>/metadata.json`), so thread actions update metadata without coupling to transient runtime state.
+
+Git integration is local CLI based (`git_tools.rs`): branch/status polling, branch switch/create, and workspace-safe session shutdown around checkout operations.
+
+Why it stays fast:
+
+- Minimal overhead: local CLI + PTY, no API proxy layer.
+- No transcript replay requirement to paint terminal state.
+- Streaming is buffered on both sides (Rust event buffering + frontend xterm buffered writes).
+- State is structured by thread/workspace maps (`threadStore` for persisted metadata, `runStore` for live sessions) with refs for hot paths to avoid broad rerenders.
+- Rendering avoids jitter through memoized sidebar components, resize/input debouncing, and imperative terminal writes instead of React-driven text repainting.
+
+Local app data lives at `~/Library/Application Support/ClaudeDesk/` (workspaces, settings, thread metadata, run logs/manifests).
+
 ## Resume Behavior (High Level)
 
 - Each thread can persist a Claude session id in `thread.json`.
 - On thread open/start:
-  - With session id: launches `claude --resume <sessionId>`
-  - Without session id: launches `claude`
+  - With prior Claude session id: launches `claude --resume <sessionId>`
+  - Without one: generates a UUID and launches `claude --session-id <generatedId>`
 - Startup uses login shell parity (`$SHELL -lic`, fallback `/bin/zsh`) so env/path behavior matches Terminal.
 - If `Full access` is enabled for a thread, startup appends `--dangerously-skip-permissions`.
 
