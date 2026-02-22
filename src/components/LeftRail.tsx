@@ -172,7 +172,6 @@ export function LeftRail({
   const [editingValue, setEditingValue] = React.useState('');
   const [editingOriginal, setEditingOriginal] = React.useState('');
   const [contextMenu, setContextMenu] = React.useState<ThreadContextMenuState | null>(null);
-  const [deleteTarget, setDeleteTarget] = React.useState<ThreadMetadata | null>(null);
   const contextMenuRef = React.useRef<HTMLDivElement | null>(null);
 
   const query = threadSearch.trim().toLowerCase();
@@ -493,39 +492,13 @@ export function LeftRail({
           <button
             type="button"
             className="danger"
-            onClick={() => {
-              setDeleteTarget(contextMenu.thread);
+            onClick={async () => {
               setContextMenu(null);
+              await onDeleteThread(contextMenu.thread.workspaceId, contextMenu.thread.id);
             }}
           >
             Delete
           </button>
-        </div>
-      ) : null}
-
-      {deleteTarget ? (
-        <div className="modal-backdrop">
-          <section className="modal">
-            <h3>Delete thread?</h3>
-            <p>
-              This permanently removes <strong>{deleteTarget.title}</strong> and all of its run logs.
-            </p>
-            <footer className="modal-actions">
-              <button type="button" className="ghost-button" onClick={() => setDeleteTarget(null)}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="danger-button"
-                onClick={async () => {
-                  setDeleteTarget(null);
-                  void onDeleteThread(deleteTarget.workspaceId, deleteTarget.id);
-                }}
-              >
-                Delete
-              </button>
-            </footer>
-          </section>
         </div>
       ) : null}
     </aside>

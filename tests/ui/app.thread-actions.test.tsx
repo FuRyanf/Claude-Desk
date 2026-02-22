@@ -196,7 +196,6 @@ describe('Thread actions', () => {
     const row = await screen.findByRole('button', { name: /Rename me/i });
     await user.pointer([{ target: row, keys: '[MouseRight]' }]);
     await user.click(await screen.findByRole('button', { name: 'Delete' }));
-    await user.click(await screen.findByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {
       expect(mocks.api.deleteThread).toHaveBeenCalledWith('ws-1', 'thread-1');
@@ -206,7 +205,7 @@ describe('Thread actions', () => {
     });
   });
 
-  it('closes delete confirmation immediately even if backend delete is slow', async () => {
+  it('closes context menu immediately even if backend delete is slow', async () => {
     const user = userEvent.setup();
     let resolveDelete: (() => void) | null = null;
     mocks.api.deleteThread.mockImplementationOnce(
@@ -221,10 +220,9 @@ describe('Thread actions', () => {
     const row = await screen.findByRole('button', { name: /Rename me/i });
     await user.pointer([{ target: row, keys: '[MouseRight]' }]);
     await user.click(await screen.findByRole('button', { name: 'Delete' }));
-    await user.click(await screen.findByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {
-      expect(screen.queryByText('Delete thread?')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Rename' })).not.toBeInTheDocument();
     });
 
     resolveDelete?.();
@@ -250,7 +248,6 @@ describe('Thread actions', () => {
 
     const row = await screen.findByRole('button', { name: /Rename me/i });
     await user.pointer([{ target: row, keys: '[MouseRight]' }]);
-    await user.click(await screen.findByRole('button', { name: 'Delete' }));
     await user.click(await screen.findByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {
