@@ -596,6 +596,18 @@ export default function App() {
     await refreshThreadsForWorkspace(selectedWorkspaceId);
   }, [createThread, pushToast, refreshThreadsForWorkspace, selectedWorkspaceId, setSelectedThread]);
 
+  const onNewThreadInWorkspace = useCallback(
+    async (workspaceId: string) => {
+      if (selectedWorkspaceIdRef.current !== workspaceId) {
+        setSelectedWorkspace(workspaceId);
+      }
+      const thread = await createThread(workspaceId);
+      setSelectedThread(thread.id);
+      await refreshThreadsForWorkspace(workspaceId);
+    },
+    [createThread, refreshThreadsForWorkspace, setSelectedThread, setSelectedWorkspace]
+  );
+
   const onRenameThread = useCallback(
     async (workspaceId: string, threadId: string, title: string) => {
       try {
@@ -728,15 +740,14 @@ export default function App() {
 
   const switchToThread = useCallback(
     async (threadId: string) => {
-      await stopSessionsExcept(threadId);
       setSelectedThread(threadId);
     },
-    [setSelectedThread, stopSessionsExcept]
+    [setSelectedThread]
   );
 
   const restartThreadSession = useCallback(
     async (thread: ThreadMetadata) => {
-      await stopSessionsExcept();
+      await stopThreadSession(thread.id);
       if (selectedWorkspaceIdRef.current !== thread.workspaceId) {
         setSelectedWorkspace(thread.workspaceId);
       }
@@ -746,7 +757,7 @@ export default function App() {
         pushToast(String(error), 'error');
       });
     },
-    [ensureSessionForThread, pushToast, setSelectedThread, setSelectedWorkspace, stopSessionsExcept]
+    [ensureSessionForThread, pushToast, setSelectedThread, setSelectedWorkspace, stopThreadSession]
   );
 
   const onResumeThreadSession = useCallback(
@@ -982,16 +993,6 @@ export default function App() {
   }, [lastTerminalLogByThread, selectedThreadId, selectedWorkspaceId]);
 
   useEffect(() => {
-    if (!selectedThread) {
-      return;
-    }
-
-    void ensureSessionForThread(selectedThread).catch((error) => {
-      pushToast(String(error), 'error');
-    });
-  }, [ensureSessionForThread, pushToast, selectedThread]);
-
-  useEffect(() => {
     let unlistenExit: (() => void) | null = null;
 
     const setup = async () => {
@@ -1158,8 +1159,19 @@ export default function App() {
       : 'Idle';
   const statusLabel = runStore.isThreadWorking(selectedThreadId) ? 'Running' : normalizedStatus;
   const selectedSessionMode = selectedThreadId ? sessionModeByThread[selectedThreadId] : undefined;
-  const sessionModeLabel =
-    selectedSessionMode === 'resumed' ? 'Resumed' : selectedSessionMode === 'new' ? 'New session' : undefined;
+  const sessionModeLabel = useMemo(() => {
+    if (selectedSessionMode === 'resumed') {
+      const sessionHint = selectedThread?.claudeSessionId?.slice(0, 8);
+      return sessionHint ? `Resumed ${sessionHint}` : 'Resumed';
+    }
+    if (selectedSessionMode === 'new') {
+      return 'New session';
+    }
+    if (selectedThread?.claudeSessionId) {
+      return 'Resume ready';
+    }
+    return undefined;
+  }, [selectedSessionMode, selectedThread?.claudeSessionId]);
   const appShellStyle = useMemo(
     () =>
       ({
@@ -1182,7 +1194,6 @@ export default function App() {
           Object.entries(runStore.workingByThread).map(([threadId, run]) => [threadId, { startedAt: run.startedAt }])
         )}
         onSelectWorkspace={(workspaceId) => {
-          void stopSessionsExcept();
           setSelectedWorkspace(workspaceId);
           setSelectedThread(undefined);
           setThreadSearch('');
@@ -1193,6 +1204,7 @@ export default function App() {
           setAddWorkspaceOpen(true);
         }}
         onNewThread={() => void onNewThread()}
+        onNewThreadInWorkspace={onNewThreadInWorkspace}
         onThreadSearchChange={setThreadSearch}
         onSelectThread={(threadId) => void switchToThread(threadId)}
         onRenameThread={onRenameThread}

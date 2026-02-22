@@ -18,6 +18,7 @@ interface LeftRailProps {
   onOpenWorkspacePicker: () => void;
   onOpenManualWorkspaceModal: () => void;
   onNewThread: () => void;
+  onNewThreadInWorkspace: (workspaceId: string) => Promise<void>;
   onThreadSearchChange: (value: string) => void;
   onSelectThread: (threadId: string) => void;
   onRenameThread: (workspaceId: string, threadId: string, title: string) => Promise<void>;
@@ -31,6 +32,12 @@ interface LeftRailProps {
 
 interface ThreadContextMenuState {
   thread: ThreadMetadata;
+  x: number;
+  y: number;
+}
+
+interface WorkspaceContextMenuState {
+  workspace: Workspace;
   x: number;
   y: number;
 }
@@ -158,6 +165,7 @@ export function LeftRail({
   onOpenWorkspacePicker,
   onOpenManualWorkspaceModal,
   onNewThread,
+  onNewThreadInWorkspace,
   onThreadSearchChange,
   onSelectThread,
   onRenameThread,
@@ -172,24 +180,31 @@ export function LeftRail({
   const [editingValue, setEditingValue] = React.useState('');
   const [editingOriginal, setEditingOriginal] = React.useState('');
   const [contextMenu, setContextMenu] = React.useState<ThreadContextMenuState | null>(null);
+  const [workspaceContextMenu, setWorkspaceContextMenu] = React.useState<WorkspaceContextMenuState | null>(null);
   const contextMenuRef = React.useRef<HTMLDivElement | null>(null);
+  const workspaceContextMenuRef = React.useRef<HTMLDivElement | null>(null);
 
   const query = threadSearch.trim().toLowerCase();
 
   React.useEffect(() => {
-    if (!contextMenu) {
+    if (!contextMenu && !workspaceContextMenu) {
       return;
     }
 
     const closeMenu = (event: Event) => {
-      if (contextMenuRef.current?.contains(event.target as Node)) {
+      if (
+        contextMenuRef.current?.contains(event.target as Node) ||
+        workspaceContextMenuRef.current?.contains(event.target as Node)
+      ) {
         return;
       }
       setContextMenu(null);
+      setWorkspaceContextMenu(null);
     };
     const onEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setContextMenu(null);
+        setWorkspaceContextMenu(null);
       }
     };
 
@@ -202,7 +217,7 @@ export function LeftRail({
       window.removeEventListener('scroll', closeMenu, true);
       window.removeEventListener('keydown', onEscape);
     };
-  }, [contextMenu]);
+  }, [contextMenu, workspaceContextMenu]);
 
   const commitRename = React.useCallback(
     async (thread: ThreadMetadata) => {
@@ -322,6 +337,13 @@ export function LeftRail({
                   type="button"
                   className="workspace-group-button"
                   onClick={() => onSelectWorkspace(workspace.id)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    const x = Math.min(event.clientX, window.innerWidth - 180);
+                    const y = Math.min(event.clientY, window.innerHeight - 140);
+                    setContextMenu(null);
+                    setWorkspaceContextMenu({ workspace, x, y });
+                  }}
                   title={workspace.path}
                 >
                   <span className="workspace-group-leading">
@@ -356,6 +378,7 @@ export function LeftRail({
                               event.preventDefault();
                               const x = Math.min(event.clientX, window.innerWidth - 180);
                               const y = Math.min(event.clientY, window.innerHeight - 160);
+                              setWorkspaceContextMenu(null);
                               setContextMenu({ thread, x, y });
                             }}
                           >
@@ -441,6 +464,15 @@ export function LeftRail({
         <div className="thread-context-menu" ref={contextMenuRef} style={{ left: contextMenu.x, top: contextMenu.y }}>
           <button
             type="button"
+            onClick={async () => {
+              await onNewThreadInWorkspace(contextMenu.thread.workspaceId);
+              setContextMenu(null);
+            }}
+          >
+            New thread
+          </button>
+          <button
+            type="button"
             disabled={!contextMenu.thread.claudeSessionId}
             onClick={async () => {
               await onResumeThreadSession(contextMenu.thread);
@@ -498,6 +530,24 @@ export function LeftRail({
             }}
           >
             Delete
+          </button>
+        </div>
+      ) : null}
+
+      {workspaceContextMenu ? (
+        <div
+          className="thread-context-menu"
+          ref={workspaceContextMenuRef}
+          style={{ left: workspaceContextMenu.x, top: workspaceContextMenu.y }}
+        >
+          <button
+            type="button"
+            onClick={async () => {
+              await onNewThreadInWorkspace(workspaceContextMenu.workspace.id);
+              setWorkspaceContextMenu(null);
+            }}
+          >
+            New thread
           </button>
         </div>
       ) : null}

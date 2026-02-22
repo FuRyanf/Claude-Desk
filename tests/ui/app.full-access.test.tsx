@@ -194,7 +194,12 @@ describe('Full Access session flag', () => {
   });
 
   it('starts terminal sessions with dangerous flag when thread full access is enabled', async () => {
+    const user = userEvent.setup();
     render(<App />);
+
+    const row = await screen.findByRole('button', { name: /Full Access Thread/i });
+    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Start fresh session' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(

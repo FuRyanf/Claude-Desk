@@ -329,7 +329,11 @@ export function HeaderBar({
         </button>
 
         {sessionModeLabel ? (
-          <span className={sessionModeLabel === 'Resumed' ? 'session-mode-pill resumed' : 'session-mode-pill'}>
+          <span
+            className={
+              sessionModeLabel.toLowerCase().startsWith('resum') ? 'session-mode-pill resumed' : 'session-mode-pill'
+            }
+          >
             <span className="session-mode-dot" />
             {sessionModeLabel}
           </span>

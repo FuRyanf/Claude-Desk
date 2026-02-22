@@ -248,6 +248,9 @@ describe('Thread actions', () => {
 
     const row = await screen.findByRole('button', { name: /Rename me/i });
     await user.pointer([{ target: row, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Start fresh session' }));
+
+    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
     await user.click(await screen.findByRole('button', { name: 'Delete' }));
 
     await waitFor(() => {

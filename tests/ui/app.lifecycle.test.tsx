@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -201,22 +201,21 @@ describe('Thread lifecycle integration', () => {
     mocks.reset();
   });
 
-  it('does not auto-create a new thread when opening an existing workspace', async () => {
+  it('does not auto-create or auto-start sessions when opening an existing workspace', async () => {
     render(<App />);
 
     await screen.findByRole('button', { name: /Thread one/i });
     expect(mocks.api.createThread).not.toHaveBeenCalled();
-
-    await waitFor(() => {
-      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
-        expect.objectContaining({ threadId: 'thread-1' })
-      );
-    });
+    expect(mocks.api.terminalStartSession).not.toHaveBeenCalled();
   });
 
-  it('stops the active session before starting another thread session', async () => {
+  it('keeps existing thread sessions alive when switching between threads', async () => {
     const user = userEvent.setup();
     render(<App />);
+
+    const firstRow = await screen.findByRole('button', { name: /Thread one/i });
+    await user.pointer([{ target: firstRow, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Start fresh session' }));
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -226,12 +225,22 @@ describe('Thread lifecycle integration', () => {
 
     await user.click(await screen.findByRole('button', { name: /Thread two/i }));
 
+    expect(mocks.api.terminalSendSignal).not.toHaveBeenCalledWith('session-thread-1', 'SIGINT');
+    expect(mocks.api.terminalKill).not.toHaveBeenCalledWith('session-thread-1');
+  });
+
+  it('creates a new thread from workspace right-click menu', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const workspaceRow = await screen.findByRole('button', { name: /Workspace/i });
+    await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
+    const menu = document.querySelector('.thread-context-menu');
+    expect(menu).not.toBeNull();
+    await user.click(within(menu as HTMLElement).getByRole('button', { name: 'New thread' }));
+
     await waitFor(() => {
-      expect(mocks.api.terminalSendSignal).toHaveBeenCalledWith('session-thread-1', 'SIGINT');
-      expect(mocks.api.terminalKill).toHaveBeenCalledWith('session-thread-1');
-      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
-        expect.objectContaining({ threadId: 'thread-2' })
-      );
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
     });
   });
 
@@ -266,10 +275,6 @@ describe('Thread lifecycle integration', () => {
     });
 
     await user.click(await screen.findByRole('button', { name: /Thread two/i }));
-    await waitFor(() => {
-      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
-        expect.objectContaining({ threadId: 'thread-2' })
-      );
-    });
+    expect(screen.getByRole('button', { name: /Thread two/i })).toBeInTheDocument();
   });
 });

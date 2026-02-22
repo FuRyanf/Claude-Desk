@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -199,13 +199,21 @@ describe('App terminal-first layout', () => {
     mocks.reset();
   });
 
-  it('auto-starts interactive terminal when a new thread is created', async () => {
+  it('starts an interactive terminal when explicitly requested for a thread', async () => {
     const user = userEvent.setup();
     render(<App />);
 
     expect(await screen.findByText('Create a thread to start typing.')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'New thread' }));
+    const threadList = document.querySelector('.workspace-thread-list');
+    expect(threadList).not.toBeNull();
+    const title = within(threadList as HTMLElement).getByText('New thread');
+    const row = title.closest('button');
+    expect(row).not.toBeNull();
+    await user.pointer([{ target: row as HTMLElement, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Start fresh session' }));
+
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalled();
     });
