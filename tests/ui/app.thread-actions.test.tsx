@@ -206,6 +206,30 @@ describe('Thread actions', () => {
     });
   });
 
+  it('closes delete confirmation immediately even if backend delete is slow', async () => {
+    const user = userEvent.setup();
+    let resolveDelete: (() => void) | null = null;
+    mocks.api.deleteThread.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveDelete = () => resolve(true);
+        })
+    );
+
+    render(<App />);
+
+    const row = await screen.findByRole('button', { name: /Rename me/i });
+    await user.pointer([{ target: row, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => {
+      expect(screen.queryByText('Delete thread?')).not.toBeInTheDocument();
+    });
+
+    resolveDelete?.();
+  });
+
   it('does not resurrect a deleted thread when a stale terminal start resolves', async () => {
     const user = userEvent.setup();
     let resolveStart: ((value: {

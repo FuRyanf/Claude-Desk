@@ -631,7 +631,19 @@ export default function App() {
       invalidatePendingSessionStart(threadId);
       const existingSessionId = runStore.sessionForThread(threadId);
       if (existingSessionId) {
-        void api.terminalKill(existingSessionId);
+        try {
+          await api.terminalSendSignal(existingSessionId, 'SIGINT');
+        } catch {
+          // best effort
+        }
+        await new Promise<void>((resolve) => {
+          window.setTimeout(() => resolve(), 80);
+        });
+        try {
+          await api.terminalKill(existingSessionId);
+        } catch {
+          // best effort
+        }
         runStore.finishSession(existingSessionId);
         delete sessionMetaBySessionIdRef.current[existingSessionId];
       }

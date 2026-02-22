@@ -49,6 +49,18 @@ function FolderIcon() {
   );
 }
 
+function ChevronIcon({ expanded }: { expanded: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      {expanded ? (
+        <path d="M6 9.5 12 15l6-5.5" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      ) : (
+        <path d="m9 6 5.5 6L9 18" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      )}
+    </svg>
+  );
+}
+
 function PlusIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -314,6 +326,9 @@ export function LeftRail({
                   title={workspace.path}
                 >
                   <span className="workspace-group-leading">
+                    <span className="workspace-chevron" aria-hidden="true">
+                      <ChevronIcon expanded={isSelectedWorkspace} />
+                    </span>
                     <span className="workspace-folder-icon" aria-hidden="true">
                       <FolderIcon />
                     </span>
@@ -503,8 +518,8 @@ export function LeftRail({
                 type="button"
                 className="danger-button"
                 onClick={async () => {
-                  await onDeleteThread(deleteTarget.workspaceId, deleteTarget.id);
                   setDeleteTarget(null);
+                  void onDeleteThread(deleteTarget.workspaceId, deleteTarget.id);
                 }}
               >
                 Delete
