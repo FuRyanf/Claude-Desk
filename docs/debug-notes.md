@@ -69,3 +69,21 @@
 - Delete now fast-renames the thread directory into a workspace `.trash` folder.
 - Actual recursive removal runs in a background thread.
 - UI returns immediately while cleanup finishes asynchronously.
+
+## Bug E: Session switch/delete freeze due PTY child lock contention
+
+### Reproduction (pre-fix behavior)
+1. Keep one Claude PTY session active.
+2. Switch threads/workspaces, or delete the active thread.
+3. App could hang while waiting on `terminal_send_signal` / `terminal_kill`.
+
+### Root cause
+- Waiter thread held the PTY child mutex while blocked on `wait()`.
+- Signal/kill handlers also attempted to lock the same child mutex to reach the process.
+- This created lock contention that could block the Tauri command path and freeze UI interactions.
+
+### Fix
+- Store PTY process id at session start.
+- Send `SIGINT`/`SIGKILL` directly using process id, without requiring the child mutex lock.
+- Treat `ESRCH` as success (process already exited).
+- Added frontend command timeouts around stop/kill paths so UI never waits indefinitely.

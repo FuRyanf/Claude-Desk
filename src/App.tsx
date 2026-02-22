@@ -124,6 +124,15 @@ function clampSidebarWidth(width: number): number {
   return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, Math.round(width)));
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  return await Promise.race<T | null>([
+    promise,
+    new Promise<null>((resolve) => {
+      window.setTimeout(() => resolve(null), timeoutMs);
+    })
+  ]);
+}
+
 export default function App() {
   const threadStore = useThreadStore();
   const runStore = useRunStore();
@@ -635,7 +644,7 @@ export default function App() {
       const existingSessionId = runStore.sessionForThread(threadId);
       if (existingSessionId) {
         try {
-          await api.terminalSendSignal(existingSessionId, 'SIGINT');
+          await withTimeout(api.terminalSendSignal(existingSessionId, 'SIGINT'), 700);
         } catch {
           // best effort
         }
@@ -643,7 +652,7 @@ export default function App() {
           window.setTimeout(() => resolve(), 80);
         });
         try {
-          await api.terminalKill(existingSessionId);
+          await withTimeout(api.terminalKill(existingSessionId), 900);
         } catch {
           // best effort
         }
@@ -677,7 +686,7 @@ export default function App() {
       }
 
       try {
-        await api.terminalSendSignal(sessionId, 'SIGINT');
+        await withTimeout(api.terminalSendSignal(sessionId, 'SIGINT'), 700);
       } catch {
         // best effort
       }
@@ -685,7 +694,7 @@ export default function App() {
         window.setTimeout(() => resolve(), 120);
       });
       try {
-        await api.terminalKill(sessionId);
+        await withTimeout(api.terminalKill(sessionId), 900);
       } catch {
         // best effort
       }

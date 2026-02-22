@@ -173,6 +173,7 @@ struct TerminalSession {
     thread_id: String,
     session_mode: TerminalSessionMode,
     resume_session_id: Option<String>,
+    process_id: Option<u32>,
     started_at: chrono::DateTime<Utc>,
     command: Vec<String>,
     output_log_path: PathBuf,
@@ -218,6 +219,15 @@ impl TerminalSessionManager {
             Err(_) => return,
         };
         for session in sessions {
+            if let Some(pid) = session.process_id {
+                let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                if result == 0 {
+                    continue;
+                }
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                    continue;
+                }
+            }
             if let Ok(mut child) = session.child.lock() {
                 let _ = child.kill();
             }
@@ -451,11 +461,8 @@ pub async fn cancel_run(state: Arc<RunnerState>, run_id: String) -> Result<bool>
         return Ok(true);
     }
 
-    if let Some(session) = state.terminal_sessions.get(&run_id)? {
-        if let Ok(mut child) = session.child.lock() {
-            child.kill()?;
-            return Ok(true);
-        }
+    if state.terminal_sessions.get(&run_id)?.is_some() {
+        return terminal_kill(state, run_id);
     }
 
     Ok(false)
@@ -595,6 +602,7 @@ pub async fn terminal_start_session(
     }
 
     let child = pty_pair.slave.spawn_command(command)?;
+    let process_id = child.process_id();
     let mut reader = pty_pair.master.try_clone_reader()?;
     let writer = pty_pair.master.take_writer()?;
     let output_log_path = run_dir.join("output.log");
@@ -612,6 +620,7 @@ pub async fn terminal_start_session(
         thread_id: thread_id.clone(),
         session_mode,
         resume_session_id: resume_session_id.clone(),
+        process_id,
         started_at,
         command: command_manifest.clone(),
         output_log_path,
@@ -828,12 +837,21 @@ pub fn terminal_kill(state: Arc<RunnerState>, session_id: String) -> Result<bool
         return Ok(false);
     };
 
-    let mut child = session
-        .child
-        .lock()
-        .map_err(|_| anyhow!("Terminal child lock poisoned"))?;
-    child.kill()?;
-    Ok(true)
+    let Some(pid) = session.process_id else {
+        return Err(anyhow!("Terminal session process id is unavailable"));
+    };
+
+    let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+    if result == 0 {
+        return Ok(true);
+    }
+
+    let error_code = std::io::Error::last_os_error().raw_os_error();
+    if error_code == Some(libc::ESRCH) {
+        return Ok(true);
+    }
+
+    Err(anyhow!("Failed to terminate terminal session process"))
 }
 
 pub fn terminal_send_signal(state: Arc<RunnerState>, session_id: String, signal: String) -> Result<bool> {
@@ -846,17 +864,9 @@ pub fn terminal_send_signal(state: Arc<RunnerState>, session_id: String, signal:
         return Ok(false);
     };
 
-    let pid = {
-        let child = session
-            .child
-            .lock()
-            .map_err(|_| anyhow!("Terminal child lock poisoned"))?;
-        child.process_id()
-    };
-
-    if let Some(pid) = pid {
+    if let Some(pid) = session.process_id {
         let result = unsafe { libc::kill(pid as i32, libc::SIGINT) };
-        if result == 0 {
+        if result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
             return Ok(true);
         }
     }
