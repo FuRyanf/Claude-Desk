@@ -65,6 +65,7 @@ const mocks = vi.hoisted(() => {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
     listWorkspaces: vi.fn(async () => workspaces),
     addWorkspace: vi.fn(async () => workspaces[0]),
+    removeWorkspace: vi.fn(async () => true),
     getGitInfo: vi.fn(async (workspacePath: string) => ({
       branch: workspacePath.includes('two') ? 'feature/two' : 'main',
       shortHash: 'abc123',

@@ -38,6 +38,24 @@ fn add_workspace(path: String) -> Result<Workspace, String> {
 }
 
 #[tauri::command]
+fn remove_workspace(state: State<'_, AppState>, workspace_id: String) -> Result<bool, String> {
+    let workspace = storage::load_workspaces()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|item| item.id == workspace_id);
+
+    if let Some(item) = workspace.as_ref() {
+        state
+            .runner
+            .terminal_sessions
+            .shutdown_for_workspace(&item.path)
+            .map_err(|error| error.to_string())?;
+    }
+
+    storage::remove_workspace(&workspace_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn get_git_info(workspace_path: String) -> Result<Option<GitInfo>, String> {
     git_tools::get_git_info(&workspace_path).map_err(|error| error.to_string())
 }
@@ -361,6 +379,7 @@ fn main() {
             get_app_storage_root,
             list_workspaces,
             add_workspace,
+            remove_workspace,
             get_git_info,
             get_git_diff_summary,
             git_list_branches,

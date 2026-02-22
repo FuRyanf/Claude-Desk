@@ -147,6 +147,25 @@ pub fn add_workspace(path: &str) -> Result<Workspace> {
     Ok(workspace)
 }
 
+pub fn remove_workspace(workspace_id: &str) -> Result<bool> {
+    let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
+    let mut workspaces = load_workspaces()?;
+    let original_len = workspaces.len();
+    workspaces.retain(|workspace| workspace.id != workspace_id);
+    if workspaces.len() == original_len {
+        return Ok(false);
+    }
+
+    save_workspaces(&workspaces)?;
+
+    let workspace_threads_dir = thread_workspace_dir(workspace_id)?;
+    if workspace_threads_dir.exists() {
+        fs::remove_dir_all(workspace_threads_dir)?;
+    }
+
+    Ok(true)
+}
+
 pub fn thread_workspace_dir(workspace_id: &str) -> Result<PathBuf> {
     let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
     Ok(ensure_base_dirs()?.join("threads").join(workspace_id))
@@ -516,6 +535,45 @@ mod tests {
         assert_eq!(second_load.len(), 1);
         assert_eq!(first_load[0].id, added.id);
         assert_eq!(first_load[0].path, second_load[0].path);
+
+        std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn remove_workspace_prunes_registry_and_thread_storage() {
+        let _guard = test_lock().lock().expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "claude-desk-remove-workspace-test-{}",
+            Uuid::new_v4()
+        ));
+        let workspace_path = temp_root.join("workspace");
+        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
+
+        std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
+
+        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
+            .expect("workspace should be added");
+        let thread = create_thread(&workspace.id, Some("claude-code".to_string()))
+            .expect("thread should be created");
+        let thread_storage_dir = thread_dir(&workspace.id, &thread.id).expect("thread dir should resolve");
+        assert!(
+            thread_storage_dir.exists(),
+            "thread storage should exist before workspace removal"
+        );
+
+        let removed = remove_workspace(&workspace.id).expect("workspace removal should succeed");
+        assert!(removed, "workspace should report removed");
+        assert!(
+            !thread_workspace_dir(&workspace.id)
+                .expect("workspace dir should resolve")
+                .exists(),
+            "workspace thread storage should be deleted"
+        );
+
+        let remaining = load_workspaces().expect("workspaces should still load");
+        assert!(remaining.is_empty(), "workspace registry should be empty");
 
         std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);

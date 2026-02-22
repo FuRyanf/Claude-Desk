@@ -33,6 +33,7 @@ export const api = {
   getAppStorageRoot: () => invoke<string>('get_app_storage_root'),
   listWorkspaces: () => invoke<Workspace[]>('list_workspaces'),
   addWorkspace: (path: string) => invoke<Workspace>('add_workspace', { path }),
+  removeWorkspace: (workspaceId: string) => invoke<boolean>('remove_workspace', { workspaceId }),
   getGitInfo: (workspacePath: string) =>
     invoke<GitInfo | null>('get_git_info', { workspacePath }),
   getGitDiffSummary: (workspacePath: string) =>

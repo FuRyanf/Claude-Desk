@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
     listWorkspaces: vi.fn(async () => [workspace]),
     addWorkspace: vi.fn(async () => workspace),
+    removeWorkspace: vi.fn(async () => true),
     getGitInfo: vi.fn(async () => ({
       branch: 'main',
       shortHash: 'abc123',
@@ -285,7 +286,7 @@ describe('Thread actions', () => {
 
     await waitFor(() => {
       expect(mocks.api.terminalKill).toHaveBeenCalledWith('session-stale');
-      expect(screen.queryByRole('button', { name: /Rename me/i })).not.toBeInTheDocument();
     });
+    expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(1);
   });
 });

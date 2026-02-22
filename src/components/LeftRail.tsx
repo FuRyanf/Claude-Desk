@@ -18,6 +18,7 @@ interface LeftRailProps {
   onDeleteThread: (workspaceId: string, threadId: string) => Promise<void>;
   onOpenWorkspaceInFinder: (workspacePath: string) => void;
   onOpenWorkspaceInTerminal: (workspacePath: string) => void;
+  onRemoveWorkspace: (workspace: Workspace) => Promise<void>;
   getSearchTextForThread?: (threadId: string) => string;
 }
 
@@ -259,6 +260,7 @@ function LeftRailComponent({
   onDeleteThread,
   onOpenWorkspaceInFinder,
   onOpenWorkspaceInTerminal,
+  onRemoveWorkspace,
   getSearchTextForThread
 }: LeftRailProps) {
   const [editingThreadId, setEditingThreadId] = React.useState<string | null>(null);
@@ -599,6 +601,18 @@ function LeftRailComponent({
             }}
           >
             Open terminal
+          </button>
+          <div className="thread-context-divider" />
+          <button
+            type="button"
+            className="danger"
+            onClick={async () => {
+              const workspace = workspaceContextMenu.workspace;
+              setWorkspaceContextMenu(null);
+              await onRemoveWorkspace(workspace);
+            }}
+          >
+            Remove project
           </button>
         </div>
       ) : null}

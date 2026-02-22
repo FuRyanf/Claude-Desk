@@ -980,6 +980,20 @@ export default function App() {
     await stopSessionsExcept();
   }, [stopSessionsExcept]);
 
+  const stopSessionsForWorkspace = useCallback(
+    async (workspaceId: string) => {
+      const workspaceThreads = threadsByWorkspaceRef.current[workspaceId] ?? [];
+      const activeThreadIds = new Set(Object.values(runStore.activeRunsByThread).map((run) => run.threadId));
+      for (const thread of workspaceThreads) {
+        if (!activeThreadIds.has(thread.id)) {
+          continue;
+        }
+        await stopThreadSession(thread.id);
+      }
+    },
+    [runStore.activeRunsByThread, stopThreadSession]
+  );
+
   const onLoadBranchSwitcher = useCallback(async (): Promise<{
     branches: GitBranchEntry[];
     status: GitWorkspaceStatus | null;
@@ -1440,6 +1454,78 @@ export default function App() {
     void api.openInTerminal(workspacePath);
   }, []);
 
+  const onRemoveWorkspace = useCallback(
+    async (workspace: Workspace) => {
+      const confirmed = window.confirm(
+        `Remove "${workspace.name}" from Claude Desk?\n\nThis keeps your local folder intact but removes its saved threads in Claude Desk.`
+      );
+      if (!confirmed) {
+        return;
+      }
+
+      const workspaceThreads = threadsByWorkspaceRef.current[workspace.id] ?? [];
+      const threadIds = workspaceThreads.map((thread) => thread.id);
+
+      for (const threadId of threadIds) {
+        invalidatePendingSessionStart(threadId);
+      }
+      await stopSessionsForWorkspace(workspace.id);
+
+      const removed = await api.removeWorkspace(workspace.id);
+      if (!removed) {
+        pushToast(`Project "${workspace.name}" was already removed.`, 'info');
+        await refreshWorkspaces();
+        return;
+      }
+
+      window.localStorage.removeItem(threadSelectionKey(workspace.id));
+      setLastTerminalLogByThread((current) => {
+        let changed = false;
+        const next = { ...current };
+        for (const threadId of threadIds) {
+          if (!(threadId in next)) {
+            continue;
+          }
+          delete next[threadId];
+          changed = true;
+        }
+        return changed ? next : current;
+      });
+      setStartingByThread((current) => {
+        let changed = false;
+        const next = { ...current };
+        for (const threadId of threadIds) {
+          if (!(threadId in next)) {
+            continue;
+          }
+          delete next[threadId];
+          changed = true;
+        }
+        return changed ? next : current;
+      });
+      setReadyByThread((current) => {
+        let changed = false;
+        const next = { ...current };
+        for (const threadId of threadIds) {
+          if (!(threadId in next)) {
+            continue;
+          }
+          delete next[threadId];
+          changed = true;
+        }
+        return changed ? next : current;
+      });
+
+      if (threadIds.includes(selectedThreadIdRef.current ?? '')) {
+        setSelectedThread(undefined);
+      }
+
+      await refreshWorkspaces();
+      pushToast(`Removed project "${workspace.name}".`, 'info');
+    },
+    [invalidatePendingSessionStart, pushToast, refreshWorkspaces, setSelectedThread, stopSessionsForWorkspace]
+  );
+
   const getSearchTextForThread = useCallback((threadId: string) => {
     return lastTerminalLogByThreadRef.current[threadId] ?? '';
   }, []);
@@ -1470,6 +1556,7 @@ export default function App() {
         onDeleteThread={onDeleteThread}
         onOpenWorkspaceInFinder={openWorkspaceInFinder}
         onOpenWorkspaceInTerminal={openWorkspaceInTerminal}
+        onRemoveWorkspace={onRemoveWorkspace}
         threadLastUserInputAt={threadLastUserInputAt}
         getSearchTextForThread={getSearchTextForThread}
       />

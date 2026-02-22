@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -19,6 +19,11 @@ const mocks = vi.hoisted(() => {
     addWorkspace: vi.fn(async () => {
       workspaceState = [newWorkspace];
       return newWorkspace;
+    }),
+    removeWorkspace: vi.fn(async (workspaceId: string) => {
+      const before = workspaceState.length;
+      workspaceState = workspaceState.filter((workspace) => workspace.id !== workspaceId);
+      return workspaceState.length !== before;
     }),
     getGitInfo: vi.fn(async () => null),
     getGitDiffSummary: vi.fn(async () => ({ stat: '', diffExcerpt: '' })),
@@ -135,16 +140,17 @@ describe('Workspace add flow', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole('button', { name: 'Add' }));
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
 
     expect(mocks.api.addWorkspace).not.toHaveBeenCalled();
   });
 
   it('adds workspace from manual fallback modal and updates UI immediately', async () => {
     const user = userEvent.setup();
+    mocks.openDialog.mockRejectedValueOnce(new Error('picker unavailable'));
     render(<App />);
 
-    await user.click(await screen.findByRole('button', { name: 'Path' }));
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
 
     const input = await screen.findByLabelText('Manual path');
     await user.clear(input);
@@ -153,5 +159,31 @@ describe('Workspace add flow', () => {
 
     expect(mocks.api.addWorkspace).toHaveBeenCalledWith('/tmp/workspace-added');
     expect(await screen.findByRole('button', { name: /workspace-added/i })).toBeInTheDocument();
+  });
+
+  it('removes workspace from the workspace context menu', async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    mocks.openDialog.mockRejectedValueOnce(new Error('picker unavailable'));
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
+    const input = await screen.findByLabelText('Manual path');
+    await user.clear(input);
+    await user.type(input, '/tmp/workspace-added');
+    await user.click(screen.getByRole('button', { name: 'Add Workspace' }));
+    await screen.findByRole('button', { name: /workspace-added/i });
+
+    const workspaceRow = await screen.findByRole('button', { name: /workspace-added/i });
+    await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Remove project' }));
+
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(mocks.api.removeWorkspace).toHaveBeenCalledWith('ws-added');
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /workspace-added/i })).not.toBeInTheDocument();
+    });
+
+    confirmSpy.mockRestore();
   });
 });
