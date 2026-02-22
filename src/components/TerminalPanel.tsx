@@ -3,14 +3,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import 'xterm/css/xterm.css';
 import { FitAddon } from 'xterm-addon-fit';
 import { Terminal } from 'xterm';
-
 import { onTerminalData } from '../lib/api';
-import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
 
+const OUTPUT_FLUSH_MS = 8;
+const OUTPUT_CHUNK_SIZE = 16 * 1024;
 const INPUT_FLUSH_MS = 8;
 const INPUT_CHUNK_SIZE = 4 * 1024;
-const RESIZE_DEBOUNCE_MS = 40;
-const INITIAL_FIT_RETRY_FRAMES = 12;
 
 interface TerminalPanelProps {
   sessionId?: string | null;
@@ -25,38 +23,19 @@ interface TerminalPanelProps {
   onFocusChange?: (focused: boolean) => void;
 }
 
-interface TerminalDebugMetrics {
-  ptyEvents: number;
-  ptyBytes: number;
-  resizeEvents: number;
-  queueHighWaterBytes: number;
-  lastLogAt: number;
-}
-
-function emptyDebugMetrics(): TerminalDebugMetrics {
-  return {
-    ptyEvents: 0,
-    ptyBytes: 0,
-    resizeEvents: 0,
-    queueHighWaterBytes: 0,
-    lastLogAt: 0
-  };
-}
-
 export function TerminalPanel({
   sessionId = null,
   content,
   readOnly = false,
   inputEnabled = true,
   overlayMessage,
-  debugEnabled = false,
+  debugEnabled: _debugEnabled = false,
   onData,
   onOutput,
   onResize,
   onFocusChange
 }: TerminalPanelProps) {
   const [fallback, setFallback] = useState(() => import.meta.env.MODE === 'test');
-  const [terminalReady, setTerminalReady] = useState(false);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const contentRef = useRef(content);
@@ -66,46 +45,15 @@ export function TerminalPanel({
   const onFocusChangeRef = useRef(onFocusChange);
   const readOnlyRef = useRef(readOnly);
   const inputEnabledRef = useRef(inputEnabled);
-  const debugEnabledRef = useRef(debugEnabled);
   const sessionRef = useRef<string | null>(sessionId);
   const hydratedSessionRef = useRef<string | null>(null);
   const hasLiveDataRef = useRef(false);
+  const writeBufferRef = useRef('');
+  const flushTimerRef = useRef<number | null>(null);
+  const writingRef = useRef(false);
   const inputBufferRef = useRef('');
   const inputFlushTimerRef = useRef<number | null>(null);
-  const resizeDebounceTimerRef = useRef<number | null>(null);
-  const initialFitFrameRef = useRef<number | null>(null);
-  const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
-  const debugMetricsRef = useRef<TerminalDebugMetrics>(emptyDebugMetrics());
-  const writeQueueRef = useRef<TerminalWriteQueue>(new TerminalWriteQueue());
-  const shouldAutoFollowRef = useRef(true);
-
-  const logDebugSnapshot = useCallback((reason: string, force = false) => {
-    if (!debugEnabledRef.current) {
-      return;
-    }
-
-    const now = performance.now();
-    const metrics = debugMetricsRef.current;
-    if (!force && now - metrics.lastLogAt < 850) {
-      return;
-    }
-
-    const queueStats = writeQueueRef.current.getStats();
-    metrics.lastLogAt = now;
-    console.info('[TerminalDebug]', {
-      reason,
-      sessionId: sessionRef.current,
-      ptyEvents: metrics.ptyEvents,
-      ptyBytes: metrics.ptyBytes,
-      resizeEvents: metrics.resizeEvents,
-      queuePendingChunks: queueStats.pendingChunks,
-      queuePendingBytes: queueStats.pendingBytes,
-      queueHighWaterBytes: Math.max(metrics.queueHighWaterBytes, queueStats.highWaterBytes),
-      queueWrites: queueStats.totalWrites,
-      queueWrittenBytes: queueStats.totalBytesWritten,
-      queueWriting: queueStats.writing
-    });
-  }, []);
+  const resizeFrameRef = useRef<number | null>(null);
 
   const flushOutgoingInput = useCallback(() => {
     const payload = inputBufferRef.current;
@@ -126,35 +74,71 @@ export function TerminalPanel({
     }, INPUT_FLUSH_MS);
   }, [flushOutgoingInput]);
 
-  const queueWrite = useCallback(
-    (data: string) => {
-      if (!data) {
-        return;
-      }
-      writeQueueRef.current.enqueue(data);
-      const queueStats = writeQueueRef.current.getStats();
-      if (queueStats.highWaterBytes > debugMetricsRef.current.queueHighWaterBytes) {
-        debugMetricsRef.current.queueHighWaterBytes = queueStats.highWaterBytes;
-      }
-      logDebugSnapshot('queue-enqueue');
-    },
-    [logDebugSnapshot]
-  );
-
-  const clearPendingWrites = useCallback(() => {
-    writeQueueRef.current.clear();
+  const scheduleOutputFlush = useCallback((flush: () => void) => {
+    if (flushTimerRef.current !== null) {
+      return;
+    }
+    flushTimerRef.current = window.setTimeout(() => {
+      flushTimerRef.current = null;
+      flush();
+    }, OUTPUT_FLUSH_MS);
   }, []);
 
-  const scrollTerminalToBottom = useCallback(() => {
-    const term = terminalRef.current;
-    if (!term) {
+  const flushQueuedWrites = useCallback(() => {
+    if (writingRef.current) {
       return;
     }
 
-    term.scrollToBottom();
-    window.requestAnimationFrame(() => {
-      terminalRef.current?.scrollToBottom();
+    const term = terminalRef.current;
+    if (!term) {
+      writeBufferRef.current = '';
+      return;
+    }
+
+    const payload = writeBufferRef.current;
+    if (payload.length === 0) {
+      return;
+    }
+
+    const chunk = payload.slice(0, OUTPUT_CHUNK_SIZE);
+    writeBufferRef.current = payload.slice(chunk.length);
+    writingRef.current = true;
+    term.write(chunk, () => {
+      writingRef.current = false;
+      if (writeBufferRef.current.length > 0) {
+        scheduleOutputFlush(flushQueuedWrites);
+      }
     });
+  }, [scheduleOutputFlush]);
+
+  const queueWrite = useCallback(
+    (data: string) => {
+      if (data.length === 0) {
+        return;
+      }
+
+      writeBufferRef.current += data;
+
+      if (writeBufferRef.current.length >= OUTPUT_CHUNK_SIZE * 2) {
+        if (flushTimerRef.current !== null) {
+          window.clearTimeout(flushTimerRef.current);
+          flushTimerRef.current = null;
+        }
+        flushQueuedWrites();
+      } else {
+        scheduleOutputFlush(flushQueuedWrites);
+      }
+    },
+    [flushQueuedWrites, scheduleOutputFlush]
+  );
+
+  const clearPendingWrites = useCallback(() => {
+    writeBufferRef.current = '';
+    writingRef.current = false;
+    if (flushTimerRef.current !== null) {
+      window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
   }, []);
 
   const resetTerminalContent = useCallback(
@@ -163,12 +147,10 @@ export function TerminalPanel({
       if (!term) {
         return;
       }
-
       clearPendingWrites();
       term.reset();
       if (nextContent.length > 0) {
         queueWrite(nextContent);
-        writeQueueRef.current.flushImmediate();
       }
     },
     [clearPendingWrites, queueWrite]
@@ -195,14 +177,6 @@ export function TerminalPanel({
   }, [content]);
 
   useEffect(() => {
-    debugEnabledRef.current = debugEnabled;
-    if (debugEnabled) {
-      debugMetricsRef.current = emptyDebugMetrics();
-      logDebugSnapshot('debug-enabled', true);
-    }
-  }, [debugEnabled, logDebugSnapshot]);
-
-  useEffect(() => {
     if (fallback) {
       return;
     }
@@ -212,21 +186,6 @@ export function TerminalPanel({
       return;
     }
 
-    let disposed = false;
-
-    const emitResize = (term: Terminal, source: 'init' | 'observer') => {
-      const cols = Math.max(term.cols, 2);
-      const rows = Math.max(term.rows, 2);
-      const previous = lastSentSizeRef.current;
-      if (previous && previous.cols === cols && previous.rows === rows) {
-        return;
-      }
-      lastSentSizeRef.current = { cols, rows };
-      debugMetricsRef.current.resizeEvents += 1;
-      onResizeRef.current?.(cols, rows);
-      logDebugSnapshot(`resize-${source}`);
-    };
-
     try {
       const term = new Terminal({
         cursorBlink: true,
@@ -234,60 +193,22 @@ export function TerminalPanel({
         scrollback: 10_000,
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
         fontSize: 12,
-        lineHeight: 1.28,
+        lineHeight: 1.3,
         theme: {
           background: '#0b1020',
           foreground: '#e5e7eb'
         },
-        disableStdin: readOnlyRef.current || !inputEnabledRef.current
+        disableStdin: readOnly || !inputEnabled
       });
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(host);
+      fitAddon.fit();
+      onResizeRef.current?.(term.cols, term.rows);
       terminalRef.current = term;
-      writeQueueRef.current.setSink({
-        write: (chunk, done) => {
-          term.write(chunk, () => {
-            if (shouldAutoFollowRef.current) {
-              term.scrollToBottom();
-            }
-            done();
-          });
-        }
-      });
-
-      const applyFitAndResize = (source: 'init' | 'observer') => {
-        if (disposed) {
-          return;
-        }
-        fitAddon.fit();
-        emitResize(term, source);
-      };
-
-      const runInitialFit = (attempt: number) => {
-        if (disposed) {
-          return;
-        }
-        const rect = host.getBoundingClientRect();
-        if (
-          (rect.width < 4 || rect.height < 4) &&
-          attempt < INITIAL_FIT_RETRY_FRAMES
-        ) {
-          initialFitFrameRef.current = window.requestAnimationFrame(() => runInitialFit(attempt + 1));
-          return;
-        }
-
-        applyFitAndResize('init');
-        setTerminalReady(true);
-        if (contentRef.current.length > 0) {
-          queueWrite(contentRef.current);
-        }
-        writeQueueRef.current.flushImmediate();
-        scrollTerminalToBottom();
-        logDebugSnapshot('terminal-ready', true);
-      };
-
-      runInitialFit(0);
+      if (contentRef.current.length > 0) {
+        queueWrite(contentRef.current);
+      }
 
       const onDataDisposable = term.onData((data) => {
         if (readOnlyRef.current || !inputEnabledRef.current) {
@@ -295,7 +216,11 @@ export function TerminalPanel({
         }
 
         inputBufferRef.current += data;
-        if (data === '\r' || data === '\x03' || inputBufferRef.current.length >= INPUT_CHUNK_SIZE) {
+        if (
+          data === '\r' ||
+          data === '\x03' ||
+          inputBufferRef.current.length >= INPUT_CHUNK_SIZE
+        ) {
           if (inputFlushTimerRef.current !== null) {
             window.clearTimeout(inputFlushTimerRef.current);
             inputFlushTimerRef.current = null;
@@ -305,71 +230,48 @@ export function TerminalPanel({
           scheduleOutgoingInputFlush();
         }
       });
-      const onScrollDisposable = term.onScroll((position) => {
-        shouldAutoFollowRef.current = position >= term.buffer.active.baseY;
-      });
 
       const onFocusIn = () => onFocusChangeRef.current?.(true);
       const onFocusOut = () => onFocusChangeRef.current?.(false);
       host.addEventListener('focusin', onFocusIn);
       host.addEventListener('focusout', onFocusOut);
 
-      const scheduleResize = () => {
-        if (resizeDebounceTimerRef.current !== null) {
-          window.clearTimeout(resizeDebounceTimerRef.current);
-        }
-        resizeDebounceTimerRef.current = window.setTimeout(() => {
-          resizeDebounceTimerRef.current = null;
-          applyFitAndResize('observer');
-        }, RESIZE_DEBOUNCE_MS);
-      };
-
       const observer = new ResizeObserver(() => {
-        scheduleResize();
+        if (resizeFrameRef.current !== null) {
+          return;
+        }
+        resizeFrameRef.current = window.requestAnimationFrame(() => {
+          resizeFrameRef.current = null;
+          fitAddon.fit();
+          onResizeRef.current?.(term.cols, term.rows);
+        });
       });
       observer.observe(host);
 
       return () => {
-        disposed = true;
-        setTerminalReady(false);
         observer.disconnect();
         onDataDisposable.dispose();
-        onScrollDisposable.dispose();
         host.removeEventListener('focusin', onFocusIn);
         host.removeEventListener('focusout', onFocusOut);
-        if (resizeDebounceTimerRef.current !== null) {
-          window.clearTimeout(resizeDebounceTimerRef.current);
-          resizeDebounceTimerRef.current = null;
-        }
-        if (initialFitFrameRef.current !== null) {
-          window.cancelAnimationFrame(initialFitFrameRef.current);
-          initialFitFrameRef.current = null;
-        }
         fitAddon.dispose();
         term.dispose();
         terminalRef.current = null;
-        writeQueueRef.current.setSink(null);
         clearPendingWrites();
         inputBufferRef.current = '';
         if (inputFlushTimerRef.current !== null) {
           window.clearTimeout(inputFlushTimerRef.current);
           inputFlushTimerRef.current = null;
         }
-        lastSentSizeRef.current = null;
-        shouldAutoFollowRef.current = true;
+        if (resizeFrameRef.current !== null) {
+          window.cancelAnimationFrame(resizeFrameRef.current);
+          resizeFrameRef.current = null;
+        }
       };
     } catch {
       setFallback(true);
       return;
     }
-  }, [
-    clearPendingWrites,
-    fallback,
-    flushOutgoingInput,
-    logDebugSnapshot,
-    queueWrite,
-    scheduleOutgoingInputFlush
-  ]);
+  }, [clearPendingWrites, fallback, flushOutgoingInput, queueWrite, scheduleOutgoingInputFlush]);
 
   useEffect(() => {
     readOnlyRef.current = readOnly;
@@ -385,7 +287,7 @@ export function TerminalPanel({
 
   useEffect(() => {
     const term = terminalRef.current;
-    if (!term || !terminalReady) {
+    if (!term) {
       sessionRef.current = sessionId;
       return;
     }
@@ -397,7 +299,6 @@ export function TerminalPanel({
     sessionRef.current = sessionId;
     hasLiveDataRef.current = false;
     hydratedSessionRef.current = null;
-    shouldAutoFollowRef.current = true;
     clearPendingWrites();
     inputBufferRef.current = '';
     if (inputFlushTimerRef.current !== null) {
@@ -409,16 +310,7 @@ export function TerminalPanel({
     if (contentRef.current.length > 0) {
       hydratedSessionRef.current = sessionId;
     }
-    scrollTerminalToBottom();
-    logDebugSnapshot('session-switch', true);
-  }, [
-    clearPendingWrites,
-    logDebugSnapshot,
-    resetTerminalContent,
-    scrollTerminalToBottom,
-    sessionId,
-    terminalReady
-  ]);
+  }, [clearPendingWrites, resetTerminalContent, sessionId]);
 
   useEffect(() => {
     if (!readOnly && sessionId) {
@@ -426,17 +318,15 @@ export function TerminalPanel({
     }
 
     const term = terminalRef.current;
-    if (!term || !terminalReady) {
+    if (!term) {
       return;
     }
 
     resetTerminalContent(content);
-    shouldAutoFollowRef.current = true;
-    scrollTerminalToBottom();
-  }, [content, readOnly, resetTerminalContent, scrollTerminalToBottom, sessionId, terminalReady]);
+  }, [content, readOnly, resetTerminalContent, sessionId]);
 
   useEffect(() => {
-    if (fallback || readOnly || !sessionId || !terminalReady) {
+    if (fallback || readOnly || !sessionId) {
       return;
     }
 
@@ -451,23 +341,10 @@ export function TerminalPanel({
 
     resetTerminalContent(content);
     hydratedSessionRef.current = sessionId;
-    writeQueueRef.current.flushImmediate();
-    shouldAutoFollowRef.current = true;
-    scrollTerminalToBottom();
-    logDebugSnapshot('hydrate-content');
-  }, [
-    content,
-    fallback,
-    logDebugSnapshot,
-    readOnly,
-    resetTerminalContent,
-    scrollTerminalToBottom,
-    sessionId,
-    terminalReady
-  ]);
+  }, [content, fallback, readOnly, resetTerminalContent, sessionId]);
 
   useEffect(() => {
-    if (fallback || readOnly || !sessionId || !terminalReady) {
+    if (fallback || readOnly || !sessionId) {
       return;
     }
 
@@ -479,11 +356,8 @@ export function TerminalPanel({
         return;
       }
       hasLiveDataRef.current = true;
-      debugMetricsRef.current.ptyEvents += 1;
-      debugMetricsRef.current.ptyBytes += event.data.length;
       onOutputRef.current?.(event.data);
       queueWrite(event.data);
-      logDebugSnapshot('pty-data');
     }).then((cleanup) => {
       if (disposed) {
         cleanup();
@@ -497,16 +371,7 @@ export function TerminalPanel({
       flushOutgoingInput();
       unlisten?.();
     };
-  }, [
-    fallback,
-    flushOutgoingInput,
-    logDebugSnapshot,
-    queueWrite,
-    readOnly,
-    scrollTerminalToBottom,
-    sessionId,
-    terminalReady
-  ]);
+  }, [fallback, flushOutgoingInput, queueWrite, readOnly, sessionId]);
 
   if (fallback) {
     return (

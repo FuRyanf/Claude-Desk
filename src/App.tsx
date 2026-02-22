@@ -278,20 +278,8 @@ export default function App() {
     if (!selectedThreadId) {
       return '';
     }
-    if (isSelectedThreadStarting) {
-      return '';
-    }
-    if (selectedSessionId && !isSelectedThreadReady) {
-      return '';
-    }
     return lastTerminalLogByThread[selectedThreadId] ?? '';
-  }, [
-    isSelectedThreadReady,
-    isSelectedThreadStarting,
-    lastTerminalLogByThread,
-    selectedSessionId,
-    selectedThreadId
-  ]);
+  }, [lastTerminalLogByThread, selectedThreadId]);
 
 
   useEffect(() => {
