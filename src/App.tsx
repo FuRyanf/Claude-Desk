@@ -48,6 +48,15 @@ interface PendingSessionStart {
   promise: Promise<string>;
 }
 
+function removeThreadFlag(map: Record<string, boolean>, threadId: string) {
+  if (!map[threadId]) {
+    return map;
+  }
+  const next = { ...map };
+  delete next[threadId];
+  return next;
+}
+
 function threadSelectionKey(workspaceId: string) {
   return `claude-desk:selected-thread:${workspaceId}`;
 }
@@ -58,6 +67,13 @@ function todayId() {
 
 function stripAnsi(text: string): string {
   return text.replace(ANSI_REGEX, '');
+}
+
+function clampTerminalLog(text: string): string {
+  if (text.length <= TERMINAL_LOG_BUFFER_CHARS) {
+    return text;
+  }
+  return text.slice(text.length - TERMINAL_LOG_BUFFER_CHARS);
 }
 
 function terminalChunkSignalsIdle(chunk: string): boolean {
@@ -188,6 +204,8 @@ export default function App() {
   const [pendingFullAccessValue, setPendingFullAccessValue] = useState<boolean | null>(null);
   const [savingFullAccess, setSavingFullAccess] = useState(false);
   const [sessionModeByThread, setSessionModeByThread] = useState<Record<string, TerminalSessionMode>>({});
+  const [startingByThread, setStartingByThread] = useState<Record<string, boolean>>({});
+  const [readyByThread, setReadyByThread] = useState<Record<string, boolean>>({});
   const [resumeFailureModal, setResumeFailureModal] = useState<{
     threadId: string;
     workspaceId: string;
@@ -197,6 +215,7 @@ export default function App() {
 
   const selectedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const selectedThreadIdRef = useRef<string | undefined>(undefined);
+  const previousSelectedThreadIdRef = useRef<string | undefined>(undefined);
   const sidebarResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const startingSessionByThreadRef = useRef<Record<string, PendingSessionStart>>({});
   const sessionStartRequestIdByThreadRef = useRef<Record<string, number>>({});
@@ -413,10 +432,7 @@ export default function App() {
     setLastTerminalLogByThread((current) => {
       const previous = current[threadId] ?? '';
       const combined = `${previous}${chunk}`;
-      const next =
-        combined.length > TERMINAL_LOG_BUFFER_CHARS
-          ? combined.slice(combined.length - TERMINAL_LOG_BUFFER_CHARS)
-          : combined;
+      const next = clampTerminalLog(combined);
       if (next === previous) {
         return current;
       }
@@ -438,6 +454,7 @@ export default function App() {
       bumpSessionStartRequestId(threadId);
       delete startingSessionByThreadRef.current[threadId];
       delete pendingInputByThreadRef.current[threadId];
+      setStartingByThread((current) => removeThreadFlag(current, threadId));
     },
     [bumpSessionStartRequestId]
   );
@@ -446,6 +463,8 @@ export default function App() {
     async (thread: ThreadMetadata): Promise<string> => {
       const existing = runStore.sessionForThread(thread.id);
       if (existing) {
+        setStartingByThread((current) => removeThreadFlag(current, thread.id));
+        setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
         await flushPendingThreadInput(thread.id, existing);
         return existing;
       }
@@ -460,6 +479,11 @@ export default function App() {
         throw new Error('Workspace not found for thread.');
       }
       const requestId = bumpSessionStartRequestId(thread.id);
+      setStartingByThread((current) => ({
+        ...current,
+        [thread.id]: true
+      }));
+      setReadyByThread((current) => removeThreadFlag(current, thread.id));
 
       const startPromise = (async () => {
         const response = await api.terminalStartSession({
@@ -472,6 +496,7 @@ export default function App() {
 
         const sessionId = response.sessionId;
         if ((sessionStartRequestIdByThreadRef.current[thread.id] ?? 0) !== requestId) {
+          setStartingByThread((current) => removeThreadFlag(current, thread.id));
           try {
             await api.terminalKill(sessionId);
           } catch {
@@ -484,6 +509,7 @@ export default function App() {
           (item) => item.id === thread.id
         );
         if (!threadStillExists) {
+          setStartingByThread((current) => removeThreadFlag(current, thread.id));
           try {
             await api.terminalKill(sessionId);
           } catch {
@@ -511,18 +537,21 @@ export default function App() {
           void api
             .terminalReadOutput(sessionId)
             .then((snapshot) => {
-              if (!snapshot) {
-                return;
-              }
               setLastTerminalLogByThread((current) => ({
                 ...current,
-                [thread.id]: snapshot
+                [thread.id]: clampTerminalLog(snapshot ?? '')
               }));
+              setStartingByThread((current) => removeThreadFlag(current, thread.id));
+              setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
             })
             .catch(() => undefined);
-        }, 350);
+        }, 450);
         return sessionId;
       })()
+        .catch((error) => {
+          setStartingByThread((current) => removeThreadFlag(current, thread.id));
+          throw error;
+        })
         .finally(() => {
           if (startingSessionByThreadRef.current[thread.id]?.requestId === requestId) {
             delete startingSessionByThreadRef.current[thread.id];
@@ -532,7 +561,14 @@ export default function App() {
       startingSessionByThreadRef.current[thread.id] = { requestId, promise: startPromise };
       return startPromise;
     },
-    [bumpSessionStartRequestId, flushPendingThreadInput, runStore, terminalSize.cols, terminalSize.rows, workspaces]
+    [
+      bumpSessionStartRequestId,
+      flushPendingThreadInput,
+      runStore,
+      terminalSize.cols,
+      terminalSize.rows,
+      workspaces
+    ]
   );
 
   const addWorkspaceByPath = useCallback(
@@ -658,6 +694,8 @@ export default function App() {
       if (existingSessionId) {
         runStore.stopWorking(threadId);
       }
+      setStartingByThread((current) => removeThreadFlag(current, threadId));
+      setReadyByThread((current) => removeThreadFlag(current, threadId));
 
       if (selectedThreadIdRef.current === threadId) {
         setSelectedThread(undefined);
@@ -697,6 +735,8 @@ export default function App() {
         return;
       }
       runStore.stopWorking(threadId);
+      setStartingByThread((current) => removeThreadFlag(current, threadId));
+      setReadyByThread((current) => removeThreadFlag(current, threadId));
 
       if (selectedThreadIdRef.current === threadId) {
         setSelectedThread(undefined);
@@ -720,7 +760,7 @@ export default function App() {
         if (typeof snapshot === 'string' && snapshot.length > 0) {
           setLastTerminalLogByThread((current) => ({
             ...current,
-            [threadId]: snapshot
+            [threadId]: clampTerminalLog(snapshot)
           }));
         }
       } catch {
@@ -745,6 +785,8 @@ export default function App() {
       const endedAt = new Date().toISOString();
       setThreadRunState(threadId, 'Canceled', null, endedAt);
       delete sessionMetaBySessionIdRef.current[sessionId];
+      setStartingByThread((current) => removeThreadFlag(current, threadId));
+      setReadyByThread((current) => removeThreadFlag(current, threadId));
     },
     [invalidatePendingSessionStart, runStore, setThreadRunState]
   );
@@ -885,7 +927,7 @@ export default function App() {
           if (snapshot) {
             setLastTerminalLogByThread((current) => ({
               ...current,
-              [selectedThread.id]: snapshot
+              [selectedThread.id]: clampTerminalLog(snapshot)
             }));
           }
         }
@@ -917,7 +959,7 @@ export default function App() {
           if (snapshot) {
             setLastTerminalLogByThread((current) => ({
               ...current,
-              [selectedThread.id]: snapshot
+              [selectedThread.id]: clampTerminalLog(snapshot)
             }));
           }
         }
@@ -1039,25 +1081,65 @@ export default function App() {
     if (!selectedWorkspaceId || !selectedThreadId) {
       return;
     }
-    if (lastTerminalLogByThread[selectedThreadId] !== undefined) {
-      return;
-    }
-
+    let cancelled = false;
     void api
       .terminalGetLastLog(selectedWorkspaceId, selectedThreadId)
       .then((log) => {
+        if (cancelled) {
+          return;
+        }
         setLastTerminalLogByThread((current) => ({
           ...current,
-          [selectedThreadId]: log
+          [selectedThreadId]: clampTerminalLog(log)
         }));
       })
       .catch(() => {
+        if (cancelled) {
+          return;
+        }
         setLastTerminalLogByThread((current) => ({
           ...current,
           [selectedThreadId]: ''
         }));
       });
-  }, [lastTerminalLogByThread, selectedThreadId, selectedWorkspaceId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedThreadId, selectedWorkspaceId]);
+
+  useEffect(() => {
+    if (!selectedThread) {
+      return;
+    }
+    const existingSessionId = runStore.sessionForThread(selectedThread.id);
+    if (existingSessionId) {
+      setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
+      setReadyByThread((current) => (current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }));
+      return;
+    }
+
+    setStartingByThread((current) => ({
+      ...current,
+      [selectedThread.id]: true
+    }));
+    setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
+
+    void ensureSessionForThread(selectedThread).catch((error) => {
+      setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
+      pushToast(`Failed to start Claude session: ${String(error)}`, 'error');
+    });
+  }, [ensureSessionForThread, pushToast, runStore, selectedThread]);
+
+  useEffect(() => {
+    const previousId = previousSelectedThreadIdRef.current;
+    previousSelectedThreadIdRef.current = selectedThreadId;
+
+    if (!previousId || previousId === selectedThreadId) {
+      return;
+    }
+
+    void stopThreadSession(previousId);
+  }, [selectedThreadId, stopThreadSession]);
 
   useEffect(() => {
     let unlistenExit: (() => void) | null = null;
@@ -1071,6 +1153,8 @@ export default function App() {
         if (!endedThreadId) {
           return;
         }
+        setStartingByThread((current) => removeThreadFlag(current, endedThreadId));
+        setReadyByThread((current) => removeThreadFlag(current, endedThreadId));
 
         const endedAt = new Date().toISOString();
         setThreadRunState(endedThreadId, statusFromExit(event), null, endedAt);
@@ -1089,7 +1173,7 @@ export default function App() {
           .then((snapshot) => {
             setLastTerminalLogByThread((current) => ({
               ...current,
-              [endedThreadId]: snapshot
+              [endedThreadId]: clampTerminalLog(snapshot)
             }));
 
             if (sessionMeta?.mode !== 'resumed') {
@@ -1217,6 +1301,8 @@ export default function App() {
   }, [pushToast, selectedWorkspace]);
 
   const selectedWorkingStartedAt = runStore.workingStartedAtForThread(selectedThreadId);
+  const isSelectedThreadStarting = selectedThread ? Boolean(startingByThread[selectedThread.id]) : false;
+  const isSelectedThreadReady = selectedThread ? Boolean(readyByThread[selectedThread.id]) : false;
   const runningForLabel = selectedWorkingStartedAt
     ? formatDurationShort((nowMs - Date.parse(selectedWorkingStartedAt)) / 1000)
     : undefined;
@@ -1224,7 +1310,11 @@ export default function App() {
     selectedThread?.lastRunStatus && selectedThread.lastRunStatus !== 'Running'
       ? selectedThread.lastRunStatus
       : 'Idle';
-  const statusLabel = runStore.isThreadWorking(selectedThreadId) ? 'Running' : normalizedStatus;
+  const statusLabel = isSelectedThreadStarting
+    ? 'Starting'
+    : runStore.isThreadWorking(selectedThreadId)
+      ? 'Running'
+      : normalizedStatus;
   const selectedSessionMode = selectedThreadId ? sessionModeByThread[selectedThreadId] : undefined;
   const sessionModeLabel = useMemo(() => {
     if (selectedSessionMode === 'resumed') {
@@ -1327,8 +1417,14 @@ export default function App() {
               sessionId={selectedSessionId}
               content={selectedTerminalContent}
               readOnly={false}
+              inputEnabled={Boolean(selectedSessionId) && isSelectedThreadReady && !isSelectedThreadStarting}
+              overlayMessage={isSelectedThreadStarting || !selectedSessionId ? 'Starting Claude session...' : undefined}
               onData={(data) => {
                 if (!selectedThread) {
+                  return;
+                }
+
+                if (isSelectedThreadStarting || !selectedSessionId) {
                   return;
                 }
 
@@ -1353,6 +1449,8 @@ export default function App() {
                 } else if (terminalChunkSignalsIdle(chunk)) {
                   runStore.stopWorking(selectedThread.id);
                 }
+                setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
+                setReadyByThread((current) => (current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }));
                 appendTerminalLogChunk(selectedThread.id, chunk);
               }}
               onResize={(cols, rows) => {
@@ -1365,14 +1463,12 @@ export default function App() {
               onFocusChange={setTerminalFocused}
             />
           ) : (
-            <div className="terminal-empty">Create a thread to start typing.</div>
+            <div className="terminal-empty">Select a thread to start Claude.</div>
           )}
         </section>
         <BottomBar
           workspace={selectedWorkspace}
           gitInfo={gitInfo}
-          statusLabel={statusLabel}
-          runningForLabel={runningForLabel}
           fullAccess={selectedThread?.fullAccess ?? false}
           fullAccessDisabled={!selectedThread || savingFullAccess}
           onToggleFullAccess={onToggleFullAccess}

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -23,7 +23,10 @@ const mocks = vi.hoisted(() => {
     isArchived: false,
     lastRunStatus: 'Idle' as const,
     lastRunStartedAt: null,
-    lastRunEndedAt: null
+    lastRunEndedAt: null,
+    claudeSessionId: null,
+    lastResumeAt: null,
+    lastNewSessionAt: null
   };
 
   const skill = {
@@ -199,29 +202,29 @@ describe('App terminal-first layout', () => {
     mocks.reset();
   });
 
-  it('starts an interactive terminal when explicitly requested for a thread', async () => {
+  it('starts an interactive terminal automatically for the selected thread', async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    expect(await screen.findByText('Create a thread to start typing.')).toBeInTheDocument();
+    await screen.findByRole('button', { name: /First thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-1' })
+      );
+    });
 
     await user.click(screen.getByRole('button', { name: 'New thread' }));
-    const threadList = document.querySelector('.workspace-thread-list');
-    expect(threadList).not.toBeNull();
-    const title = within(threadList as HTMLElement).getByText('New thread');
-    const row = title.closest('button');
-    expect(row).not.toBeNull();
-    await user.pointer([{ target: row as HTMLElement, keys: '[MouseRight]' }]);
-    await user.click(await screen.findByRole('button', { name: 'Start fresh session' }));
-
     await waitFor(() => {
-      expect(mocks.api.terminalStartSession).toHaveBeenCalled();
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-2' })
+      );
     });
   });
 
   it('keeps Codex-like core layout constraints', async () => {
     render(<App />);
 
+    await screen.findByRole('button', { name: /First thread/i });
     const header = await screen.findByTestId('header');
     const sidebar = screen.getByTestId('sidebar');
     const mainPanel = screen.getByTestId('main-panel');
@@ -234,7 +237,9 @@ describe('App terminal-first layout', () => {
     expect(getComputedStyle(mainPanel).gridTemplateRows).toContain('44px');
     expect(composer).toBeNull();
 
-    expect(document.querySelector('.terminal-panel')).toBeTruthy();
+    await waitFor(() => {
+      expect(document.querySelector('.terminal-panel')).toBeTruthy();
+    });
   });
 
   it('supports dragging the sidebar resizer and persists width', async () => {
@@ -252,6 +257,28 @@ describe('App terminal-first layout', () => {
     await waitFor(() => {
       expect(getComputedStyle(sidebar).width).toBe('392px');
       expect(window.localStorage.getItem('claude-desk:sidebar-width')).toBe('392');
+    });
+  });
+
+  it('keeps terminal visible across repeated sidebar resize cycles', async () => {
+    render(<App />);
+
+    await screen.findByRole('button', { name: /First thread/i });
+    const sidebar = await screen.findByTestId('sidebar');
+    const resizer = await screen.findByTestId('sidebar-resizer');
+
+    const widths = [280, 430, 300, 450, 320];
+    for (const width of widths) {
+      fireEvent.mouseDown(resizer, { button: 0, clientX: Number.parseInt(getComputedStyle(sidebar).width, 10) });
+      fireEvent.mouseMove(window, { clientX: width });
+      fireEvent.mouseUp(window);
+      await waitFor(() => {
+        expect(getComputedStyle(sidebar).width).toBe(`${width}px`);
+      });
+    }
+
+    await waitFor(() => {
+      expect(document.querySelector('.terminal-panel')).toBeTruthy();
     });
   });
 });

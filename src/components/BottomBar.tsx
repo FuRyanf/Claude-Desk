@@ -10,8 +10,6 @@ interface BranchSwitcherSnapshot {
 interface BottomBarProps {
   workspace?: Workspace;
   gitInfo: GitInfo | null;
-  statusLabel: string;
-  runningForLabel?: string;
   fullAccess: boolean;
   fullAccessDisabled?: boolean;
   onToggleFullAccess: (nextValue: boolean) => Promise<void>;
@@ -40,8 +38,6 @@ function BranchGlyph() {
 export function BottomBar({
   workspace,
   gitInfo,
-  statusLabel,
-  runningForLabel,
   fullAccess,
   fullAccessDisabled = false,
   onToggleFullAccess,
@@ -318,9 +314,6 @@ export function BottomBar({
         >
           Full Access {fullAccess ? 'ON' : 'OFF'}
         </button>
-        <span className={runningForLabel ? 'status running' : 'status'}>
-          {runningForLabel ? `Running for ${runningForLabel}` : statusLabel}
-        </span>
       </div>
     </footer>
   );

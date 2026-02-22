@@ -14,6 +14,8 @@ interface TerminalPanelProps {
   sessionId?: string | null;
   content: string;
   readOnly?: boolean;
+  inputEnabled?: boolean;
+  overlayMessage?: string;
   onData?: (data: string) => void;
   onOutput?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
@@ -24,6 +26,8 @@ export function TerminalPanel({
   sessionId = null,
   content,
   readOnly = false,
+  inputEnabled = true,
+  overlayMessage,
   onData,
   onOutput,
   onResize,
@@ -38,6 +42,7 @@ export function TerminalPanel({
   const onResizeRef = useRef(onResize);
   const onFocusChangeRef = useRef(onFocusChange);
   const readOnlyRef = useRef(readOnly);
+  const inputEnabledRef = useRef(inputEnabled);
   const sessionRef = useRef<string | null>(sessionId);
   const hydratedSessionRef = useRef<string | null>(null);
   const hasLiveDataRef = useRef(false);
@@ -191,7 +196,7 @@ export function TerminalPanel({
           background: '#0b1020',
           foreground: '#e5e7eb'
         },
-        disableStdin: readOnly
+        disableStdin: readOnly || !inputEnabled
       });
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
@@ -204,7 +209,7 @@ export function TerminalPanel({
       }
 
       const onDataDisposable = term.onData((data) => {
-        if (readOnlyRef.current) {
+        if (readOnlyRef.current || !inputEnabledRef.current) {
           return;
         }
 
@@ -268,14 +273,15 @@ export function TerminalPanel({
 
   useEffect(() => {
     readOnlyRef.current = readOnly;
+    inputEnabledRef.current = inputEnabled;
 
     const term = terminalRef.current;
     if (!term) {
       return;
     }
 
-    term.options.disableStdin = readOnly;
-  }, [readOnly]);
+    term.options.disableStdin = readOnly || !inputEnabled;
+  }, [inputEnabled, readOnly]);
 
   useEffect(() => {
     const term = terminalRef.current;
@@ -369,6 +375,7 @@ export function TerminalPanel({
     return (
       <section className="terminal-panel">
         <pre className="terminal-fallback">{content}</pre>
+        {overlayMessage ? <div className="terminal-overlay">{overlayMessage}</div> : null}
       </section>
     );
   }
@@ -376,6 +383,7 @@ export function TerminalPanel({
   return (
     <section className="terminal-panel">
       <div ref={hostRef} className="terminal-host" />
+      {overlayMessage ? <div className="terminal-overlay">{overlayMessage}</div> : null}
     </section>
   );
 }

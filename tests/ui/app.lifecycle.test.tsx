@@ -201,21 +201,43 @@ describe('Thread lifecycle integration', () => {
     mocks.reset();
   });
 
-  it('does not auto-create or auto-start sessions when opening an existing workspace', async () => {
+  it('auto-starts the selected thread session when opening an existing workspace', async () => {
     render(<App />);
 
     await screen.findByRole('button', { name: /Thread one/i });
     expect(mocks.api.createThread).not.toHaveBeenCalled();
-    expect(mocks.api.terminalStartSession).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-1' })
+      );
+    });
   });
 
-  it('keeps existing thread sessions alive when switching between threads', async () => {
-    const user = userEvent.setup();
+  it('still auto-starts after delayed thread metadata hydration', async () => {
+    const originalListThreads = mocks.api.listThreads.getMockImplementation();
+    mocks.api.listThreads.mockImplementation(async (workspaceId: string) => {
+      await new Promise<void>((resolve) => {
+        window.setTimeout(() => resolve(), 30);
+      });
+      if (originalListThreads) {
+        return originalListThreads(workspaceId);
+      }
+      return [];
+    });
+
     render(<App />);
 
-    const firstRow = await screen.findByRole('button', { name: /Thread one/i });
-    await user.pointer([{ target: firstRow, keys: '[MouseRight]' }]);
-    await user.click(await screen.findByRole('button', { name: 'Start fresh session' }));
+    await screen.findByRole('button', { name: /Thread one/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-1' })
+      );
+    });
+  });
+
+  it('stops the previous thread session and starts the next one when switching threads', async () => {
+    const user = userEvent.setup();
+    render(<App />);
 
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
@@ -225,8 +247,13 @@ describe('Thread lifecycle integration', () => {
 
     await user.click(await screen.findByRole('button', { name: /Thread two/i }));
 
-    expect(mocks.api.terminalSendSignal).not.toHaveBeenCalledWith('session-thread-1', 'SIGINT');
-    expect(mocks.api.terminalKill).not.toHaveBeenCalledWith('session-thread-1');
+    await waitFor(() => {
+      expect(mocks.api.terminalSendSignal).toHaveBeenCalledWith('session-thread-1', 'SIGINT');
+      expect(mocks.api.terminalKill).toHaveBeenCalledWith('session-thread-1');
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-2' })
+      );
+    });
   });
 
   it('creates a new thread from workspace right-click menu', async () => {
