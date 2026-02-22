@@ -1,5 +1,13 @@
 # Manual Left Rail Checklist
 
+## 0. Automated integration checks
+1. Run `yarn test:ui`.
+2. Confirm `tests/ui/app.lifecycle.test.tsx` passes:
+   - open does not auto-create threads
+   - switching threads stops previous session then starts next
+   - inline rename persists
+   - delete removes thread and keeps UI interactive
+
 ## 1. Workspace + thread grouping
 1. Add two workspaces.
 2. Select each workspace and confirm only that workspace's threads are shown.

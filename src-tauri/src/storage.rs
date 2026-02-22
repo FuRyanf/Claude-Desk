@@ -274,6 +274,17 @@ pub fn delete_thread(workspace_id: &str, thread_id: &str) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
+    let trash_dir = thread_workspace_dir(workspace_id)?.join(".trash");
+    fs::create_dir_all(&trash_dir)?;
+    let tombstone = trash_dir.join(format!("{thread_id}-{}", Uuid::new_v4()));
+
+    if fs::rename(&path, &tombstone).is_ok() {
+        std::thread::spawn(move || {
+            let _ = fs::remove_dir_all(tombstone);
+        });
+        return Ok(());
+    }
+
     fs::remove_dir_all(path)?;
     Ok(())
 }

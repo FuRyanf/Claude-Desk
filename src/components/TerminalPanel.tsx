@@ -125,6 +125,30 @@ export function TerminalPanel({
     [flushQueuedWrites, scheduleOutputFlush]
   );
 
+  const clearPendingWrites = useCallback(() => {
+    writeBufferRef.current = '';
+    writingRef.current = false;
+    if (flushTimerRef.current !== null) {
+      window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+  }, []);
+
+  const resetTerminalContent = useCallback(
+    (nextContent: string) => {
+      const term = terminalRef.current;
+      if (!term) {
+        return;
+      }
+      clearPendingWrites();
+      term.reset();
+      if (nextContent.length > 0) {
+        queueWrite(nextContent);
+      }
+    },
+    [clearPendingWrites, queueWrite]
+  );
+
   useEffect(() => {
     onDataRef.current = onData;
   }, [onData]);
@@ -174,8 +198,9 @@ export function TerminalPanel({
       term.open(host);
       fitAddon.fit();
       onResizeRef.current?.(term.cols, term.rows);
+      terminalRef.current = term;
       if (contentRef.current.length > 0) {
-        term.write(contentRef.current);
+        queueWrite(contentRef.current);
       }
 
       const onDataDisposable = term.onData((data) => {
@@ -216,8 +241,6 @@ export function TerminalPanel({
       });
       observer.observe(host);
 
-      terminalRef.current = term;
-
       return () => {
         observer.disconnect();
         onDataDisposable.dispose();
@@ -226,13 +249,8 @@ export function TerminalPanel({
         fitAddon.dispose();
         term.dispose();
         terminalRef.current = null;
-        writeBufferRef.current = '';
-        writingRef.current = false;
+        clearPendingWrites();
         inputBufferRef.current = '';
-        if (flushTimerRef.current !== null) {
-          window.clearTimeout(flushTimerRef.current);
-          flushTimerRef.current = null;
-        }
         if (inputFlushTimerRef.current !== null) {
           window.clearTimeout(inputFlushTimerRef.current);
           inputFlushTimerRef.current = null;
@@ -246,7 +264,7 @@ export function TerminalPanel({
       setFallback(true);
       return;
     }
-  }, [fallback, flushOutgoingInput, scheduleOutgoingInputFlush]);
+  }, [clearPendingWrites, fallback, flushOutgoingInput, queueWrite, scheduleOutgoingInputFlush]);
 
   useEffect(() => {
     readOnlyRef.current = readOnly;
@@ -273,24 +291,18 @@ export function TerminalPanel({
     sessionRef.current = sessionId;
     hasLiveDataRef.current = false;
     hydratedSessionRef.current = null;
-    writeBufferRef.current = '';
-    writingRef.current = false;
+    clearPendingWrites();
     inputBufferRef.current = '';
-    if (flushTimerRef.current !== null) {
-      window.clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = null;
-    }
     if (inputFlushTimerRef.current !== null) {
       window.clearTimeout(inputFlushTimerRef.current);
       inputFlushTimerRef.current = null;
     }
 
-    term.reset();
+    resetTerminalContent(contentRef.current);
     if (contentRef.current.length > 0) {
-      term.write(contentRef.current);
       hydratedSessionRef.current = sessionId;
     }
-  }, [sessionId]);
+  }, [clearPendingWrites, resetTerminalContent, sessionId]);
 
   useEffect(() => {
     if (!readOnly && sessionId) {
@@ -302,11 +314,8 @@ export function TerminalPanel({
       return;
     }
 
-    term.reset();
-    if (content.length > 0) {
-      term.write(content);
-    }
-  }, [content, readOnly, sessionId]);
+    resetTerminalContent(content);
+  }, [content, readOnly, resetTerminalContent, sessionId]);
 
   useEffect(() => {
     if (fallback || readOnly || !sessionId) {
@@ -322,10 +331,9 @@ export function TerminalPanel({
       return;
     }
 
-    term.reset();
-    term.write(content);
+    resetTerminalContent(content);
     hydratedSessionRef.current = sessionId;
-  }, [content, fallback, readOnly, sessionId]);
+  }, [content, fallback, readOnly, resetTerminalContent, sessionId]);
 
   useEffect(() => {
     if (fallback || readOnly || !sessionId) {

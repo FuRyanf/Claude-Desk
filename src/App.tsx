@@ -59,8 +59,11 @@ function stripAnsi(text: string): string {
 }
 
 function terminalChunkSignalsIdle(chunk: string): boolean {
-  const clean = stripAnsi(chunk);
-  return clean.includes('\n❯') || clean.includes('❯ ') || clean.trim().endsWith('❯');
+  const clean = stripAnsi(chunk).replace(/\r/g, '\n');
+  if (clean.toLowerCase().includes('esc to interrupt')) {
+    return false;
+  }
+  return /(?:^|\n)\s*[>❯›]\s*$/.test(clean);
 }
 
 function terminalChunkSignalsWorking(chunk: string): boolean {
@@ -1263,10 +1266,10 @@ export default function App() {
                 if (!selectedThread) {
                   return;
                 }
-                if (terminalChunkSignalsIdle(chunk)) {
-                  runStore.stopWorking(selectedThread.id);
-                } else if (terminalChunkSignalsWorking(chunk)) {
+                if (terminalChunkSignalsWorking(chunk)) {
                   runStore.startWorking(selectedThread.id);
+                } else if (terminalChunkSignalsIdle(chunk)) {
+                  runStore.stopWorking(selectedThread.id);
                 }
               }}
               onResize={(cols, rows) => {

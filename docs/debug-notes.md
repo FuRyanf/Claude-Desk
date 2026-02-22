@@ -37,3 +37,35 @@
 - Added visible toast notifications for errors.
 - Selection cancel path now no-ops safely.
 - Successful add updates workspace/thread UI immediately and persists through existing storage layer.
+
+## Bug C: Freeze on open / thread switch with large terminal logs
+
+### Reproduction (pre-fix behavior)
+1. Open a thread with a large `output.log` (long Claude terminal history).
+2. App loads full log snapshot and writes it into xterm in one blocking call.
+3. UI becomes unresponsive or appears frozen during hydration.
+
+### Root cause
+- `terminal_get_last_log` and `terminal_read_output` returned the entire log file.
+- Frontend hydrated xterm with a single `term.write(...)` for the whole snapshot.
+- Large payloads blocked the renderer/main thread during startup and thread switches.
+
+### Fix
+- Backend now returns a bounded tail snapshot (last 512KB) instead of full log for UI hydration.
+- Frontend now replays snapshot content in buffered chunks instead of a single synchronous write.
+- Added Rust tests for snapshot truncation behavior.
+
+## Bug D: Delete thread could freeze when run folder was large
+
+### Reproduction (pre-fix behavior)
+1. Delete a thread containing large run/output artifacts.
+2. Backend performed synchronous recursive delete before returning.
+3. UI waited for delete completion and could appear frozen.
+
+### Root cause
+- `delete_thread` used direct `fs::remove_dir_all(...)` on the active thread folder in command path.
+
+### Fix
+- Delete now fast-renames the thread directory into a workspace `.trash` folder.
+- Actual recursive removal runs in a background thread.
+- UI returns immediately while cleanup finishes asynchronously.

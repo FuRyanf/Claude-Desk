@@ -67,10 +67,10 @@ textarea {
   border-right: 1px solid var(--line);
   background: #f7f7f8;
   width: var(--sidebar-width);
-  padding: var(--space-3) 10px;
+  padding: 10px 10px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -135,8 +135,8 @@ body.sidebar-resizing {
 
 .icon-ghost-button,
 .icon-primary-button {
-  border-radius: 8px;
-  height: 30px;
+  border-radius: 10px;
+  height: 32px;
   padding: 0 8px;
   display: inline-flex;
   align-items: center;
@@ -148,7 +148,7 @@ body.sidebar-resizing {
 .icon-ghost-button {
   background: transparent;
   border-color: #d6d8dc;
-  color: #353a44;
+  color: #374151;
 }
 
 .icon-ghost-button:hover {
@@ -157,13 +157,17 @@ body.sidebar-resizing {
 }
 
 .icon-primary-button {
-  background: #e7eaee;
-  color: #1f2937;
-  border-color: #d4d8df;
+  background: #111827;
+  color: #f9fafb;
+  border-color: #0f172a;
 }
 
 .icon-primary-button:hover {
-  background: #dfe3e8;
+  background: #1f2937;
+}
+
+.icon-primary-button .rail-icon {
+  color: #e5e7eb;
 }
 
 .icon-primary-button:disabled,
@@ -232,7 +236,7 @@ body.sidebar-resizing {
   border: 1px solid transparent;
   background: transparent;
   border-radius: 10px;
-  padding: 6px 8px;
+  padding: 6px 7px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -246,8 +250,8 @@ body.sidebar-resizing {
 }
 
 .workspace-group.selected .workspace-group-button {
-  border-color: #d9dde4;
-  background: #e7eaef;
+  border-color: transparent;
+  background: #eceff3;
 }
 
 .workspace-group-leading {
@@ -287,21 +291,21 @@ body.sidebar-resizing {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 510;
-  font-size: 15px;
+  font-weight: 560;
+  font-size: 14px;
 }
 
 .workspace-group-count {
   color: #6b7280;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 520;
 }
 
 .workspace-thread-list {
-  margin-top: 2px;
-  margin-left: 17px;
-  border-left: 1px solid #e3e6eb;
-  padding-left: 10px;
+  margin-top: 3px;
+  margin-left: 14px;
+  border-left: 1px solid #dbe1ea;
+  padding-left: 9px;
 }
 
 .workspace-group-empty {
@@ -353,18 +357,18 @@ body.sidebar-resizing {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 3px;
 }
 
 .thread-button {
   width: 100%;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: 8px;
   background: transparent;
-  padding: 7px 10px;
+  padding: 6px 8px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
@@ -377,12 +381,12 @@ body.sidebar-resizing {
 
 .thread-button:hover {
   background: #eceff4;
-  border-color: #dde2ea;
+  border-color: transparent;
 }
 
 .thread-button.active {
-  border-color: #d4d9e1;
-  background: #e4e8ee;
+  border-color: transparent;
+  background: #dfe6f2;
 }
 
 .thread-main-row,
@@ -399,7 +403,7 @@ body.sidebar-resizing {
 
 .thread-status-row {
   min-height: 16px;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .thread-running {
@@ -421,7 +425,7 @@ body.sidebar-resizing {
 
 .thread-last-status {
   color: #687182;
-  font-size: 12px;
+  font-size: 11px;
   text-transform: lowercase;
 }
 
@@ -528,8 +532,8 @@ body.sidebar-resizing {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 16px;
-  font-weight: 470;
+  font-size: 15px;
+  font-weight: 520;
 }
 
 .thread-time {
@@ -623,7 +627,14 @@ body.sidebar-resizing {
 
 .branch-trigger-chevron {
   color: var(--muted);
-  font-size: 12px;
+  width: 12px;
+  height: 12px;
+  display: inline-flex;
+}
+
+.branch-trigger-chevron svg {
+  width: 100%;
+  height: 100%;
 }
 
 .branch-popover {
@@ -709,7 +720,14 @@ body.sidebar-resizing {
 
 .branch-icon {
   color: var(--muted);
-  font-size: 13px;
+  width: 13px;
+  height: 13px;
+  display: inline-flex;
+}
+
+.branch-icon svg {
+  width: 100%;
+  height: 100%;
 }
 
 .branch-name {
@@ -718,12 +736,12 @@ body.sidebar-resizing {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 18px;
+  font-size: 15px;
 }
 
 .branch-check {
   color: #111827;
-  font-size: 26px;
+  font-size: 20px;
   line-height: 1;
 }
 

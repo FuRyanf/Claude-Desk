@@ -24,6 +24,23 @@ interface HeaderBarProps {
   onOpenSettings: () => void;
 }
 
+function BranchGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="6" cy="5" r="2.2" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <circle cx="6" cy="19" r="2.2" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <circle cx="18" cy="12" r="2.2" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <path
+        d="M8.2 5h2.5c2.5 0 3.8 1.3 3.8 3.8v.4M8.2 19h2.5c2.5 0 3.8-1.3 3.8-3.8v-.4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 export function HeaderBar({
   workspace,
   gitInfo,
@@ -223,7 +240,11 @@ export function HeaderBar({
             title={gitInfo ? `Current branch: ${gitInfo.branch}` : 'Workspace is not a git repository'}
           >
             <span className="branch-trigger-label">{gitInfo?.branch ?? 'No git repo'}</span>
-            <span className="branch-trigger-chevron">v</span>
+            <span className="branch-trigger-chevron" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M7 10.5 12 15l5-4.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+              </svg>
+            </span>
           </button>
 
           {branchPopoverOpen ? (
@@ -263,7 +284,9 @@ export function HeaderBar({
                         disabled={isSwitchingBranch}
                       >
                         <div className="branch-row-top">
-                          <span className="branch-icon">git</span>
+                          <span className="branch-icon">
+                            <BranchGlyph />
+                          </span>
                           <span className="branch-name">{branch.name}</span>
                           {branch.isCurrent ? <span className="branch-check">✓</span> : null}
                         </div>

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::{Arc, Mutex};
@@ -32,6 +32,7 @@ const THREAD_UPDATED_EVENT: &str = "thread:updated";
 const TERMINAL_EVENT_FLUSH_INTERVAL_MS: u64 = 12;
 const TERMINAL_EVENT_BUFFER_SIZE: usize = 16 * 1024;
 const SESSION_ID_PARSE_BUFFER_MAX: usize = 24 * 1024;
+const TERMINAL_LOG_SNAPSHOT_MAX_BYTES: u64 = 512 * 1024;
 
 fn shell_escape_arg(value: &str) -> String {
     if value.is_empty() {
@@ -312,6 +313,32 @@ fn decode_utf8_chunk(buffer: &[u8], carry: &mut Vec<u8>) -> Option<String> {
     }
 }
 
+fn read_log_snapshot(path: &Path) -> Result<String> {
+    let mut file = File::open(path)?;
+    let total_len = file.metadata()?.len();
+    let start_offset = total_len.saturating_sub(TERMINAL_LOG_SNAPSHOT_MAX_BYTES);
+    if start_offset > 0 {
+        file.seek(SeekFrom::Start(start_offset))?;
+    }
+
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let mut text = String::from_utf8_lossy(&bytes).to_string();
+
+    if start_offset > 0 {
+        if let Some(newline_index) = text.find('\n') {
+            text = text[(newline_index + 1)..].to_string();
+        }
+        return Ok(format!(
+            "(output truncated to last {} KB)\n{}",
+            TERMINAL_LOG_SNAPSHOT_MAX_BYTES / 1024,
+            text
+        ));
+    }
+
+    Ok(text)
+}
+
 pub fn build_context_preview(workspace_path: &str, context_pack: &str) -> Result<ContextPreview> {
     match context_pack.to_lowercase().as_str() {
         "git diff" | "gitdiff" | "git_diff" => build_git_diff_context(workspace_path),
@@ -462,8 +489,7 @@ pub fn terminal_get_last_log(workspace_id: &str, thread_id: &str) -> Result<Stri
         return Ok(String::new());
     };
 
-    let bytes = fs::read(last_log)?;
-    Ok(String::from_utf8_lossy(&bytes).to_string())
+    read_log_snapshot(last_log)
 }
 
 pub fn terminal_read_output(state: Arc<RunnerState>, session_id: String) -> Result<String> {
@@ -471,8 +497,7 @@ pub fn terminal_read_output(state: Arc<RunnerState>, session_id: String) -> Resu
         return Err(anyhow!("Terminal session not found"));
     };
 
-    let bytes = fs::read(&session.output_log_path)?;
-    Ok(String::from_utf8_lossy(&bytes).to_string())
+    read_log_snapshot(&session.output_log_path)
 }
 
 pub async fn terminal_start_session(
@@ -1155,6 +1180,8 @@ pub async fn generate_commit_message(workspace_path: String, full_access: bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io::Write;
 
     #[test]
     fn extracts_resume_session_id_from_chunked_terminal_output() {
@@ -1198,5 +1225,40 @@ mod tests {
             "Resume this session with: claude --resume not-a-uuid",
         );
         assert!(detected.is_none());
+    }
+
+    #[test]
+    fn read_log_snapshot_returns_full_small_logs() {
+        let dir = std::env::temp_dir().join(format!("claude-desk-runner-log-small-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("should create temp dir");
+        let path = dir.join("output.log");
+
+        fs::write(&path, "line 1\nline 2\n").expect("should write fixture log");
+        let snapshot = read_log_snapshot(&path).expect("should read snapshot");
+        assert_eq!(snapshot, "line 1\nline 2\n");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_log_snapshot_truncates_large_logs() {
+        let dir = std::env::temp_dir().join(format!("claude-desk-runner-log-large-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("should create temp dir");
+        let path = dir.join("output.log");
+
+        let mut file = File::create(&path).expect("should create fixture log");
+        for index in 0..120_000 {
+            let _ = writeln!(file, "line-{index:05}");
+        }
+
+        let snapshot = read_log_snapshot(&path).expect("should read snapshot");
+        assert!(snapshot.starts_with("(output truncated to last "), "snapshot should mark truncation");
+        assert!(snapshot.contains("line-"), "snapshot should include log content");
+        assert!(
+            !snapshot.contains("line-00000"),
+            "snapshot should contain only the tail and exclude earliest lines"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
