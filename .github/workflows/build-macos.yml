@@ -16,6 +16,8 @@ permissions:
 jobs:
   build-macos:
     runs-on: macos-latest
+    env:
+      PNPM_CONFIG_PACKAGE_MANAGER_STRICT: "false"
 
     steps:
       - name: Checkout repository
@@ -57,9 +59,6 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-
-      - name: Configure pnpm
-        run: pnpm config set package-manager-strict false
 
       - name: Install dependencies
         run: pnpm install
