@@ -1039,11 +1039,13 @@ pub fn terminal_kill(state: Arc<RunnerState>, session_id: String) -> Result<bool
 
     let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
     if result == 0 {
+        let _ = state.terminal_sessions.remove(&session_id);
         return Ok(true);
     }
 
     let error_code = std::io::Error::last_os_error().raw_os_error();
     if error_code == Some(libc::ESRCH) {
+        let _ = state.terminal_sessions.remove(&session_id);
         return Ok(true);
     }
 
