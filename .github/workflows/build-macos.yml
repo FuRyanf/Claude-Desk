@@ -58,6 +58,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Configure pnpm
+        run: pnpm config set package-manager-strict false
+
       - name: Install dependencies
         run: pnpm install
 
