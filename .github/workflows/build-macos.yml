@@ -66,6 +66,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      - name: Setup Yarn (Tauri beforeBuildCommand)
+        run: npm install -g yarn@1.22.22
+
       - name: Build app
         run: pnpm tauri build
         # TODO: add macOS code signing + notarization once certificates and Apple credentials are configured.
