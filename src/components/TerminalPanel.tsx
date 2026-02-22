@@ -5,11 +5,6 @@ import { FitAddon } from 'xterm-addon-fit';
 import { Terminal } from 'xterm';
 
 import { onTerminalData } from '../lib/api';
-import {
-  createTerminalStartupNoiseSuppressor,
-  filterTerminalStartupNoiseChunk,
-  type TerminalStartupNoiseSuppressor
-} from '../lib/terminalStartupNoise';
 import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
 
 const INPUT_FLUSH_MS = 8;
@@ -24,7 +19,6 @@ interface TerminalPanelProps {
   inputEnabled?: boolean;
   overlayMessage?: string;
   debugEnabled?: boolean;
-  suppressStartupNoise?: boolean;
   onData?: (data: string) => void;
   onOutput?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
@@ -56,7 +50,6 @@ export function TerminalPanel({
   inputEnabled = true,
   overlayMessage,
   debugEnabled = false,
-  suppressStartupNoise = false,
   onData,
   onOutput,
   onResize,
@@ -85,9 +78,6 @@ export function TerminalPanel({
   const debugMetricsRef = useRef<TerminalDebugMetrics>(emptyDebugMetrics());
   const writeQueueRef = useRef<TerminalWriteQueue>(new TerminalWriteQueue());
   const shouldAutoFollowRef = useRef(true);
-  const startupNoiseSuppressorRef = useRef<TerminalStartupNoiseSuppressor>(
-    createTerminalStartupNoiseSuppressor(suppressStartupNoise)
-  );
 
   const logDebugSnapshot = useCallback((reason: string, force = false) => {
     if (!debugEnabledRef.current) {
@@ -211,10 +201,6 @@ export function TerminalPanel({
       logDebugSnapshot('debug-enabled', true);
     }
   }, [debugEnabled, logDebugSnapshot]);
-
-  useEffect(() => {
-    startupNoiseSuppressorRef.current = createTerminalStartupNoiseSuppressor(suppressStartupNoise);
-  }, [suppressStartupNoise]);
 
   useEffect(() => {
     if (fallback) {
@@ -412,7 +398,6 @@ export function TerminalPanel({
     hasLiveDataRef.current = false;
     hydratedSessionRef.current = null;
     shouldAutoFollowRef.current = true;
-    startupNoiseSuppressorRef.current = createTerminalStartupNoiseSuppressor(suppressStartupNoise);
     clearPendingWrites();
     inputBufferRef.current = '';
     if (inputFlushTimerRef.current !== null) {
@@ -432,7 +417,6 @@ export function TerminalPanel({
     resetTerminalContent,
     scrollTerminalToBottom,
     sessionId,
-    suppressStartupNoise,
     terminalReady
   ]);
 
@@ -494,15 +478,11 @@ export function TerminalPanel({
       if (event.sessionId !== sessionId) {
         return;
       }
-      const filteredChunk = filterTerminalStartupNoiseChunk(startupNoiseSuppressorRef.current, event.data);
-      if (!filteredChunk) {
-        return;
-      }
       hasLiveDataRef.current = true;
       debugMetricsRef.current.ptyEvents += 1;
-      debugMetricsRef.current.ptyBytes += filteredChunk.length;
-      onOutputRef.current?.(filteredChunk);
-      queueWrite(filteredChunk);
+      debugMetricsRef.current.ptyBytes += event.data.length;
+      onOutputRef.current?.(event.data);
+      queueWrite(event.data);
       logDebugSnapshot('pty-data');
     }).then((cleanup) => {
       if (disposed) {
