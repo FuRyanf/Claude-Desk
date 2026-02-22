@@ -10,9 +10,6 @@ interface BranchSwitcherSnapshot {
 interface BottomBarProps {
   workspace?: Workspace;
   gitInfo: GitInfo | null;
-  fullAccess: boolean;
-  fullAccessDisabled?: boolean;
-  onToggleFullAccess: (nextValue: boolean) => Promise<void>;
   onLoadBranchSwitcher: () => Promise<BranchSwitcherSnapshot>;
   onCheckoutBranch: (branchName: string) => Promise<boolean>;
   onCreateAndCheckoutBranch: (branchName: string) => Promise<boolean>;
@@ -38,9 +35,6 @@ function BranchGlyph() {
 export function BottomBar({
   workspace,
   gitInfo,
-  fullAccess,
-  fullAccessDisabled = false,
-  onToggleFullAccess,
   onLoadBranchSwitcher,
   onCheckoutBranch,
   onCreateAndCheckoutBranch
@@ -304,17 +298,7 @@ export function BottomBar({
         </div>
       </div>
 
-      <div className="bottom-bar-right">
-        <button
-          type="button"
-          className={fullAccess ? 'ghost-button full-access-toggle enabled' : 'ghost-button full-access-toggle'}
-          title="Full Access allows Claude to run without permission prompts."
-          onClick={() => void onToggleFullAccess(!fullAccess)}
-          disabled={fullAccessDisabled}
-        >
-          Full Access {fullAccess ? 'ON' : 'OFF'}
-        </button>
-      </div>
+      <div className="bottom-bar-right" />
     </footer>
   );
 }

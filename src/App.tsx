@@ -35,7 +35,6 @@ import type {
 } from './types';
 
 const SELECTED_WORKSPACE_KEY = 'claude-desk:selected-workspace';
-const FULL_ACCESS_CONFIRM_KEY = 'claude-desk:full-access-confirmed';
 const SIDEBAR_WIDTH_KEY = 'claude-desk:sidebar-width';
 const SIDEBAR_WIDTH_DEFAULT = 320;
 const SIDEBAR_WIDTH_MIN = 260;
@@ -200,9 +199,6 @@ export default function App() {
 
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [nowMs, setNowMs] = useState(Date.now());
-  const [fullAccessConfirmOpen, setFullAccessConfirmOpen] = useState(false);
-  const [pendingFullAccessValue, setPendingFullAccessValue] = useState<boolean | null>(null);
-  const [savingFullAccess, setSavingFullAccess] = useState(false);
   const [sessionModeByThread, setSessionModeByThread] = useState<Record<string, TerminalSessionMode>>({});
   const [startingByThread, setStartingByThread] = useState<Record<string, boolean>>({});
   const [readyByThread, setReadyByThread] = useState<Record<string, boolean>>({});
@@ -443,6 +439,42 @@ export default function App() {
     });
   }, []);
 
+  const hydrateSessionSnapshot = useCallback(
+    async (threadId: string, sessionId: string, retries = 12, delayMs = 180) => {
+      let attempts = 0;
+      while (attempts < retries) {
+        const liveSessionId = runStore.sessionForThread(threadId);
+        if (!liveSessionId || liveSessionId !== sessionId) {
+          return;
+        }
+
+        const snapshot = await api.terminalReadOutput(sessionId).catch(() => '');
+        if (snapshot && snapshot.length > 0) {
+          setLastTerminalLogByThread((current) => ({
+            ...current,
+            [threadId]: clampTerminalLog(snapshot)
+          }));
+          setStartingByThread((current) => removeThreadFlag(current, threadId));
+          setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
+          return;
+        }
+
+        attempts += 1;
+        if (attempts >= retries) {
+          break;
+        }
+
+        await new Promise<void>((resolve) => {
+          window.setTimeout(() => resolve(), delayMs);
+        });
+      }
+
+      setStartingByThread((current) => removeThreadFlag(current, threadId));
+      setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
+    },
+    [runStore]
+  );
+
   const bumpSessionStartRequestId = useCallback((threadId: string) => {
     const next = (sessionStartRequestIdByThreadRef.current[threadId] ?? 0) + 1;
     sessionStartRequestIdByThreadRef.current[threadId] = next;
@@ -464,7 +496,8 @@ export default function App() {
       const existing = runStore.sessionForThread(thread.id);
       if (existing) {
         setStartingByThread((current) => removeThreadFlag(current, thread.id));
-        setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
+        setReadyByThread((current) => removeThreadFlag(current, thread.id));
+        void hydrateSessionSnapshot(thread.id, existing, 8, 150);
         await flushPendingThreadInput(thread.id, existing);
         return existing;
       }
@@ -490,7 +523,7 @@ export default function App() {
           workspacePath: workspace.path,
           initialCwd: workspace.path,
           envVars: null,
-          fullAccessFlag: thread.fullAccess,
+          fullAccessFlag: false,
           threadId: thread.id
         });
 
@@ -533,19 +566,7 @@ export default function App() {
 
         void api.terminalResize(sessionId, terminalSize.cols, terminalSize.rows);
         await flushPendingThreadInput(thread.id, sessionId);
-        window.setTimeout(() => {
-          void api
-            .terminalReadOutput(sessionId)
-            .then((snapshot) => {
-              setLastTerminalLogByThread((current) => ({
-                ...current,
-                [thread.id]: clampTerminalLog(snapshot ?? '')
-              }));
-              setStartingByThread((current) => removeThreadFlag(current, thread.id));
-              setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
-            })
-            .catch(() => undefined);
-        }, 450);
+        void hydrateSessionSnapshot(thread.id, sessionId, 18, 180);
         return sessionId;
       })()
         .catch((error) => {
@@ -564,6 +585,7 @@ export default function App() {
     [
       bumpSessionStartRequestId,
       flushPendingThreadInput,
+      hydrateSessionSnapshot,
       runStore,
       terminalSize.cols,
       terminalSize.rows,
@@ -970,44 +992,6 @@ export default function App() {
       }
     },
     [pushToast, refreshGitInfo, selectedThread, selectedWorkspace, stopSessionsForBranchSwitch]
-  );
-
-  const applyFullAccessSetting = useCallback(
-    async (enabled: boolean) => {
-      if (!selectedThread) {
-        return;
-      }
-      setSavingFullAccess(true);
-      try {
-        const updated = await api.setThreadFullAccess(selectedThread.workspaceId, selectedThread.id, enabled);
-        applyThreadUpdate(updated);
-      } catch (error) {
-        pushToast(`Failed to update Full Access: ${String(error)}`, 'error');
-      } finally {
-        setSavingFullAccess(false);
-      }
-    },
-    [applyThreadUpdate, pushToast, selectedThread]
-  );
-
-  const onToggleFullAccess = useCallback(
-    async (nextValue: boolean) => {
-      if (!selectedThread) {
-        return;
-      }
-
-      if (nextValue) {
-        const alreadyConfirmed = window.localStorage.getItem(FULL_ACCESS_CONFIRM_KEY) === 'true';
-        if (!alreadyConfirmed) {
-          setPendingFullAccessValue(true);
-          setFullAccessConfirmOpen(true);
-          return;
-        }
-      }
-
-      await applyFullAccessSetting(nextValue);
-    },
-    [applyFullAccessSetting, selectedThread]
   );
 
   useEffect(() => {
@@ -1469,9 +1453,6 @@ export default function App() {
         <BottomBar
           workspace={selectedWorkspace}
           gitInfo={gitInfo}
-          fullAccess={selectedThread?.fullAccess ?? false}
-          fullAccessDisabled={!selectedThread || savingFullAccess}
-          onToggleFullAccess={onToggleFullAccess}
           onLoadBranchSwitcher={onLoadBranchSwitcher}
           onCheckoutBranch={onCheckoutBranch}
           onCreateAndCheckoutBranch={onCreateAndCheckoutBranch}
@@ -1548,40 +1529,6 @@ export default function App() {
                 }}
               >
                 Start fresh
-              </button>
-            </footer>
-          </section>
-        </div>
-      ) : null}
-
-      {fullAccessConfirmOpen ? (
-        <div className="modal-backdrop">
-          <section className="modal">
-            <h3>Enable Full Access?</h3>
-            <p>Full Access disables permission prompts. Continue?</p>
-            <footer className="modal-actions">
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => {
-                  setFullAccessConfirmOpen(false);
-                  setPendingFullAccessValue(null);
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="danger-button"
-                onClick={() => {
-                  const nextValue = pendingFullAccessValue ?? true;
-                  window.localStorage.setItem(FULL_ACCESS_CONFIRM_KEY, 'true');
-                  setFullAccessConfirmOpen(false);
-                  setPendingFullAccessValue(null);
-                  void applyFullAccessSetting(nextValue);
-                }}
-              >
-                Enable Full Access
               </button>
             </footer>
           </section>

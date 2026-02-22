@@ -27,9 +27,6 @@ const mocks = vi.hoisted(() => {
   };
 
   let threadState = [{ ...baseThread }];
-  const setThreadState = (next: Array<typeof baseThread>) => {
-    threadState = next.map((thread) => ({ ...thread }));
-  };
 
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
@@ -162,7 +159,6 @@ const mocks = vi.hoisted(() => {
   return {
     api,
     reset,
-    setThreadState,
     openDialog: vi.fn(async () => null),
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
@@ -187,13 +183,13 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 
 import App from '../../src/App';
 
-describe('Full Access session flag', () => {
+describe('Terminal launch flags', () => {
   beforeEach(() => {
     mocks.reset();
     window.localStorage.clear();
   });
 
-  it('starts terminal sessions with dangerous flag when thread full access is enabled', async () => {
+  it('always starts terminal sessions without dangerous permissions flag', async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -204,40 +200,17 @@ describe('Full Access session flag', () => {
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
         expect.objectContaining({
-          fullAccessFlag: true,
+          fullAccessFlag: false,
           threadId: 'thread-1'
         })
       );
     });
   });
 
-  it('asks confirmation before enabling full access for the first time', async () => {
-    const user = userEvent.setup();
-    mocks.setThreadState([
-      {
-        id: 'thread-2',
-        workspaceId: 'ws-1',
-        agentId: 'claude-code',
-        fullAccess: false,
-        enabledSkills: [] as string[],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        title: 'Needs access',
-        isArchived: false,
-        lastRunStatus: 'Idle' as const,
-        lastRunStartedAt: null,
-        lastRunEndedAt: null
-      }
-    ]);
-
+  it('does not render a Full Access control', async () => {
     render(<App />);
-
-    await user.click(await screen.findByRole('button', { name: 'Full Access OFF' }));
-    expect(await screen.findByText('Full Access disables permission prompts. Continue?')).toBeInTheDocument();
-
-    await user.click(screen.getByRole('button', { name: 'Enable Full Access' }));
-    await waitFor(() => {
-      expect(mocks.api.setThreadFullAccess).toHaveBeenCalledWith('ws-1', 'thread-2', true);
-    });
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    expect(screen.queryByRole('button', { name: /Full Access OFF/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Full Access ON/i })).not.toBeInTheDocument();
   });
 });

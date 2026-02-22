@@ -1,18 +1,18 @@
 :root {
   --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
-  --bg: #f5f6f8;
-  --panel: #ffffff;
-  --panel-muted: #f8fafc;
+  --bg: #eef1f5;
+  --panel: rgba(255, 255, 255, 0.78);
+  --panel-muted: rgba(255, 255, 255, 0.58);
   --ink: #111827;
   --muted: #6b7280;
-  --line: #e5e7eb;
-  --line-strong: #d1d5db;
+  --line: rgba(148, 163, 184, 0.26);
+  --line-strong: rgba(100, 116, 139, 0.35);
   --accent: #0f766e;
   --accent-pressed: #0b5f59;
   --danger: #b91c1c;
   --danger-bg: #fee2e2;
   --danger-line: #fecaca;
-  --shadow: 0 4px 18px rgba(17, 24, 39, 0.08);
+  --shadow: 0 12px 40px rgba(15, 23, 42, 0.12);
 
   --sidebar-width: 320px;
   --header-height: 44px;
@@ -39,7 +39,10 @@ body,
 }
 
 body {
-  background: var(--bg);
+  background:
+    radial-gradient(1500px 700px at -10% -10%, rgba(148, 163, 184, 0.2), transparent 55%),
+    radial-gradient(1200px 650px at 110% -15%, rgba(59, 130, 246, 0.12), transparent 55%),
+    var(--bg);
   color: var(--ink);
   font-family: var(--font-sans);
   font-size: 14px;
@@ -65,9 +68,11 @@ textarea {
 
 .left-rail {
   border-right: 1px solid var(--line);
-  background: #f7f7f8;
+  background: rgba(247, 248, 250, 0.76);
+  backdrop-filter: blur(18px) saturate(125%);
+  -webkit-backdrop-filter: blur(18px) saturate(125%);
   width: var(--sidebar-width);
-  padding: 10px 10px;
+  padding: 10px 10px 8px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -124,8 +129,9 @@ body.sidebar-resizing {
 
 .workspace-controls label {
   color: var(--muted);
-  font-size: 13px;
-  font-weight: 520;
+  font-size: 17px;
+  font-weight: 560;
+  letter-spacing: -0.01em;
 }
 
 .codex-rail-header {
@@ -142,40 +148,48 @@ body.sidebar-resizing {
 .codex-rail-toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 .icon-ghost-button,
 .icon-primary-button {
-  border-radius: 10px;
-  height: 32px;
-  padding: 0 8px;
+  border-radius: 13px;
+  height: 38px;
+  padding: 0 12px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border: 1px solid transparent;
+  border: 1px solid rgba(148, 163, 184, 0.28);
   cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
 }
 
 .icon-ghost-button {
-  background: transparent;
-  border-color: #d6d8dc;
-  color: #374151;
+  background: rgba(255, 255, 255, 0.62);
+  color: #344054;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
 }
 
 .icon-ghost-button:hover {
-  background: #eceef2;
-  border-color: #c8cdd4;
+  background: rgba(255, 255, 255, 0.82);
+  border-color: rgba(100, 116, 139, 0.34);
 }
 
 .icon-primary-button {
-  background: #111827;
+  min-width: 124px;
+  justify-content: center;
+  background: linear-gradient(180deg, #111a2f 0%, #0f172a 100%);
   color: #f9fafb;
-  border-color: #0f172a;
+  border-color: rgba(15, 23, 42, 0.75);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 2px 8px rgba(15, 23, 42, 0.2);
 }
 
 .icon-primary-button:hover {
-  background: #1f2937;
+  background: linear-gradient(180deg, #15213b 0%, #111c32 100%);
+  border-color: rgba(15, 23, 42, 0.9);
 }
 
 .icon-primary-button .rail-icon {
@@ -247,7 +261,7 @@ body.sidebar-resizing {
   width: 100%;
   border: 1px solid transparent;
   background: transparent;
-  border-radius: 10px;
+  border-radius: 11px;
   padding: 6px 7px;
   display: flex;
   align-items: center;
@@ -258,12 +272,12 @@ body.sidebar-resizing {
 }
 
 .workspace-group-button:hover {
-  background: #eceff4;
+  background: rgba(255, 255, 255, 0.58);
 }
 
 .workspace-group.selected .workspace-group-button {
   border-color: transparent;
-  background: #eceff3;
+  background: rgba(255, 255, 255, 0.8);
 }
 
 .workspace-group-leading {
@@ -327,10 +341,10 @@ body.sidebar-resizing {
 }
 
 .workspace-thread-list {
-  margin-top: 3px;
+  margin-top: 4px;
   margin-left: 14px;
-  border-left: 1px solid #dbe1ea;
-  padding-left: 9px;
+  border-left: 1px solid rgba(148, 163, 184, 0.32);
+  padding-left: 10px;
 }
 
 .workspace-group-empty {
@@ -347,10 +361,12 @@ body.sidebar-resizing {
 .composer-meta-row select,
 .simple-composer input {
   width: 100%;
-  border: 1px solid #d8dde4;
-  border-radius: 10px;
-  background: #f1f3f6;
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.62);
   padding: 8px 10px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 .thread-search input:focus,
@@ -388,12 +404,12 @@ body.sidebar-resizing {
 .thread-button {
   width: 100%;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 11px;
   background: transparent;
-  padding: 6px 8px;
+  padding: 8px 9px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
@@ -405,13 +421,13 @@ body.sidebar-resizing {
 }
 
 .thread-button:hover {
-  background: #eceff4;
+  background: rgba(255, 255, 255, 0.56);
   border-color: transparent;
 }
 
 .thread-button.active {
   border-color: transparent;
-  background: #dfe6f2;
+  background: linear-gradient(180deg, rgba(222, 232, 245, 0.82), rgba(213, 224, 239, 0.82));
 }
 
 .thread-main-row,
@@ -573,6 +589,7 @@ body.sidebar-resizing {
   grid-template-rows: 44px minmax(0, 1fr) 40px;
   min-width: 0;
   min-height: 0;
+  background: rgba(250, 251, 253, 0.5);
 }
 
 .main-panel.has-blocking-error {
@@ -581,7 +598,9 @@ body.sidebar-resizing {
 
 .header-bar {
   border-bottom: 1px solid var(--line);
-  background: var(--panel);
+  background: rgba(250, 251, 253, 0.72);
+  backdrop-filter: blur(16px) saturate(125%);
+  -webkit-backdrop-filter: blur(16px) saturate(125%);
   padding: 0 var(--space-4);
   height: var(--header-height);
   display: flex;
@@ -819,16 +838,6 @@ body.sidebar-resizing {
   line-height: 1;
 }
 
-.full-access-toggle {
-  border-color: #d1d5db;
-}
-
-.full-access-toggle.enabled {
-  border-color: #fca5a5;
-  background: #fef2f2;
-  color: #991b1b;
-}
-
 .session-mode-pill {
   border: 1px solid #bfdbfe;
   background: #eff6ff;
@@ -871,7 +880,9 @@ body.sidebar-resizing {
 
 .bottom-bar {
   border-top: 1px solid var(--line);
-  background: var(--panel);
+  background: rgba(250, 251, 253, 0.72);
+  backdrop-filter: blur(16px) saturate(125%);
+  -webkit-backdrop-filter: blur(16px) saturate(125%);
   padding: 6px 10px;
   display: flex;
   align-items: center;
@@ -893,7 +904,9 @@ body.sidebar-resizing {
 }
 
 .bottom-bar .branch-trigger {
-  min-width: 220px;
+  min-width: 230px;
+  background: rgba(255, 255, 255, 0.64);
+  border-color: rgba(148, 163, 184, 0.32);
 }
 
 .warning-badge {
@@ -1268,11 +1281,13 @@ body.sidebar-resizing {
 .ghost-button,
 .danger-button,
 select {
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--line);
-  background: #fff;
-  padding: 7px 10px;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  background: rgba(255, 255, 255, 0.7);
+  padding: 7px 12px;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 .primary-button {
@@ -1288,8 +1303,9 @@ select {
 
 .ghost-button:hover:not(:disabled),
 select:hover:not(:disabled) {
-  border-color: var(--line-strong);
-  background: var(--panel-muted);
+  border-color: rgba(100, 116, 139, 0.38);
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 
 .danger-button {
