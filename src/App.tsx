@@ -20,6 +20,12 @@ import { SettingsModal } from './components/SettingsModal';
 import { TerminalPanel } from './components/TerminalPanel';
 import { ToastRegion, type ToastItem } from './components/ToastRegion';
 import { api, onTerminalData, onTerminalExit, onThreadUpdated } from './lib/api';
+import {
+  createTerminalStartupNoiseSuppressor,
+  filterTerminalStartupNoiseChunk,
+  stripTerminalStartupNoiseSnapshot,
+  type TerminalStartupNoiseSuppressor
+} from './lib/terminalStartupNoise';
 import { useRunStore } from './stores/runStore';
 import { useThreadStore } from './stores/threadStore';
 import type {
@@ -155,6 +161,30 @@ function clampSidebarWidth(width: number): number {
   return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, Math.round(width)));
 }
 
+function parseIsoDateMs(value?: string | null): number {
+  if (!value) {
+    return Number.NaN;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function shouldSuppressStartupNoiseForThread(thread?: ThreadMetadata): boolean {
+  if (!thread?.lastResumeAt) {
+    return false;
+  }
+
+  const resumeMs = parseIsoDateMs(thread.lastResumeAt);
+  const newMs = parseIsoDateMs(thread.lastNewSessionAt);
+  if (!Number.isFinite(resumeMs)) {
+    return false;
+  }
+  if (!Number.isFinite(newMs)) {
+    return true;
+  }
+  return resumeMs >= newMs;
+}
+
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
   return await Promise.race<T | null>([
     promise,
@@ -244,6 +274,7 @@ export default function App() {
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
   const terminalDemoModeRef = useRef(terminalDemoMode);
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
+  const startupNoiseSuppressorBySessionRef = useRef<Record<string, TerminalStartupNoiseSuppressor>>({});
   const sessionMetaBySessionIdRef = useRef<
     Record<
       string,
@@ -273,6 +304,10 @@ export default function App() {
   const selectedSessionId = runStore.sessionForThread(selectedThreadId);
   const isSelectedThreadStarting = selectedThread ? Boolean(startingByThread[selectedThread.id]) : false;
   const isSelectedThreadReady = selectedThread ? Boolean(readyByThread[selectedThread.id]) : false;
+  const suppressStartupNoiseForSelectedThread = useMemo(
+    () => shouldSuppressStartupNoiseForThread(selectedThread),
+    [selectedThread]
+  );
 
   const selectedTerminalContent = useMemo(() => {
     if (!selectedThreadId) {
@@ -284,8 +319,19 @@ export default function App() {
     if (selectedSessionId && !isSelectedThreadReady) {
       return '';
     }
-    return lastTerminalLogByThread[selectedThreadId] ?? '';
-  }, [isSelectedThreadReady, isSelectedThreadStarting, lastTerminalLogByThread, selectedSessionId, selectedThreadId]);
+    const text = lastTerminalLogByThread[selectedThreadId] ?? '';
+    if (!suppressStartupNoiseForSelectedThread) {
+      return text;
+    }
+    return stripTerminalStartupNoiseSnapshot(text);
+  }, [
+    isSelectedThreadReady,
+    isSelectedThreadStarting,
+    lastTerminalLogByThread,
+    selectedSessionId,
+    selectedThreadId,
+    suppressStartupNoiseForSelectedThread
+  ]);
 
 
   useEffect(() => {
@@ -641,6 +687,9 @@ export default function App() {
           mode: response.sessionMode,
           startedAtMs: Date.now()
         };
+        startupNoiseSuppressorBySessionRef.current[sessionId] = createTerminalStartupNoiseSuppressor(
+          response.sessionMode === 'resumed'
+        );
 
         void api.terminalResize(sessionId, terminalSize.cols, terminalSize.rows);
         await flushPendingThreadInput(thread.id, sessionId);
@@ -787,6 +836,7 @@ export default function App() {
         }
         runStore.finishSession(existingSessionId);
         delete sessionMetaBySessionIdRef.current[existingSessionId];
+        delete startupNoiseSuppressorBySessionRef.current[existingSessionId];
       }
 
       try {
@@ -862,6 +912,7 @@ export default function App() {
       const endedAt = new Date().toISOString();
       setThreadRunState(threadId, 'Canceled', null, endedAt);
       delete sessionMetaBySessionIdRef.current[sessionId];
+      delete startupNoiseSuppressorBySessionRef.current[sessionId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
     },
@@ -1115,9 +1166,15 @@ export default function App() {
           return;
         }
 
+        const suppressor = startupNoiseSuppressorBySessionRef.current[event.sessionId];
+        const chunk = suppressor ? filterTerminalStartupNoiseChunk(suppressor, event.data) : event.data;
+        if (!chunk) {
+          return;
+        }
+
         setStartingByThread((current) => removeThreadFlag(current, threadId));
         setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
-        appendTerminalLogChunk(threadId, event.data);
+        appendTerminalLogChunk(threadId, chunk);
       });
     };
 
@@ -1158,6 +1215,7 @@ export default function App() {
       unlistenExit = await onTerminalExit((event: TerminalExitEvent) => {
         const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
         delete sessionMetaBySessionIdRef.current[event.sessionId];
+        delete startupNoiseSuppressorBySessionRef.current[event.sessionId];
 
         const endedThreadId = runStore.finishSession(event.sessionId);
         if (!endedThreadId) {
@@ -1181,9 +1239,11 @@ export default function App() {
         void api
           .terminalReadOutput(event.sessionId)
           .then((snapshot) => {
+            const displaySnapshot =
+              sessionMeta?.mode === 'resumed' ? stripTerminalStartupNoiseSnapshot(snapshot) : snapshot;
             setLastTerminalLogByThread((current) => ({
               ...current,
-              [endedThreadId]: clampTerminalLog(snapshot)
+              [endedThreadId]: clampTerminalLog(displaySnapshot)
             }));
 
             if (sessionMeta?.mode !== 'resumed') {
@@ -1454,6 +1514,7 @@ export default function App() {
               content={selectedTerminalContent}
               readOnly={false}
               debugEnabled={terminalDebugLogging}
+              suppressStartupNoise={suppressStartupNoiseForSelectedThread}
               inputEnabled={Boolean(selectedSessionId) && isSelectedThreadReady && !isSelectedThreadStarting}
               overlayMessage={isSelectedThreadStarting || !selectedSessionId ? 'Starting Claude session...' : undefined}
               onData={(data) => {
