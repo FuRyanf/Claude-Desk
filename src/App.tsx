@@ -19,7 +19,7 @@ import { LeftRail } from './components/LeftRail';
 import { SettingsModal } from './components/SettingsModal';
 import { TerminalPanel } from './components/TerminalPanel';
 import { ToastRegion, type ToastItem } from './components/ToastRegion';
-import { api, onTerminalExit, onThreadUpdated } from './lib/api';
+import { api, onTerminalData, onTerminalExit, onThreadUpdated } from './lib/api';
 import { useRunStore } from './stores/runStore';
 import { useThreadStore } from './stores/threadStore';
 import type {
@@ -41,6 +41,7 @@ const SIDEBAR_WIDTH_MIN = 260;
 const SIDEBAR_WIDTH_MAX = 460;
 const TERMINAL_LOG_BUFFER_CHARS = 280_000;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+const TERMINAL_INPUT_ESCAPE_REGEX = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|O.)/g;
 
 interface PendingSessionStart {
   requestId: number;
@@ -68,44 +69,55 @@ function stripAnsi(text: string): string {
   return text.replace(ANSI_REGEX, '');
 }
 
+function isDefaultThreadTitle(title: string): boolean {
+  return title.trim().toLowerCase() === 'new thread';
+}
+
+function normalizeTerminalInputChunk(data: string): string {
+  return data.replace(TERMINAL_INPUT_ESCAPE_REGEX, '');
+}
+
+function extractSubmittedInputLines(
+  previousBuffer: string,
+  chunk: string
+): { nextBuffer: string; submittedLines: string[] } {
+  const normalized = normalizeTerminalInputChunk(chunk);
+  if (!normalized) {
+    return { nextBuffer: previousBuffer, submittedLines: [] };
+  }
+
+  let buffer = previousBuffer;
+  const submittedLines: string[] = [];
+
+  for (const char of normalized) {
+    if (char === '\r' || char === '\n') {
+      if (buffer.trim().length > 0) {
+        submittedLines.push(buffer);
+      }
+      buffer = '';
+      continue;
+    }
+
+    if (char === '\u007f' || char === '\b') {
+      if (buffer.length > 0) {
+        buffer = buffer.slice(0, -1);
+      }
+      continue;
+    }
+
+    if (char >= ' ' && char !== '\u007f') {
+      buffer += char;
+    }
+  }
+
+  return { nextBuffer: buffer, submittedLines };
+}
+
 function clampTerminalLog(text: string): string {
   if (text.length <= TERMINAL_LOG_BUFFER_CHARS) {
     return text;
   }
   return text.slice(text.length - TERMINAL_LOG_BUFFER_CHARS);
-}
-
-function terminalChunkSignalsIdle(chunk: string): boolean {
-  const clean = stripAnsi(chunk).replace(/\r/g, '\n');
-  if (clean.toLowerCase().includes('esc to interrupt')) {
-    return false;
-  }
-  return /(?:^|\n)\s*[>❯›]\s*$/.test(clean);
-}
-
-function terminalChunkSignalsWorking(chunk: string): boolean {
-  const normalized = stripAnsi(chunk).toLowerCase();
-  return (
-    normalized.includes('esc to interrupt') ||
-    normalized.includes('thinking') ||
-    normalized.includes('actioning') ||
-    normalized.includes('frosting') ||
-    normalized.includes('moseying')
-  );
-}
-
-function formatDurationShort(totalSeconds: number): string {
-  const seconds = Math.max(0, Math.floor(totalSeconds));
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-
-  if (hours > 0) {
-    return `${hours}h ${minutes % 60}m`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${seconds % 60}s`;
-  }
-  return `${seconds}s`;
 }
 
 function statusFromExit(event: TerminalExitEvent): RunStatus {
@@ -161,12 +173,13 @@ export default function App() {
     listThreads,
     createThread,
     renameThread,
-    archiveThread,
     deleteThread,
     setSelectedWorkspace,
     setSelectedThread,
     setThreadRunState,
-    applyThreadUpdate
+    applyThreadUpdate,
+    markThreadUserInput,
+    threadLastUserInputAt
   } = threadStore;
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -198,8 +211,6 @@ export default function App() {
   const [addingWorkspace, setAddingWorkspace] = useState(false);
 
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const [nowMs, setNowMs] = useState(Date.now());
-  const [sessionModeByThread, setSessionModeByThread] = useState<Record<string, TerminalSessionMode>>({});
   const [startingByThread, setStartingByThread] = useState<Record<string, boolean>>({});
   const [readyByThread, setReadyByThread] = useState<Record<string, boolean>>({});
   const [resumeFailureModal, setResumeFailureModal] = useState<{
@@ -211,11 +222,15 @@ export default function App() {
 
   const selectedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const selectedThreadIdRef = useRef<string | undefined>(undefined);
-  const previousSelectedThreadIdRef = useRef<string | undefined>(undefined);
+  const activeRunsByThreadRef = useRef(runStore.activeRunsByThread);
   const sidebarResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const startingSessionByThreadRef = useRef<Record<string, PendingSessionStart>>({});
   const sessionStartRequestIdByThreadRef = useRef<Record<string, number>>({});
   const threadsByWorkspaceRef = useRef<Record<string, ThreadMetadata[]>>({});
+  const lastTerminalLogByThreadRef = useRef<Record<string, string>>({});
+  const inputBufferByThreadRef = useRef<Record<string, string>>({});
+  const threadTitleInitializedRef = useRef<Record<string, true>>({});
+  const deletedThreadIdsRef = useRef<Record<string, true>>({});
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
   const sessionMetaBySessionIdRef = useRef<
@@ -253,7 +268,6 @@ export default function App() {
     return lastTerminalLogByThread[selectedThreadId] ?? '';
   }, [lastTerminalLogByThread, selectedThreadId]);
 
-  const activeRunCount = Object.keys(runStore.workingByThread).length;
 
   useEffect(() => {
     selectedWorkspaceIdRef.current = selectedWorkspaceId;
@@ -264,8 +278,37 @@ export default function App() {
   }, [selectedThreadId]);
 
   useEffect(() => {
+    activeRunsByThreadRef.current = runStore.activeRunsByThread;
+  }, [runStore.activeRunsByThread]);
+
+  useEffect(() => {
+    lastTerminalLogByThreadRef.current = lastTerminalLogByThread;
+  }, [lastTerminalLogByThread]);
+
+  useEffect(() => {
     threadsByWorkspaceRef.current = threadsByWorkspace;
-  }, [threadsByWorkspace]);
+
+    for (const thread of Object.values(threadsByWorkspace).flat()) {
+      if (!isDefaultThreadTitle(thread.title)) {
+        threadTitleInitializedRef.current[thread.id] = true;
+      }
+    }
+
+    const deletedThreadIds = deletedThreadIdsRef.current;
+    if (Object.keys(deletedThreadIds).length === 0) {
+      return;
+    }
+
+    for (const thread of Object.values(threadsByWorkspace).flat()) {
+      if (!deletedThreadIds[thread.id]) {
+        continue;
+      }
+      applyThreadUpdate({
+        ...thread,
+        isArchived: true
+      });
+    }
+  }, [applyThreadUpdate, threadsByWorkspace]);
 
   useEffect(() => {
     window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
@@ -493,6 +536,10 @@ export default function App() {
 
   const ensureSessionForThread = useCallback(
     async (thread: ThreadMetadata): Promise<string> => {
+      if (deletedThreadIdsRef.current[thread.id]) {
+        return '';
+      }
+
       const existing = runStore.sessionForThread(thread.id);
       if (existing) {
         setStartingByThread((current) => removeThreadFlag(current, thread.id));
@@ -538,6 +585,16 @@ export default function App() {
           return '';
         }
 
+        if (deletedThreadIdsRef.current[thread.id]) {
+          setStartingByThread((current) => removeThreadFlag(current, thread.id));
+          try {
+            await api.terminalKill(sessionId);
+          } catch {
+            // best effort
+          }
+          return '';
+        }
+
         const threadStillExists = (threadsByWorkspaceRef.current[thread.workspaceId] ?? []).some(
           (item) => item.id === thread.id
         );
@@ -554,10 +611,6 @@ export default function App() {
 
         const startedAt = new Date().toISOString();
         runStore.bindSession(thread.id, sessionId, startedAt);
-        setSessionModeByThread((current) => ({
-          ...current,
-          [thread.id]: response.sessionMode
-        }));
         sessionMetaBySessionIdRef.current[sessionId] = {
           threadId: thread.id,
           workspaceId: thread.workspaceId,
@@ -663,23 +716,13 @@ export default function App() {
     [addWorkspaceByPath, pushToast]
   );
 
-  const onNewThread = useCallback(async () => {
-    if (!selectedWorkspaceId) {
-      pushToast('Select a workspace first.', 'error');
-      return;
-    }
-
-    const thread = await createThread(selectedWorkspaceId);
-    setSelectedThread(thread.id);
-    await refreshThreadsForWorkspace(selectedWorkspaceId);
-  }, [createThread, pushToast, refreshThreadsForWorkspace, selectedWorkspaceId, setSelectedThread]);
-
   const onNewThreadInWorkspace = useCallback(
     async (workspaceId: string) => {
       if (selectedWorkspaceIdRef.current !== workspaceId) {
         setSelectedWorkspace(workspaceId);
       }
       const thread = await createThread(workspaceId);
+      delete deletedThreadIdsRef.current[thread.id];
       setSelectedThread(thread.id);
       await refreshThreadsForWorkspace(workspaceId);
     },
@@ -698,40 +741,9 @@ export default function App() {
     [pushToast, refreshThreadsForWorkspace, renameThread]
   );
 
-  const onArchiveThread = useCallback(
-    async (workspaceId: string, threadId: string) => {
-      invalidatePendingSessionStart(threadId);
-      const existingSessionId = runStore.sessionForThread(threadId);
-      if (existingSessionId) {
-        void api.terminalKill(existingSessionId);
-        runStore.finishSession(existingSessionId);
-        delete sessionMetaBySessionIdRef.current[existingSessionId];
-      }
-
-      try {
-        await archiveThread(workspaceId, threadId);
-      } catch (error) {
-        pushToast(`Archive failed: ${String(error)}`, 'error');
-        return;
-      }
-
-      if (existingSessionId) {
-        runStore.stopWorking(threadId);
-      }
-      setStartingByThread((current) => removeThreadFlag(current, threadId));
-      setReadyByThread((current) => removeThreadFlag(current, threadId));
-
-      if (selectedThreadIdRef.current === threadId) {
-        setSelectedThread(undefined);
-      }
-
-      await refreshThreadsForWorkspace(workspaceId);
-    },
-    [archiveThread, invalidatePendingSessionStart, pushToast, refreshThreadsForWorkspace, runStore, setSelectedThread]
-  );
-
   const onDeleteThread = useCallback(
     async (workspaceId: string, threadId: string) => {
+      deletedThreadIdsRef.current[threadId] = true;
       invalidatePendingSessionStart(threadId);
       const existingSessionId = runStore.sessionForThread(threadId);
       if (existingSessionId) {
@@ -755,10 +767,19 @@ export default function App() {
       try {
         await deleteThread(workspaceId, threadId);
       } catch (error) {
+        delete deletedThreadIdsRef.current[threadId];
         pushToast(`Delete failed: ${String(error)}`, 'error');
         return;
       }
-      runStore.stopWorking(threadId);
+      const deletedThread = (threadsByWorkspaceRef.current[workspaceId] ?? []).find((thread) => thread.id === threadId);
+      if (deletedThread) {
+        applyThreadUpdate({
+          ...deletedThread,
+          isArchived: true
+        });
+      }
+      delete inputBufferByThreadRef.current[threadId];
+      delete threadTitleInitializedRef.current[threadId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
 
@@ -768,7 +789,15 @@ export default function App() {
 
       await refreshThreadsForWorkspace(workspaceId);
     },
-    [deleteThread, invalidatePendingSessionStart, pushToast, refreshThreadsForWorkspace, runStore, setSelectedThread]
+    [
+      applyThreadUpdate,
+      deleteThread,
+      invalidatePendingSessionStart,
+      pushToast,
+      refreshThreadsForWorkspace,
+      runStore,
+      setSelectedThread
+    ]
   );
 
   const stopThreadSession = useCallback(
@@ -805,7 +834,6 @@ export default function App() {
         // best effort
       }
       runStore.finishSession(sessionId);
-      runStore.stopWorking(threadId);
       const endedAt = new Date().toISOString();
       setThreadRunState(threadId, 'Canceled', null, endedAt);
       delete sessionMetaBySessionIdRef.current[sessionId];
@@ -864,33 +892,12 @@ export default function App() {
       try {
         const cleared = await api.clearThreadClaudeSession(thread.workspaceId, thread.id);
         applyThreadUpdate(cleared);
-        setSessionModeByThread((current) => ({
-          ...current,
-          [thread.id]: 'new'
-        }));
         await restartThreadSession(cleared);
       } catch (error) {
         pushToast(`Failed to start a fresh session: ${String(error)}`, 'error');
       }
     },
     [applyThreadUpdate, pushToast, restartThreadSession]
-  );
-
-  const onCopyResumeCommand = useCallback(
-    async (thread: ThreadMetadata) => {
-      if (!thread.claudeSessionId) {
-        pushToast('No saved Claude session id for this thread yet.', 'error');
-        return;
-      }
-      const command = `claude --resume ${thread.claudeSessionId}`;
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(command);
-        pushToast('Copied resume command.', 'info');
-        return;
-      }
-      pushToast(command, 'info');
-    },
-    [pushToast]
   );
 
   const stopSessionsForBranchSwitch = useCallback(async () => {
@@ -1083,13 +1090,43 @@ export default function App() {
   }, [selectedThreadId, selectedWorkspaceId]);
 
   useEffect(() => {
+    let unlistenData: (() => void) | null = null;
+
+    const setup = async () => {
+      unlistenData = await onTerminalData((event) => {
+        const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
+        const threadId =
+          sessionMeta?.threadId ??
+          Object.entries(activeRunsByThreadRef.current).find(([, run]) => run.sessionId === event.sessionId)?.[0];
+        if (!threadId) {
+          return;
+        }
+
+        if (selectedThreadIdRef.current !== threadId) {
+          return;
+        }
+
+        setStartingByThread((current) => removeThreadFlag(current, threadId));
+        setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
+        appendTerminalLogChunk(threadId, event.data);
+      });
+    };
+
+    void setup();
+    return () => {
+      unlistenData?.();
+    };
+  }, [appendTerminalLogChunk]);
+
+  useEffect(() => {
     if (!selectedThread) {
       return;
     }
     const existingSessionId = runStore.sessionForThread(selectedThread.id);
     if (existingSessionId) {
       setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
-      setReadyByThread((current) => (current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }));
+      setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
+      void hydrateSessionSnapshot(selectedThread.id, existingSessionId, 3, 100);
       return;
     }
 
@@ -1103,18 +1140,7 @@ export default function App() {
       setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
       pushToast(`Failed to start Claude session: ${String(error)}`, 'error');
     });
-  }, [ensureSessionForThread, pushToast, runStore, selectedThread]);
-
-  useEffect(() => {
-    const previousId = previousSelectedThreadIdRef.current;
-    previousSelectedThreadIdRef.current = selectedThreadId;
-
-    if (!previousId || previousId === selectedThreadId) {
-      return;
-    }
-
-    void stopThreadSession(previousId);
-  }, [selectedThreadId, stopThreadSession]);
+  }, [ensureSessionForThread, hydrateSessionSnapshot, pushToast, runStore, selectedThread]);
 
   useEffect(() => {
     let unlistenExit: (() => void) | null = null;
@@ -1188,6 +1214,9 @@ export default function App() {
         if (!thread || !thread.id || !thread.workspaceId) {
           return;
         }
+        if (deletedThreadIdsRef.current[thread.id]) {
+          return;
+        }
         applyThreadUpdate(thread);
       });
     };
@@ -1199,28 +1228,12 @@ export default function App() {
   }, [applyThreadUpdate]);
 
   useEffect(() => {
-    if (activeRunCount === 0) {
-      return;
-    }
-    const id = window.setInterval(() => {
-      setNowMs(Date.now());
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [activeRunCount]);
-
-  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
 
       if (terminalFocused && event.metaKey && key === 'c' && selectedSessionId) {
         event.preventDefault();
         void api.terminalSendSignal(selectedSessionId, 'SIGINT');
-        return;
-      }
-
-      if (event.metaKey && key === 'n') {
-        event.preventDefault();
-        void onNewThread();
         return;
       }
 
@@ -1243,7 +1256,7 @@ export default function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onNewThread, selectedSessionId, terminalFocused]);
+  }, [selectedSessionId, terminalFocused]);
 
   const saveSettings = useCallback(async (cliPath: string) => {
     const saved = await api.saveSettings({ claudeCliPath: cliPath || null });
@@ -1275,50 +1288,31 @@ export default function App() {
     }
   }, [pushToast, selectedWorkspace]);
 
-  const selectedWorkingStartedAt = runStore.workingStartedAtForThread(selectedThreadId);
   const isSelectedThreadStarting = selectedThread ? Boolean(startingByThread[selectedThread.id]) : false;
   const isSelectedThreadReady = selectedThread ? Boolean(readyByThread[selectedThread.id]) : false;
-  const runningForLabel = selectedWorkingStartedAt
-    ? formatDurationShort((nowMs - Date.parse(selectedWorkingStartedAt)) / 1000)
-    : undefined;
-  const normalizedStatus =
-    selectedThread?.lastRunStatus && selectedThread.lastRunStatus !== 'Running'
-      ? selectedThread.lastRunStatus
-      : 'Idle';
-  const statusLabel = isSelectedThreadStarting
-    ? 'Starting'
-    : runStore.isThreadWorking(selectedThreadId)
-      ? 'Running'
-      : normalizedStatus;
-  const selectedSessionMode = selectedThreadId ? sessionModeByThread[selectedThreadId] : undefined;
-  const sessionModeLabel = useMemo(() => {
-    const sessionHint = selectedThread?.claudeSessionId?.slice(0, 8);
-    const hasSessionHistory = Boolean(selectedThread?.lastNewSessionAt || selectedThread?.lastResumeAt);
+  const openSettings = useCallback(() => {
+    setSettingsOpen(true);
+  }, []);
 
-    if (isSelectedThreadStarting) {
-      if (hasSessionHistory) {
-        return sessionHint ? `Resuming ${sessionHint}` : 'Resuming';
-      }
-      return sessionHint ? `Starting ${sessionHint}` : 'Starting session';
-    }
+  const selectThread = useCallback(
+    (workspaceId: string, threadId: string) => {
+      void switchToThread(workspaceId, threadId);
+    },
+    [switchToThread]
+  );
 
-    if (selectedSessionMode === 'resumed') {
-      return sessionHint ? `Resumed ${sessionHint}` : 'Resumed';
-    }
-    if (selectedSessionMode === 'new') {
-      return sessionHint ? `New session ${sessionHint}` : 'New session';
-    }
-    if (selectedThread?.claudeSessionId) {
-      return sessionHint ? `Session ${sessionHint}` : 'Session linked';
-    }
-    return undefined;
-  }, [
-    isSelectedThreadStarting,
-    selectedSessionMode,
-    selectedThread?.claudeSessionId,
-    selectedThread?.lastNewSessionAt,
-    selectedThread?.lastResumeAt
-  ]);
+  const openWorkspaceInFinder = useCallback((workspacePath: string) => {
+    void api.openInFinder(workspacePath);
+  }, []);
+
+  const openWorkspaceInTerminal = useCallback((workspacePath: string) => {
+    void api.openInTerminal(workspacePath);
+  }, []);
+
+  const getSearchTextForThread = useCallback((threadId: string) => {
+    return lastTerminalLogByThreadRef.current[threadId] ?? '';
+  }, []);
+
   const appShellStyle = useMemo(
     () =>
       ({
@@ -1336,30 +1330,17 @@ export default function App() {
         selectedWorkspaceId={selectedWorkspaceId}
         selectedThreadId={selectedThreadId}
         threadSearch={threadSearch}
-        nowMs={nowMs}
-        activeRunsByThread={Object.fromEntries(
-          Object.entries(runStore.workingByThread).map(([threadId, run]) => [threadId, { startedAt: run.startedAt }])
-        )}
-        onSelectWorkspace={(workspaceId) => {
-          setSelectedWorkspace(workspaceId);
-          setSelectedThread(undefined);
-          setThreadSearch('');
-        }}
-        onOpenWorkspacePicker={() => void openWorkspacePicker()}
-        onOpenManualWorkspaceModal={() => {
-          setAddWorkspaceError(null);
-          setAddWorkspaceOpen(true);
-        }}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onNewThread={() => void onNewThread()}
+        onOpenWorkspacePicker={openWorkspacePicker}
+        onOpenSettings={openSettings}
         onNewThreadInWorkspace={onNewThreadInWorkspace}
         onThreadSearchChange={setThreadSearch}
-        onSelectThread={(workspaceId, threadId) => void switchToThread(workspaceId, threadId)}
+        onSelectThread={selectThread}
         onRenameThread={onRenameThread}
-        onArchiveThread={onArchiveThread}
         onDeleteThread={onDeleteThread}
-        onCopyResumeCommand={onCopyResumeCommand}
-        getSearchTextForThread={(threadId) => lastTerminalLogByThread[threadId] ?? ''}
+        onOpenWorkspaceInFinder={openWorkspaceInFinder}
+        onOpenWorkspaceInTerminal={openWorkspaceInTerminal}
+        threadLastUserInputAt={threadLastUserInputAt}
+        getSearchTextForThread={getSearchTextForThread}
       />
       <div
         className="sidebar-resizer"
@@ -1374,9 +1355,6 @@ export default function App() {
       <main className={blockingError ? 'main-panel has-blocking-error' : 'main-panel'} data-testid="main-panel">
         <HeaderBar
           workspace={selectedWorkspace}
-          statusLabel={statusLabel}
-          runningForLabel={runningForLabel}
-          sessionModeLabel={sessionModeLabel}
           onOpenWorkspace={() => {
             if (selectedWorkspace) {
               void api.openInFinder(selectedWorkspace.path);
@@ -1387,7 +1365,6 @@ export default function App() {
               void api.openInTerminal(selectedWorkspace.path);
             }
           }}
-          onOpenSettings={() => setSettingsOpen(true)}
         />
 
         {blockingError ? (
@@ -1412,14 +1389,33 @@ export default function App() {
                   return;
                 }
 
+                const { nextBuffer, submittedLines } = extractSubmittedInputLines(
+                  inputBufferByThreadRef.current[selectedThread.id] ?? '',
+                  data
+                );
+                inputBufferByThreadRef.current[selectedThread.id] = nextBuffer;
+
+                if (
+                  submittedLines.length > 0 &&
+                  isDefaultThreadTitle(selectedThread.title) &&
+                  !threadTitleInitializedRef.current[selectedThread.id]
+                ) {
+                  const firstLine = submittedLines.map((line) => line.trim()).find((line) => line.length > 0);
+                  if (firstLine) {
+                    threadTitleInitializedRef.current[selectedThread.id] = true;
+                    void onRenameThread(selectedThread.workspaceId, selectedThread.id, firstLine.slice(0, 50));
+                  }
+                }
+
+                if (submittedLines.length > 0) {
+                  markThreadUserInput(selectedThread.workspaceId, selectedThread.id);
+                }
+
                 if (isSelectedThreadStarting || !selectedSessionId) {
                   return;
                 }
 
                 const sessionId = runStore.sessionForThread(selectedThread.id);
-                if (data.includes('\r')) {
-                  runStore.startWorking(selectedThread.id);
-                }
                 if (sessionId) {
                   void api.terminalWrite(sessionId, data);
                   return;
@@ -1427,19 +1423,6 @@ export default function App() {
 
                 pendingInputByThreadRef.current[selectedThread.id] = `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${data}`;
                 void ensureSessionForThread(selectedThread);
-              }}
-              onOutput={(chunk) => {
-                if (!selectedThread) {
-                  return;
-                }
-                if (terminalChunkSignalsWorking(chunk)) {
-                  runStore.startWorking(selectedThread.id);
-                } else if (terminalChunkSignalsIdle(chunk)) {
-                  runStore.stopWorking(selectedThread.id);
-                }
-                setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
-                setReadyByThread((current) => (current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }));
-                appendTerminalLogChunk(selectedThread.id, chunk);
               }}
               onResize={(cols, rows) => {
                 setTerminalSize({ cols, rows });

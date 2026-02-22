@@ -485,24 +485,12 @@ body.sidebar-resizing {
 }
 
 .workspace-group-children {
-  position: relative;
-  padding: 0 6px 6px;
-}
-
-.workspace-group-children::before {
-  content: '';
-  position: absolute;
-  left: 19px;
-  top: 2px;
-  bottom: 8px;
-  width: 1px;
-  background: rgba(146, 163, 190, 0.24);
-  pointer-events: none;
+  padding: 2px 6px 6px;
 }
 
 .workspace-thread-list {
   margin: 0;
-  padding: 2px 0 0 17px;
+  padding: 0 0 0 18px;
   gap: 0;
 }
 
@@ -607,6 +595,7 @@ body.sidebar-resizing {
 .thread-main-row {
   line-height: 1.15;
   min-width: 0;
+  align-items: baseline;
 }
 
 .thread-status-row {
@@ -625,9 +614,12 @@ body.sidebar-resizing {
 
 .thread-main-trailing {
   display: inline-flex;
-  align-items: center;
-  gap: 7px;
+  align-items: baseline;
+  justify-content: flex-end;
+  width: 42px;
+  min-width: 42px;
   flex-shrink: 0;
+  text-align: right;
 }
 
 .thread-running {
@@ -660,8 +652,8 @@ body.sidebar-resizing {
   gap: 6px;
 }
 
-.workspace-thread-list .thread-item + .thread-item {
-  border-top: 1px solid rgba(146, 163, 190, 0.2);
+.workspace-thread-list .thread-item + .thread-item .thread-button {
+  box-shadow: inset 0 1px 0 rgba(146, 163, 190, 0.18);
 }
 
 .thread-delete-button {
@@ -828,6 +820,8 @@ body.sidebar-resizing {
   font-size: 12px;
   font-weight: 500;
   flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
 }
 
 .main-panel {
@@ -909,32 +903,6 @@ body.sidebar-resizing {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-}
-
-.header-output-age {
-  min-width: 38px;
-  height: 26px;
-  padding: 0 10px;
-  border-radius: 999px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid rgba(131, 152, 186, 0.34);
-  background: rgba(242, 247, 255, 0.54);
-  color: #40506b;
-  font-size: 12px;
-  font-weight: 560;
-  letter-spacing: 0.01em;
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  transition: background-color var(--motion-fast), border-color var(--motion-fast), box-shadow var(--motion-fast), color var(--motion-fast);
-}
-
-.header-output-age.recent {
-  border-color: rgba(118, 142, 255, 0.48);
-  background: rgba(231, 239, 255, 0.72);
-  color: #31435f;
-  box-shadow: 0 0 0 1px rgba(103, 131, 255, 0.18);
 }
 
 .branch-switcher {

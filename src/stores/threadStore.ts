@@ -1,13 +1,49 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 
 import { api } from '../lib/api';
 import type { RunStatus, ThreadMetadata } from '../types';
 
-function sortThreads(threads: ThreadMetadata[]): ThreadMetadata[] {
-  return [...threads].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+function parseIsoTimestampMs(value?: string | null): number {
+  if (!value) {
+    return 0;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function upsertThread(map: Record<string, ThreadMetadata[]>, thread?: ThreadMetadata | null) {
+function sortThreads(threads: ThreadMetadata[], lastUserInputAtByThread: Record<string, number>): ThreadMetadata[] {
+  return [...threads].sort((a, b) => {
+    const aLastInput = lastUserInputAtByThread[a.id];
+    const bLastInput = lastUserInputAtByThread[b.id];
+    const aHasInput = Number.isFinite(aLastInput);
+    const bHasInput = Number.isFinite(bLastInput);
+
+    if (aHasInput || bHasInput) {
+      if (aHasInput && !bHasInput) {
+        return -1;
+      }
+      if (!aHasInput && bHasInput) {
+        return 1;
+      }
+      if (aLastInput !== bLastInput) {
+        return bLastInput - aLastInput;
+      }
+    }
+
+    const createdDelta = parseIsoTimestampMs(b.createdAt) - parseIsoTimestampMs(a.createdAt);
+    if (createdDelta !== 0) {
+      return createdDelta;
+    }
+
+    return a.id.localeCompare(b.id);
+  });
+}
+
+function upsertThread(
+  map: Record<string, ThreadMetadata[]>,
+  lastUserInputAtByThread: Record<string, number>,
+  thread?: ThreadMetadata | null
+) {
   if (!thread || !thread.id || !thread.workspaceId) {
     return map;
   }
@@ -23,7 +59,7 @@ function upsertThread(map: Record<string, ThreadMetadata[]>, thread?: ThreadMeta
   const filtered = existing.filter((item) => item.id !== thread.id);
   return {
     ...map,
-    [thread.workspaceId]: sortThreads([thread, ...filtered])
+    [thread.workspaceId]: sortThreads([thread, ...filtered], lastUserInputAtByThread)
   };
 }
 
@@ -45,37 +81,62 @@ export interface ThreadStore {
     endedAt?: string | null
   ) => void;
   applyThreadUpdate: (thread: ThreadMetadata) => void;
+  setThreadLastOutputAt: (threadId: string, timestampMs?: number) => void;
+  clearThreadLastOutputAt: (threadId: string) => void;
+  threadLastOutputAt: (threadId?: string) => number | null;
+  subscribeThreadOutput: (listener: (threadId: string) => void) => () => void;
+  markThreadUserInput: (workspaceId: string, threadId: string, timestampMs?: number) => void;
+  threadLastUserInputAt: (threadId?: string) => number | null;
 }
 
 export function useThreadStore(): ThreadStore {
   const [threadsByWorkspace, setThreadsByWorkspace] = useState<Record<string, ThreadMetadata[]>>({});
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | undefined>();
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
+  const listRequestIdByWorkspaceRef = useRef<Record<string, number>>({});
+  const removedThreadIdsRef = useRef<Record<string, true>>({});
+  const lastOutputAtByThreadRef = useRef<Record<string, number>>({});
+  const lastUserInputAtByThreadRef = useRef<Record<string, number>>({});
+  const threadOutputListenersRef = useRef(new Set<(threadId: string) => void>());
 
   const listThreads = useCallback(async (workspaceId: string) => {
+    const requestId = (listRequestIdByWorkspaceRef.current[workspaceId] ?? 0) + 1;
+    listRequestIdByWorkspaceRef.current[workspaceId] = requestId;
     const threads = await api.listThreads(workspaceId);
+    const visibleThreads = threads.filter((thread) => !removedThreadIdsRef.current[thread.id]);
+    const sortedVisibleThreads = sortThreads(visibleThreads, lastUserInputAtByThreadRef.current);
+    if (listRequestIdByWorkspaceRef.current[workspaceId] !== requestId) {
+      return sortedVisibleThreads;
+    }
     setThreadsByWorkspace((current) => ({
       ...current,
-      [workspaceId]: sortThreads(threads)
+      [workspaceId]: sortedVisibleThreads
     }));
-    return threads;
+    return sortedVisibleThreads;
   }, []);
 
   const createThread = useCallback(async (workspaceId: string) => {
     const thread = await api.createThread(workspaceId, 'claude-code');
-    setThreadsByWorkspace((current) => upsertThread(current, thread));
+    delete removedThreadIdsRef.current[thread.id];
+    setThreadsByWorkspace((current) => upsertThread(current, lastUserInputAtByThreadRef.current, thread));
     setSelectedThreadId(thread.id);
     return thread;
   }, []);
 
   const renameThread = useCallback(async (workspaceId: string, threadId: string, title: string) => {
     const thread = await api.renameThread(workspaceId, threadId, title);
-    setThreadsByWorkspace((current) => upsertThread(current, thread));
+    setThreadsByWorkspace((current) => upsertThread(current, lastUserInputAtByThreadRef.current, thread));
     return thread;
   }, []);
 
   const archiveThread = useCallback(async (workspaceId: string, threadId: string) => {
-    await api.archiveThread(workspaceId, threadId);
+    removedThreadIdsRef.current[threadId] = true;
+    try {
+      await api.archiveThread(workspaceId, threadId);
+    } catch (error) {
+      delete removedThreadIdsRef.current[threadId];
+      throw error;
+    }
     setThreadsByWorkspace((current) => {
       const existing = current[workspaceId] ?? [];
       return {
@@ -83,10 +144,22 @@ export function useThreadStore(): ThreadStore {
         [workspaceId]: existing.filter((thread) => thread.id !== threadId)
       };
     });
+    delete lastOutputAtByThreadRef.current[threadId];
+    if (threadId in lastUserInputAtByThreadRef.current) {
+      const next = { ...lastUserInputAtByThreadRef.current };
+      delete next[threadId];
+      lastUserInputAtByThreadRef.current = next;
+    }
   }, []);
 
   const deleteThread = useCallback(async (workspaceId: string, threadId: string) => {
-    await api.deleteThread(workspaceId, threadId);
+    removedThreadIdsRef.current[threadId] = true;
+    try {
+      await api.deleteThread(workspaceId, threadId);
+    } catch (error) {
+      delete removedThreadIdsRef.current[threadId];
+      throw error;
+    }
     setThreadsByWorkspace((current) => {
       const existing = current[workspaceId] ?? [];
       return {
@@ -94,10 +167,19 @@ export function useThreadStore(): ThreadStore {
         [workspaceId]: existing.filter((thread) => thread.id !== threadId)
       };
     });
+    delete lastOutputAtByThreadRef.current[threadId];
+    if (threadId in lastUserInputAtByThreadRef.current) {
+      const next = { ...lastUserInputAtByThreadRef.current };
+      delete next[threadId];
+      lastUserInputAtByThreadRef.current = next;
+    }
   }, []);
 
   const applyThreadUpdate = useCallback((thread: ThreadMetadata) => {
-    setThreadsByWorkspace((current) => upsertThread(current, thread));
+    if (removedThreadIdsRef.current[thread.id]) {
+      return;
+    }
+    setThreadsByWorkspace((current) => upsertThread(current, lastUserInputAtByThreadRef.current, thread));
   }, []);
 
   const setThreadRunState = useCallback(
@@ -125,6 +207,78 @@ export function useThreadStore(): ThreadStore {
     []
   );
 
+  const setThreadLastOutputAt = useCallback((threadId: string, timestampMs = Date.now()) => {
+    if (!threadId) {
+      return;
+    }
+    const current = lastOutputAtByThreadRef.current[threadId];
+    if (current === timestampMs) {
+      return;
+    }
+    lastOutputAtByThreadRef.current[threadId] = timestampMs;
+    for (const listener of threadOutputListenersRef.current) {
+      listener(threadId);
+    }
+  }, []);
+
+  const clearThreadLastOutputAt = useCallback((threadId: string) => {
+    if (!threadId || !(threadId in lastOutputAtByThreadRef.current)) {
+      return;
+    }
+    delete lastOutputAtByThreadRef.current[threadId];
+    for (const listener of threadOutputListenersRef.current) {
+      listener(threadId);
+    }
+  }, []);
+
+  const threadLastOutputAt = useCallback((threadId?: string) => {
+    if (!threadId) {
+      return null;
+    }
+    return lastOutputAtByThreadRef.current[threadId] ?? null;
+  }, []);
+
+  const subscribeThreadOutput = useCallback((listener: (threadId: string) => void) => {
+    threadOutputListenersRef.current.add(listener);
+    return () => {
+      threadOutputListenersRef.current.delete(listener);
+    };
+  }, []);
+
+  const markThreadUserInput = useCallback((workspaceId: string, threadId: string, timestampMs = Date.now()) => {
+    if (!workspaceId || !threadId) {
+      return;
+    }
+
+    if (lastUserInputAtByThreadRef.current[threadId] === timestampMs) {
+      return;
+    }
+
+    const next = {
+      ...lastUserInputAtByThreadRef.current,
+      [threadId]: timestampMs
+    };
+    lastUserInputAtByThreadRef.current = next;
+
+    setThreadsByWorkspace((threadsCurrent) => {
+      const workspaceThreads = threadsCurrent[workspaceId];
+      if (!workspaceThreads) {
+        return threadsCurrent;
+      }
+      return {
+        ...threadsCurrent,
+        [workspaceId]: sortThreads(workspaceThreads, next)
+      };
+    });
+  }, []);
+
+  const threadLastUserInputAt = useCallback((threadId?: string) => {
+    if (!threadId) {
+      return null;
+    }
+    return lastUserInputAtByThreadRef.current[threadId] ?? null;
+  }, []);
+
   return useMemo(
     () => ({
       threadsByWorkspace,
@@ -138,10 +292,17 @@ export function useThreadStore(): ThreadStore {
       setSelectedWorkspace: setSelectedWorkspaceId,
       setSelectedThread: setSelectedThreadId,
       setThreadRunState,
-      applyThreadUpdate
+      applyThreadUpdate,
+      setThreadLastOutputAt,
+      clearThreadLastOutputAt,
+      threadLastOutputAt,
+      subscribeThreadOutput,
+      markThreadUserInput,
+      threadLastUserInputAt
     }),
     [
       applyThreadUpdate,
+      clearThreadLastOutputAt,
       createThread,
       listThreads,
       renameThread,
@@ -149,7 +310,12 @@ export function useThreadStore(): ThreadStore {
       deleteThread,
       selectedThreadId,
       selectedWorkspaceId,
+      setThreadLastOutputAt,
       setThreadRunState,
+      subscribeThreadOutput,
+      markThreadUserInput,
+      threadLastOutputAt,
+      threadLastUserInputAt,
       threadsByWorkspace
     ]
   );

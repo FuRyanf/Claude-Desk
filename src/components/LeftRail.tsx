@@ -8,6 +8,7 @@ interface LeftRailProps {
   selectedWorkspaceId?: string;
   selectedThreadId?: string;
   threadSearch: string;
+  threadLastUserInputAt: (threadId?: string) => number | null;
   onOpenWorkspacePicker: () => void;
   onOpenSettings: () => void;
   onNewThreadInWorkspace: (workspaceId: string) => Promise<void>;
@@ -102,19 +103,17 @@ function TrashIcon() {
   );
 }
 
-function formatRelativeShort(iso: string): string {
-  const sourceMs = Date.parse(iso);
-  if (!Number.isFinite(sourceMs)) {
-    return 'now';
+function formatRecencyShort(lastUserInputAt: number | null, nowMs: number): string | null {
+  if (!lastUserInputAt) {
+    return null;
   }
 
-  const nowMs = Date.now();
-  const diffSeconds = Math.max(1, Math.floor((nowMs - sourceMs) / 1000));
-  if (diffSeconds < 60) {
-    return `${diffSeconds}s`;
+  const diffMs = Math.max(0, nowMs - lastUserInputAt);
+  if (diffMs < 60_000) {
+    return null;
   }
 
-  const diffMinutes = Math.floor(diffSeconds / 60);
+  const diffMinutes = Math.floor(diffMs / 60_000);
   if (diffMinutes < 60) {
     return `${diffMinutes}m`;
   }
@@ -129,14 +128,13 @@ function formatRelativeShort(iso: string): string {
     return `${diffDays}d`;
   }
 
-  const diffWeeks = Math.floor(diffDays / 7);
-  return `${diffWeeks}w`;
+  return `${diffDays}d`;
 }
 
 interface ThreadRowProps {
   thread: ThreadMetadata;
   active: boolean;
-  relativeTime: string;
+  relativeTime: string | null;
   isEditing: boolean;
   editingValue: string;
   onEditingValueChange: (value: string) => void;
@@ -166,6 +164,7 @@ const ThreadRow = React.memo(function ThreadRow({
     <li
       key={thread.id}
       className={active ? 'thread-item active' : 'thread-item'}
+      data-thread-id={thread.id}
       onContextMenu={(event) => {
         onOpenThreadContextMenu(event, thread);
       }}
@@ -217,7 +216,11 @@ const ThreadRow = React.memo(function ThreadRow({
             )}
           </span>
           <span className="thread-main-trailing">
-            <span className="thread-time">{relativeTime}</span>
+            {relativeTime ? (
+              <span className="thread-time" data-testid={`thread-recency-${thread.id}`}>
+                {relativeTime}
+              </span>
+            ) : null}
           </span>
         </span>
       </button>
@@ -246,6 +249,7 @@ function LeftRailComponent({
   selectedWorkspaceId,
   selectedThreadId,
   threadSearch,
+  threadLastUserInputAt,
   onOpenWorkspacePicker,
   onOpenSettings,
   onNewThreadInWorkspace,
@@ -518,7 +522,7 @@ function LeftRailComponent({
                                 key={thread.id}
                                 thread={thread}
                                 active={thread.id === selectedThreadId}
-                                relativeTime={formatRelativeShort(thread.updatedAt)}
+                                relativeTime={formatRecencyShort(threadLastUserInputAt(thread.id), Date.now())}
                                 isEditing={editingThreadId === thread.id}
                                 editingValue={editingValue}
                                 onEditingValueChange={setEditingValue}
