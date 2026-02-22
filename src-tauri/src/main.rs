@@ -11,8 +11,9 @@ use std::sync::Arc;
 use tauri::{Manager, State};
 
 use crate::models::{
-    ContextPreview, GitBranchEntry, GitDiffSummary, GitInfo, GitWorkspaceStatus, RunClaudeRequest, RunClaudeResponse,
-    Settings, SkillInfo, TerminalStartResponse, ThreadMetadata, TranscriptEntry, Workspace,
+    ContextPreview, GitBranchEntry, GitDiffSummary, GitInfo, GitWorkspaceStatus, RunClaudeRequest,
+    RunClaudeResponse, Settings, SkillInfo, TerminalStartResponse, ThreadMetadata, TranscriptEntry,
+    Workspace,
 };
 
 struct AppState {
@@ -57,14 +58,44 @@ fn git_workspace_status(workspace_path: String) -> Result<GitWorkspaceStatus, St
 }
 
 #[tauri::command]
-fn git_checkout_branch(workspace_path: String, branch_name: String) -> Result<bool, String> {
+fn git_checkout_branch(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    branch_name: String,
+) -> Result<bool, String> {
+    if state
+        .runner
+        .terminal_sessions
+        .has_active_sessions_for_workspace(&workspace_path)
+        .map_err(|error| error.to_string())?
+    {
+        return Err(
+            "Cannot switch branches while terminal sessions are active in this workspace."
+                .to_string(),
+        );
+    }
     git_tools::checkout_branch(&workspace_path, &branch_name)
         .map(|_| true)
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn git_create_and_checkout_branch(workspace_path: String, branch_name: String) -> Result<bool, String> {
+fn git_create_and_checkout_branch(
+    state: State<'_, AppState>,
+    workspace_path: String,
+    branch_name: String,
+) -> Result<bool, String> {
+    if state
+        .runner
+        .terminal_sessions
+        .has_active_sessions_for_workspace(&workspace_path)
+        .map_err(|error| error.to_string())?
+    {
+        return Err(
+            "Cannot switch branches while terminal sessions are active in this workspace."
+                .to_string(),
+        );
+    }
     git_tools::create_and_checkout_branch(&workspace_path, &branch_name)
         .map(|_| true)
         .map_err(|error| error.to_string())
@@ -81,13 +112,22 @@ fn create_thread(workspace_id: String, agent_id: Option<String>) -> Result<Threa
 }
 
 #[tauri::command]
-fn set_thread_full_access(workspace_id: String, thread_id: String, full_access: bool) -> Result<ThreadMetadata, String> {
-    storage::set_thread_full_access(&workspace_id, &thread_id, full_access).map_err(|error| error.to_string())
+fn set_thread_full_access(
+    workspace_id: String,
+    thread_id: String,
+    full_access: bool,
+) -> Result<ThreadMetadata, String> {
+    storage::set_thread_full_access(&workspace_id, &thread_id, full_access)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn clear_thread_claude_session(workspace_id: String, thread_id: String) -> Result<ThreadMetadata, String> {
-    storage::clear_thread_claude_session(&workspace_id, &thread_id).map_err(|error| error.to_string())
+fn clear_thread_claude_session(
+    workspace_id: String,
+    thread_id: String,
+) -> Result<ThreadMetadata, String> {
+    storage::clear_thread_claude_session(&workspace_id, &thread_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -96,16 +136,26 @@ fn set_thread_skills(
     thread_id: String,
     enabled_skills: Vec<String>,
 ) -> Result<ThreadMetadata, String> {
-    storage::set_thread_skills(&workspace_id, &thread_id, enabled_skills).map_err(|error| error.to_string())
+    storage::set_thread_skills(&workspace_id, &thread_id, enabled_skills)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn set_thread_agent(workspace_id: String, thread_id: String, agent_id: String) -> Result<ThreadMetadata, String> {
-    storage::set_thread_agent(&workspace_id, &thread_id, agent_id).map_err(|error| error.to_string())
+fn set_thread_agent(
+    workspace_id: String,
+    thread_id: String,
+    agent_id: String,
+) -> Result<ThreadMetadata, String> {
+    storage::set_thread_agent(&workspace_id, &thread_id, agent_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn rename_thread(workspace_id: String, thread_id: String, title: String) -> Result<ThreadMetadata, String> {
+fn rename_thread(
+    workspace_id: String,
+    thread_id: String,
+    title: String,
+) -> Result<ThreadMetadata, String> {
     storage::rename_thread(&workspace_id, &thread_id, title).map_err(|error| error.to_string())
 }
 
@@ -122,12 +172,20 @@ fn delete_thread(workspace_id: String, thread_id: String) -> Result<bool, String
 }
 
 #[tauri::command]
-fn append_user_message(workspace_id: String, thread_id: String, content: String) -> Result<TranscriptEntry, String> {
-    storage::append_user_message(&workspace_id, &thread_id, &content).map_err(|error| error.to_string())
+fn append_user_message(
+    workspace_id: String,
+    thread_id: String,
+    content: String,
+) -> Result<TranscriptEntry, String> {
+    storage::append_user_message(&workspace_id, &thread_id, &content)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn load_transcript(workspace_id: String, thread_id: String) -> Result<Vec<TranscriptEntry>, String> {
+fn load_transcript(
+    workspace_id: String,
+    thread_id: String,
+) -> Result<Vec<TranscriptEntry>, String> {
     storage::load_transcript(&workspace_id, &thread_id).map_err(|error| error.to_string())
 }
 
@@ -137,7 +195,10 @@ fn list_skills(workspace_path: String) -> Result<Vec<SkillInfo>, String> {
 }
 
 #[tauri::command]
-fn build_context_preview(workspace_path: String, context_pack: String) -> Result<ContextPreview, String> {
+fn build_context_preview(
+    workspace_path: String,
+    context_pack: String,
+) -> Result<ContextPreview, String> {
     runner::build_context_preview(&workspace_path, &context_pack).map_err(|error| error.to_string())
 }
 
@@ -201,13 +262,24 @@ async fn terminal_start_session(
 }
 
 #[tauri::command]
-fn terminal_write(state: State<'_, AppState>, session_id: String, data: String) -> Result<bool, String> {
-    runner::terminal_write(state.runner.clone(), session_id, data).map_err(|error| error.to_string())
+fn terminal_write(
+    state: State<'_, AppState>,
+    session_id: String,
+    data: String,
+) -> Result<bool, String> {
+    runner::terminal_write(state.runner.clone(), session_id, data)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn terminal_resize(state: State<'_, AppState>, session_id: String, cols: u16, rows: u16) -> Result<bool, String> {
-    runner::terminal_resize(state.runner.clone(), session_id, cols, rows).map_err(|error| error.to_string())
+fn terminal_resize(
+    state: State<'_, AppState>,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<bool, String> {
+    runner::terminal_resize(state.runner.clone(), session_id, cols, rows)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -216,8 +288,13 @@ fn terminal_kill(state: State<'_, AppState>, session_id: String) -> Result<bool,
 }
 
 #[tauri::command]
-fn terminal_send_signal(state: State<'_, AppState>, session_id: String, signal: String) -> Result<bool, String> {
-    runner::terminal_send_signal(state.runner.clone(), session_id, signal).map_err(|error| error.to_string())
+fn terminal_send_signal(
+    state: State<'_, AppState>,
+    session_id: String,
+    signal: String,
+) -> Result<bool, String> {
+    runner::terminal_send_signal(state.runner.clone(), session_id, signal)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -227,11 +304,15 @@ fn terminal_get_last_log(workspace_id: String, thread_id: String) -> Result<Stri
 
 #[tauri::command]
 fn terminal_read_output(state: State<'_, AppState>, session_id: String) -> Result<String, String> {
-    runner::terminal_read_output(state.runner.clone(), session_id).map_err(|error| error.to_string())
+    runner::terminal_read_output(state.runner.clone(), session_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-async fn generate_commit_message(workspace_path: String, full_access: bool) -> Result<String, String> {
+async fn generate_commit_message(
+    workspace_path: String,
+    full_access: bool,
+) -> Result<String, String> {
     runner::generate_commit_message(workspace_path, full_access)
         .await
         .map_err(|error| error.to_string())

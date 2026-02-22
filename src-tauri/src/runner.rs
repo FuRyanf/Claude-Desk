@@ -18,8 +18,9 @@ use uuid::Uuid;
 
 use crate::git_tools;
 use crate::models::{
-    ContextFilePreview, ContextPreview, RunClaudeRequest, RunClaudeResponse, RunExitEvent, RunMetadata, Settings,
-    StreamEvent, TerminalDataEvent, TerminalExitEvent, TerminalStartResponse, ThreadRunStatus, TranscriptEntry,
+    ContextFilePreview, ContextPreview, RunClaudeRequest, RunClaudeResponse, RunExitEvent,
+    RunMetadata, Settings, StreamEvent, TerminalDataEvent, TerminalExitEvent,
+    TerminalStartResponse, ThreadRunStatus, TranscriptEntry,
 };
 use crate::skills;
 use crate::storage;
@@ -33,6 +34,82 @@ const TERMINAL_EVENT_FLUSH_INTERVAL_MS: u64 = 12;
 const TERMINAL_EVENT_BUFFER_SIZE: usize = 16 * 1024;
 const SESSION_ID_PARSE_BUFFER_MAX: usize = 24 * 1024;
 const TERMINAL_LOG_SNAPSHOT_MAX_BYTES: u64 = 512 * 1024;
+const TERMINAL_ENV_DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(8);
+const COMMIT_MESSAGE_TIMEOUT: Duration = Duration::from_secs(90);
+const COMMAND_TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+fn run_std_command_with_timeout(
+    mut command: StdCommand,
+    timeout: Duration,
+    label: &str,
+) -> Result<std::process::Output> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let started = Instant::now();
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(child.wait_with_output()?);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!("{label} timed out after {}s", timeout.as_secs()));
+        }
+        std::thread::sleep(COMMAND_TIMEOUT_POLL_INTERVAL);
+    }
+}
+
+fn should_redact_env_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    upper.contains("TOKEN")
+        || upper.contains("SECRET")
+        || upper.contains("PASSWORD")
+        || upper.contains("PASSWD")
+        || upper.contains("CREDENTIAL")
+        || upper.contains("PRIVATE_KEY")
+        || upper.contains("AUTH")
+        || upper.contains("COOKIE")
+        || upper.contains("SESSION")
+        || upper.contains("BEARER")
+        || upper.ends_with("_KEY")
+}
+
+fn redact_env_line(line: &str) -> String {
+    let Some((key, _value)) = line.split_once('=') else {
+        return line.to_string();
+    };
+    if should_redact_env_key(key) {
+        format!("{key}=<redacted>")
+    } else {
+        line.to_string()
+    }
+}
+
+fn sanitize_env_diagnostics_stdout(raw: &str) -> String {
+    let mut result = String::new();
+    let mut env_section = true;
+    for line in raw.lines() {
+        if env_section && line.trim() == "---" {
+            env_section = false;
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+        if env_section {
+            result.push_str(&redact_env_line(line));
+        } else {
+            result.push_str(line);
+        }
+        result.push('\n');
+    }
+    if !raw.ends_with('\n') && result.ends_with('\n') {
+        result.pop();
+    }
+    result
+}
 
 fn shell_escape_arg(value: &str) -> String {
     if value.is_empty() {
@@ -193,6 +270,21 @@ struct TerminalSession {
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
 }
 
+fn terminate_terminal_session_process(session: &TerminalSession) {
+    if let Some(pid) = session.process_id {
+        let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        if result == 0 {
+            return;
+        }
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return;
+        }
+    }
+    if let Ok(mut child) = session.child.lock() {
+        let _ = child.kill();
+    }
+}
+
 #[derive(Default)]
 pub struct TerminalSessionManager {
     sessions: Mutex<HashMap<TerminalSessionId, Arc<TerminalSession>>>,
@@ -224,24 +316,51 @@ impl TerminalSessionManager {
         Ok(sessions.remove(session_id))
     }
 
+    fn remove_for_thread(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<Vec<Arc<TerminalSession>>> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| anyhow!("Terminal session lock poisoned"))?;
+        let matching_session_ids = sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.workspace_id == workspace_id && session.thread_id == thread_id
+            })
+            .map(|(session_id, _)| session_id.clone())
+            .collect::<Vec<_>>();
+        let mut removed = Vec::new();
+        for session_id in matching_session_ids {
+            if let Some(session) = sessions.remove(&session_id) {
+                removed.push(session);
+            }
+        }
+        Ok(removed)
+    }
+
+    pub fn has_active_sessions_for_workspace(&self, workspace_path: &str) -> Result<bool> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| anyhow!("Terminal session lock poisoned"))?;
+        Ok(sessions
+            .values()
+            .any(|session| session.workspace_path == workspace_path))
+    }
+
     pub fn shutdown_all(&self) {
         let sessions = match self.sessions.lock() {
-            Ok(guard) => guard.values().cloned().collect::<Vec<_>>(),
+            Ok(mut guard) => guard
+                .drain()
+                .map(|(_, session)| session)
+                .collect::<Vec<_>>(),
             Err(_) => return,
         };
         for session in sessions {
-            if let Some(pid) = session.process_id {
-                let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
-                if result == 0 {
-                    continue;
-                }
-                if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-                    continue;
-                }
-            }
-            if let Ok(mut child) = session.child.lock() {
-                let _ = child.kill();
-            }
+            terminate_terminal_session_process(&session);
         }
     }
 }
@@ -259,7 +378,10 @@ pub fn detect_claude_cli_path(settings: &Settings) -> Option<String> {
         }
     }
 
-    let mut candidates = vec!["/usr/local/bin/claude".to_string(), "/opt/homebrew/bin/claude".to_string()];
+    let mut candidates = vec![
+        "/usr/local/bin/claude".to_string(),
+        "/opt/homebrew/bin/claude".to_string(),
+    ];
     if let Some(home) = dirs::home_dir().map(|dir| dir.to_string_lossy().to_string()) {
         candidates.push(format!("{home}/.volta/bin/claude"));
         candidates.push(format!("{home}/.npm-global/bin/claude"));
@@ -390,7 +512,11 @@ fn build_git_diff_context(workspace_path: &str) -> Result<ContextPreview> {
     let total_size = stat.len() + diff.len();
     let context_text = format!(
         "## Git Diff Summary\n{}\n\n## Git Diff\n{}",
-        if stat.is_empty() { "(No changes)" } else { &stat },
+        if stat.is_empty() {
+            "(No changes)"
+        } else {
+            &stat
+        },
         if diff.is_empty() {
             "(No diff output)"
         } else {
@@ -425,7 +551,14 @@ fn build_debug_context(workspace_path: &str) -> Result<ContextPreview> {
             let content = fs::read_to_string(&path).unwrap_or_default();
             let max = 8_000;
             let trimmed = if content.len() > max {
-                content.chars().rev().take(max).collect::<String>().chars().rev().collect()
+                content
+                    .chars()
+                    .rev()
+                    .take(max)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect()
             } else {
                 content
             };
@@ -527,8 +660,16 @@ pub async fn terminal_start_session(
     full_access_flag: bool,
     thread_id: String,
 ) -> Result<TerminalStartResponse> {
-    let workspace_id = storage::resolve_workspace_id_by_path(&workspace_path)?
-        .ok_or_else(|| anyhow!("Workspace not registered. Add workspace before starting terminal."))?;
+    let workspace_id =
+        storage::resolve_workspace_id_by_path(&workspace_path)?.ok_or_else(|| {
+            anyhow!("Workspace not registered. Add workspace before starting terminal.")
+        })?;
+    let stale_sessions = state
+        .terminal_sessions
+        .remove_for_thread(&workspace_id, &thread_id)?;
+    for stale_session in stale_sessions {
+        terminate_terminal_session_process(&stale_session);
+    }
 
     let mut thread = storage::read_thread_metadata(&workspace_id, &thread_id)?;
     let started_at = Utc::now();
@@ -573,7 +714,8 @@ pub async fn terminal_start_session(
         thread.last_new_session_at = Some(started_at);
         TerminalSessionMode::New
     };
-    let launch_session_id = launch_session_id.ok_or_else(|| anyhow!("Missing Claude session id"))?;
+    let launch_session_id =
+        launch_session_id.ok_or_else(|| anyhow!("Missing Claude session id"))?;
     let resume_session_id = if session_mode == TerminalSessionMode::Resumed {
         Some(launch_session_id.clone())
     } else {
@@ -598,7 +740,11 @@ pub async fn terminal_start_session(
         session_mode == TerminalSessionMode::Resumed,
         full_access_flag,
     );
-    let command_manifest = vec![shell_path.clone(), "-lic".to_string(), shell_command.clone()];
+    let command_manifest = vec![
+        shell_path.clone(),
+        "-lic".to_string(),
+        shell_command.clone(),
+    ];
     storage::write_json_file(
         &run_dir.join("input_manifest.json"),
         &serde_json::json!({
@@ -700,11 +846,13 @@ pub async fn terminal_start_session(
                     if let Some(captured_session_id) =
                         extract_resume_session_id_from_chunk(&mut session_id_parse_buffer, &chunk)
                     {
-                        if let Ok(Some(updated_thread)) = storage::set_thread_claude_session_id_if_missing(
-                            &data_workspace_id,
-                            &data_thread_id,
-                            &captured_session_id,
-                        ) {
+                        if let Ok(Some(updated_thread)) =
+                            storage::set_thread_claude_session_id_if_missing(
+                                &data_workspace_id,
+                                &data_thread_id,
+                                &captured_session_id,
+                            )
+                        {
                             should_capture_session_id = false;
                             let _ = data_app.emit(THREAD_UPDATED_EVENT, updated_thread);
                         }
@@ -713,7 +861,8 @@ pub async fn terminal_start_session(
 
                 event_buffer.push_str(&chunk);
                 if event_buffer.len() >= TERMINAL_EVENT_BUFFER_SIZE
-                    || last_emit.elapsed() >= Duration::from_millis(TERMINAL_EVENT_FLUSH_INTERVAL_MS)
+                    || last_emit.elapsed()
+                        >= Duration::from_millis(TERMINAL_EVENT_FLUSH_INTERVAL_MS)
                 {
                     let data = std::mem::take(&mut event_buffer);
                     let _ = data_app.emit(
@@ -734,11 +883,13 @@ pub async fn terminal_start_session(
                 if let Some(captured_session_id) =
                     extract_resume_session_id_from_chunk(&mut session_id_parse_buffer, &trailing)
                 {
-                    if let Ok(Some(updated_thread)) = storage::set_thread_claude_session_id_if_missing(
-                        &data_workspace_id,
-                        &data_thread_id,
-                        &captured_session_id,
-                    ) {
+                    if let Ok(Some(updated_thread)) =
+                        storage::set_thread_claude_session_id_if_missing(
+                            &data_workspace_id,
+                            &data_thread_id,
+                            &captured_session_id,
+                        )
+                    {
                         let _ = data_app.emit(THREAD_UPDATED_EVENT, updated_thread);
                     }
                 }
@@ -768,9 +919,7 @@ pub async fn terminal_start_session(
                 Err(_) => return,
             };
             match child.wait() {
-                Ok(status) => {
-                    (Some(status.exit_code() as i32), None)
-                }
+                Ok(status) => (Some(status.exit_code() as i32), None),
                 Err(_) => (None, None),
             }
         };
@@ -854,7 +1003,12 @@ pub fn terminal_write(state: Arc<RunnerState>, session_id: String, data: String)
     Ok(true)
 }
 
-pub fn terminal_resize(state: Arc<RunnerState>, session_id: String, cols: u16, rows: u16) -> Result<bool> {
+pub fn terminal_resize(
+    state: Arc<RunnerState>,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<bool> {
     let Some(session) = state.terminal_sessions.get(&session_id)? else {
         return Ok(false);
     };
@@ -896,7 +1050,11 @@ pub fn terminal_kill(state: Arc<RunnerState>, session_id: String) -> Result<bool
     Err(anyhow!("Failed to terminate terminal session process"))
 }
 
-pub fn terminal_send_signal(state: Arc<RunnerState>, session_id: String, signal: String) -> Result<bool> {
+pub fn terminal_send_signal(
+    state: Arc<RunnerState>,
+    session_id: String,
+    signal: String,
+) -> Result<bool> {
     let normalized = signal.trim().to_uppercase();
     if normalized != "SIGINT" && normalized != "INT" {
         return Err(anyhow!("Only SIGINT is currently supported"));
@@ -926,27 +1084,34 @@ pub fn copy_terminal_env_diagnostics(workspace_path: String) -> Result<String> {
         shell_escape_arg(&cli_path)
     );
 
-    let output = StdCommand::new(&shell_path)
+    let mut command = StdCommand::new(&shell_path);
+    command
         .arg("-lic")
         .arg(shell_command)
         .current_dir(&workspace_path)
-        .envs(env::vars())
-        .output()?;
+        .envs(env::vars());
+    let output = run_std_command_with_timeout(
+        command,
+        TERMINAL_ENV_DIAGNOSTICS_TIMEOUT,
+        "Terminal diagnostics command",
+    )?;
+    let sanitized_stdout =
+        sanitize_env_diagnostics_stdout(&String::from_utf8_lossy(&output.stdout));
 
     let mut diagnostics = String::new();
     diagnostics.push_str(&format!("shell={shell_path}\n"));
     diagnostics.push_str(&format!("workspace={workspace_path}\n"));
     diagnostics.push_str("=== stdout ===\n");
-    diagnostics.push_str(&String::from_utf8_lossy(&output.stdout));
+    diagnostics.push_str(&sanitized_stdout);
     diagnostics.push_str("\n=== stderr ===\n");
     diagnostics.push_str(&String::from_utf8_lossy(&output.stderr));
 
-    let artifacts_root = match env::current_dir() {
-        Ok(current) => current.join("artifacts"),
-        Err(_) => storage::ensure_base_dirs()?.join("artifacts"),
-    };
+    let artifacts_root = storage::ensure_base_dirs()?.join("artifacts");
     fs::create_dir_all(&artifacts_root)?;
-    fs::write(artifacts_root.join("env-diagnostics.txt"), diagnostics.as_bytes())?;
+    fs::write(
+        artifacts_root.join("env-diagnostics.txt"),
+        diagnostics.as_bytes(),
+    )?;
 
     Ok(diagnostics)
 }
@@ -970,8 +1135,13 @@ pub async fn run_claude(
         .ok_or_else(|| anyhow!("Claude CLI not found. Configure the CLI path in Settings."))?;
 
     let context_preview = build_context_preview(&request.workspace_path, &request.context_pack)?;
-    let enabled_skill_docs = skills::resolve_enabled_skills_context(&request.workspace_path, &request.enabled_skills)?;
-    let prompt = build_prompt(&request.message, &context_preview.context_text, &enabled_skill_docs);
+    let enabled_skill_docs =
+        skills::resolve_enabled_skills_context(&request.workspace_path, &request.enabled_skills)?;
+    let prompt = build_prompt(
+        &request.message,
+        &context_preview.context_text,
+        &enabled_skill_docs,
+    );
 
     let run_id = Uuid::new_v4().to_string();
     let run_dir = storage::runs_dir(&workspace_id, &request.thread_id)?.join(&run_id);
@@ -1008,8 +1178,14 @@ pub async fn run_claude(
     )?;
 
     let mut child = command.spawn()?;
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("Failed to capture Claude stdout"))?;
-    let stderr = child.stderr.take().ok_or_else(|| anyhow!("Failed to capture Claude stderr"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("Failed to capture Claude stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("Failed to capture Claude stderr"))?;
 
     let child_handle = Arc::new(AsyncMutex::new(child));
     {
@@ -1114,7 +1290,11 @@ pub async fn run_claude(
                 created_at: Utc::now(),
                 run_id: Some(metadata.run_id.clone()),
             };
-            let _ = storage::append_transcript_entry(&metadata.workspace_id, &metadata.thread_id, &entry);
+            let _ = storage::append_transcript_entry(
+                &metadata.workspace_id,
+                &metadata.thread_id,
+                &entry,
+            );
         }
 
         let _ = app.emit(
@@ -1213,11 +1393,20 @@ pub async fn generate_commit_message(workspace_path: String, full_access: bool) 
         args.push("--dangerously-skip-permissions");
     }
 
-    let output = Command::new(cli_path)
-        .args(args)
-        .current_dir(workspace_path)
-        .output()
-        .await?;
+    let output = tokio::time::timeout(
+        COMMIT_MESSAGE_TIMEOUT,
+        Command::new(cli_path)
+            .args(args)
+            .current_dir(workspace_path)
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "Claude commit message generation timed out after {}s",
+            COMMIT_MESSAGE_TIMEOUT.as_secs()
+        )
+    })??;
 
     if !output.status.success() {
         return Err(anyhow!(
@@ -1281,7 +1470,8 @@ mod tests {
 
     #[test]
     fn read_log_snapshot_returns_full_small_logs() {
-        let dir = std::env::temp_dir().join(format!("claude-desk-runner-log-small-{}", Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("claude-desk-runner-log-small-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("should create temp dir");
         let path = dir.join("output.log");
 
@@ -1294,7 +1484,8 @@ mod tests {
 
     #[test]
     fn read_log_snapshot_truncates_large_logs() {
-        let dir = std::env::temp_dir().join(format!("claude-desk-runner-log-large-{}", Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("claude-desk-runner-log-large-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).expect("should create temp dir");
         let path = dir.join("output.log");
 
@@ -1304,13 +1495,30 @@ mod tests {
         }
 
         let snapshot = read_log_snapshot(&path).expect("should read snapshot");
-        assert!(snapshot.starts_with("(output truncated to last "), "snapshot should mark truncation");
-        assert!(snapshot.contains("line-"), "snapshot should include log content");
+        assert!(
+            snapshot.starts_with("(output truncated to last "),
+            "snapshot should mark truncation"
+        );
+        assert!(
+            snapshot.contains("line-"),
+            "snapshot should include log content"
+        );
         assert!(
             !snapshot.contains("line-00000"),
             "snapshot should contain only the tail and exclude earliest lines"
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sanitize_env_diagnostics_stdout_redacts_sensitive_env_keys() {
+        let raw = "PATH=/usr/bin\nAPI_TOKEN=super-secret\nSESSION_ID=abc123\n---\nwhich claude\nAPI_TOKEN=after-separator\n";
+        let sanitized = sanitize_env_diagnostics_stdout(raw);
+
+        assert!(sanitized.contains("PATH=/usr/bin"));
+        assert!(sanitized.contains("API_TOKEN=<redacted>"));
+        assert!(sanitized.contains("SESSION_ID=<redacted>"));
+        assert!(sanitized.contains("---\nwhich claude\nAPI_TOKEN=after-separator"));
     }
 }

@@ -1,14 +1,56 @@
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 
 use crate::models::{GitBranchEntry, GitDiffSummary, GitInfo, GitWorkspaceStatus};
 
+const GIT_TIMEOUT: Duration = Duration::from_secs(8);
+const GIT_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+fn run_command_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+    label: &str,
+) -> Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(child.wait_with_output()?);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow!("{label} timed out after {}s", timeout.as_secs()));
+        }
+        std::thread::sleep(GIT_WAIT_POLL_INTERVAL);
+    }
+}
+
+fn validate_branch_name(branch_name: &str) -> Result<&str> {
+    let normalized = branch_name.trim();
+    if normalized.is_empty() {
+        return Err(anyhow!("Branch name cannot be empty"));
+    }
+    if normalized.starts_with('-') {
+        return Err(anyhow!("Branch name cannot start with '-'"));
+    }
+    if normalized.contains('\0') {
+        return Err(anyhow!("Branch name cannot contain NUL bytes"));
+    }
+    Ok(normalized)
+}
+
 fn run_git(workspace_path: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(args)
         .current_dir(workspace_path)
-        .output()?;
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let output = run_command_with_timeout(command, GIT_TIMEOUT, "git command")?;
 
     if !output.status.success() {
         return Ok(String::new());
@@ -18,10 +60,12 @@ fn run_git(workspace_path: &str, args: &[&str]) -> Result<String> {
 }
 
 fn run_git_checked(workspace_path: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(args)
         .current_dir(workspace_path)
-        .output()?;
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let output = run_command_with_timeout(command, GIT_TIMEOUT, "git command")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -46,15 +90,21 @@ pub fn get_git_info(workspace_path: &str) -> Result<Option<GitInfo>> {
         return Ok(None);
     }
 
-    let branch = run_git(workspace_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let mut branch = run_git(workspace_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     if branch.is_empty() {
         return Ok(None);
     }
 
     let short_hash = run_git(workspace_path, &["rev-parse", "--short", "HEAD"])?;
+    if branch == "HEAD" && !short_hash.is_empty() {
+        branch = format!("(detached at {short_hash})");
+    }
     let status = run_git(workspace_path, &["status", "--porcelain"])?;
     let is_dirty = !status.trim().is_empty();
-    let ahead_behind = run_git(workspace_path, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])?;
+    let ahead_behind = run_git(
+        workspace_path,
+        &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+    )?;
     let (ahead, behind) = parse_ahead_behind(&ahead_behind);
 
     Ok(Some(GitInfo {
@@ -75,10 +125,7 @@ pub fn get_git_diff_summary(workspace_path: &str) -> Result<GitDiffSummary> {
         diff_excerpt.push_str("\n...\n(diff truncated)");
     }
 
-    Ok(GitDiffSummary {
-        stat,
-        diff_excerpt,
-    })
+    Ok(GitDiffSummary { stat, diff_excerpt })
 }
 
 pub fn capture_patch_diff(workspace_path: &str) -> Result<String> {
@@ -137,7 +184,10 @@ pub fn workspace_status(workspace_path: &str) -> Result<GitWorkspaceStatus> {
     }
 
     let status = run_git(workspace_path, &["status", "--porcelain"])?;
-    let uncommitted_files = status.lines().filter(|line| !line.trim().is_empty()).count() as u32;
+    let uncommitted_files = status
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count() as u32;
 
     let numstat = run_git(workspace_path, &["diff", "--numstat"])?;
     let mut insertions = 0u32;
@@ -168,18 +218,20 @@ pub fn workspace_status(workspace_path: &str) -> Result<GitWorkspaceStatus> {
 }
 
 pub fn checkout_branch(workspace_path: &str, branch_name: &str) -> Result<()> {
-    let normalized = branch_name.trim();
-    if normalized.is_empty() {
-        return Err(anyhow!("Branch name cannot be empty"));
-    }
+    let normalized = validate_branch_name(branch_name)?;
+    run_git_checked(
+        workspace_path,
+        &["check-ref-format", "--branch", normalized],
+    )?;
     run_git_checked(workspace_path, &["checkout", normalized]).map(|_| ())
 }
 
 pub fn create_and_checkout_branch(workspace_path: &str, branch_name: &str) -> Result<()> {
-    let normalized = branch_name.trim();
-    if normalized.is_empty() {
-        return Err(anyhow!("Branch name cannot be empty"));
-    }
+    let normalized = validate_branch_name(branch_name)?;
+    run_git_checked(
+        workspace_path,
+        &["check-ref-format", "--branch", normalized],
+    )?;
     run_git_checked(workspace_path, &["checkout", "-b", normalized]).map(|_| ())
 }
 
@@ -214,7 +266,8 @@ mod tests {
 
     #[test]
     fn detects_git_branch_and_dirty_state() {
-        let temp_repo = std::env::temp_dir().join(format!("claude-desk-git-test-{}", uuid::Uuid::new_v4()));
+        let temp_repo =
+            std::env::temp_dir().join(format!("claude-desk-git-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&temp_repo).expect("failed to create temp repo");
 
         git(&temp_repo, &["init"]);
@@ -248,5 +301,13 @@ mod tests {
         assert_eq!(parse_ahead_behind("3\t2"), (3, 2));
         assert_eq!(parse_ahead_behind(""), (0, 0));
         assert_eq!(parse_ahead_behind("bad input"), (0, 0));
+    }
+
+    #[test]
+    fn rejects_unsafe_branch_names() {
+        assert!(validate_branch_name("").is_err());
+        assert!(validate_branch_name("   ").is_err());
+        assert!(validate_branch_name("-main").is_err());
+        assert!(validate_branch_name("feature/test").is_ok());
     }
 }
