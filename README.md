@@ -4,6 +4,8 @@ Claude Desk is a native macOS Tauri app that wraps the local Claude Code CLI in 
 
 The app does not call Anthropic APIs directly. It launches your local `claude` binary in an interactive PTY and renders output in-app.
 
+![Claude Desk UI](assets/claude-desk-ui.png)
+
 ## Requirements
 
 - macOS (desktop build target)
@@ -39,6 +41,13 @@ yarn tauri build
 Built app output:
 
 - `/Users/rfu/Claude Desk/src-tauri/target/release/bundle/macos/Claude Desk.app`
+
+## Downloads
+
+- A macOS build is produced in GitHub Actions on every push to `main`, every pull request targeting `main`, and every `v*` tag push.
+- Open the run in GitHub Actions, then download `Claude-Desk.dmg` and `Claude-Desk.app.zip` from the **Artifacts** section.
+- For `v*` tags, the same DMG and ZIP are also attached automatically to the GitHub Release.
+- Builds are currently unsigned. macOS Gatekeeper may show a warning on first launch. Use Finder `Open` (or `System Settings > Privacy & Security > Open Anyway`) to run the app.
 
 ## Data Storage
 

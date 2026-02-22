@@ -1,0 +1,116 @@
+name: Build macOS
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (LTS)
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Configure pnpm store path
+        run: echo "PNPM_STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            ${{ env.PNPM_STORE_PATH }}
+          key: ${{ runner.os }}-node-${{ hashFiles('pnpm-lock.yaml', 'package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Setup Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build app
+        run: pnpm tauri build
+        # TODO: add macOS code signing + notarization once certificates and Apple credentials are configured.
+
+      - name: Collect build artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dmg_dir="src-tauri/target/release/bundle/dmg"
+          app_dir="src-tauri/target/release/bundle/macos"
+
+          shopt -s nullglob
+          dmg_files=("${dmg_dir}"/*.dmg)
+          app_bundles=("${app_dir}"/*.app)
+
+          if [ ${#dmg_files[@]} -eq 0 ]; then
+            echo "No .dmg file found in ${dmg_dir}" >&2
+            exit 1
+          fi
+
+          if [ ${#app_bundles[@]} -eq 0 ]; then
+            echo "No .app bundle found in ${app_dir}" >&2
+            exit 1
+          fi
+
+          mkdir -p dist
+          cp "${dmg_files[0]}" "dist/Claude-Desk.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "${app_bundles[0]}" "dist/Claude-Desk.app.zip"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Claude-Desk.dmg
+          path: dist/Claude-Desk.dmg
+          if-no-files-found: error
+
+      - name: Upload app zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Claude-Desk.app.zip
+          path: dist/Claude-Desk.app.zip
+          if-no-files-found: error
+
+      - name: Create GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Claude-Desk.dmg
+            dist/Claude-Desk.app.zip
+          fail_on_unmatched_files: true
+          generate_release_notes: true
