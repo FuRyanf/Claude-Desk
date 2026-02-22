@@ -55,6 +55,24 @@ export function TerminalPanel({
   const inputFlushTimerRef = useRef<number | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
 
+  const refreshTerminalViewport = useCallback((term: Terminal) => {
+    const endRow = Math.max(term.rows - 1, 0);
+    term.refresh(0, endRow);
+  }, []);
+
+  const refreshTerminalSoon = useCallback(
+    (term: Terminal) => {
+      refreshTerminalViewport(term);
+      window.requestAnimationFrame(() => {
+        if (terminalRef.current !== term) {
+          return;
+        }
+        refreshTerminalViewport(term);
+      });
+    },
+    [refreshTerminalViewport]
+  );
+
   const flushOutgoingInput = useCallback(() => {
     const payload = inputBufferRef.current;
     if (!payload) {
@@ -104,12 +122,13 @@ export function TerminalPanel({
     writeBufferRef.current = payload.slice(chunk.length);
     writingRef.current = true;
     term.write(chunk, () => {
+      refreshTerminalSoon(term);
       writingRef.current = false;
       if (writeBufferRef.current.length > 0) {
         scheduleOutputFlush(flushQueuedWrites);
       }
     });
-  }, [scheduleOutputFlush]);
+  }, [refreshTerminalSoon, scheduleOutputFlush]);
 
   const queueWrite = useCallback(
     (data: string) => {
@@ -152,8 +171,10 @@ export function TerminalPanel({
       if (nextContent.length > 0) {
         queueWrite(nextContent);
       }
+      term.scrollToBottom();
+      refreshTerminalSoon(term);
     },
-    [clearPendingWrites, queueWrite]
+    [clearPendingWrites, queueWrite, refreshTerminalSoon]
   );
 
   useEffect(() => {
@@ -204,6 +225,7 @@ export function TerminalPanel({
       term.loadAddon(fitAddon);
       term.open(host);
       fitAddon.fit();
+      refreshTerminalSoon(term);
       onResizeRef.current?.(term.cols, term.rows);
       terminalRef.current = term;
       if (contentRef.current.length > 0) {
@@ -243,6 +265,7 @@ export function TerminalPanel({
         resizeFrameRef.current = window.requestAnimationFrame(() => {
           resizeFrameRef.current = null;
           fitAddon.fit();
+          refreshTerminalSoon(term);
           onResizeRef.current?.(term.cols, term.rows);
         });
       });
@@ -271,7 +294,14 @@ export function TerminalPanel({
       setFallback(true);
       return;
     }
-  }, [clearPendingWrites, fallback, flushOutgoingInput, queueWrite, scheduleOutgoingInputFlush]);
+  }, [
+    clearPendingWrites,
+    fallback,
+    flushOutgoingInput,
+    queueWrite,
+    refreshTerminalSoon,
+    scheduleOutgoingInputFlush
+  ]);
 
   useEffect(() => {
     readOnlyRef.current = readOnly;
