@@ -1,35 +1,55 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => {
+  const baseNow = Date.parse('2026-02-22T10:00:00.000Z');
   const workspace = {
     id: 'ws-1',
     name: 'Workspace',
     path: '/tmp/workspace',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    createdAt: new Date(baseNow - 10_000).toISOString(),
+    updatedAt: new Date(baseNow - 10_000).toISOString()
   };
 
-  const baseThread = {
-    id: 'thread-1',
-    workspaceId: 'ws-1',
-    agentId: 'claude-code',
-    fullAccess: false,
-    enabledSkills: [] as string[],
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    title: 'First thread',
-    isArchived: false,
-    lastRunStatus: 'Idle' as const,
-    lastRunStartedAt: null,
-    lastRunEndedAt: null,
-    claudeSessionId: null,
-    lastResumeAt: null,
-    lastNewSessionAt: null
-  };
+  const baseThreads = [
+    {
+      id: 'thread-older',
+      workspaceId: 'ws-1',
+      agentId: 'claude-code',
+      fullAccess: false,
+      enabledSkills: [] as string[],
+      createdAt: new Date(baseNow - 7_200_000).toISOString(),
+      updatedAt: new Date(baseNow - 7_200_000).toISOString(),
+      title: 'Older thread',
+      isArchived: false,
+      lastRunStatus: 'Idle' as const,
+      lastRunStartedAt: null,
+      lastRunEndedAt: null,
+      claudeSessionId: null,
+      lastResumeAt: null,
+      lastNewSessionAt: null
+    },
+    {
+      id: 'thread-newer',
+      workspaceId: 'ws-1',
+      agentId: 'claude-code',
+      fullAccess: false,
+      enabledSkills: [] as string[],
+      createdAt: new Date(baseNow - 3_600_000).toISOString(),
+      updatedAt: new Date(baseNow - 3_600_000).toISOString(),
+      title: 'Newer thread',
+      isArchived: false,
+      lastRunStatus: 'Idle' as const,
+      lastRunStartedAt: null,
+      lastRunEndedAt: null,
+      claudeSessionId: null,
+      lastResumeAt: null,
+      lastNewSessionAt: null
+    }
+  ];
 
-  let threadState = [{ ...baseThread }];
+  let threadState = baseThreads.map((thread) => ({ ...thread }));
   let terminalDataHandler: ((event: { sessionId: string; data: string }) => void) | null = null;
 
   const api = {
@@ -55,14 +75,7 @@ const mocks = vi.hoisted(() => {
     gitCreateAndCheckoutBranch: vi.fn(async () => true),
     listThreads: vi.fn(async () => threadState),
     createThread: vi.fn(async () => {
-      const next = {
-        ...baseThread,
-        id: `thread-${threadState.length + 1}`,
-        title: 'New thread',
-        updatedAt: new Date().toISOString()
-      };
-      threadState = [next, ...threadState];
-      return next;
+      throw new Error('not needed');
     }),
     renameThread: vi.fn(async (_workspaceId: string, threadId: string, title: string) => {
       const updated = {
@@ -81,14 +94,8 @@ const mocks = vi.hoisted(() => {
     setThreadFullAccess: vi.fn(async () => {
       throw new Error('not needed');
     }),
-    clearThreadClaudeSession: vi.fn(async (_workspaceId: string, threadId: string) => {
-      const updated = {
-        ...threadState.find((thread) => thread.id === threadId)!,
-        claudeSessionId: null,
-        updatedAt: new Date().toISOString()
-      };
-      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
-      return updated;
+    clearThreadClaudeSession: vi.fn(async () => {
+      throw new Error('not needed');
     }),
     setThreadSkills: vi.fn(async () => {
       throw new Error('not needed');
@@ -105,26 +112,18 @@ const mocks = vi.hoisted(() => {
     getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
     saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
     detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
-    terminalStartSession: vi.fn(async (params: { threadId: string }) => {
-      const thread = threadState.find((item) => item.id === params.threadId) ?? threadState[0];
-      return {
-        sessionId: `session-${params.threadId}`,
-        sessionMode: thread?.claudeSessionId ? 'resumed' : 'new',
-        resumeSessionId: thread?.claudeSessionId ?? null,
-        thread: {
-          ...thread,
-          claudeSessionId: thread?.claudeSessionId ?? null,
-          lastResumeAt: thread?.claudeSessionId ? new Date().toISOString() : null,
-          lastNewSessionAt: thread?.claudeSessionId ? null : new Date().toISOString()
-        }
-      };
-    }),
+    terminalStartSession: vi.fn(async (params: { threadId: string }) => ({
+      sessionId: `session-${params.threadId}`,
+      sessionMode: 'new',
+      resumeSessionId: null,
+      thread: threadState.find((thread) => thread.id === params.threadId) ?? threadState[0]
+    })),
     terminalWrite: vi.fn(async () => true),
     terminalResize: vi.fn(async () => true),
     terminalKill: vi.fn(async () => true),
     terminalSendSignal: vi.fn(async () => true),
     terminalGetLastLog: vi.fn(async () => ''),
-    terminalReadOutput: vi.fn(async () => '> '),
+    terminalReadOutput: vi.fn(async () => ''),
     runClaude: vi.fn(async () => ({ runId: 'run-1' })),
     cancelRun: vi.fn(async () => true),
     generateCommitMessage: vi.fn(async () => 'chore: update'),
@@ -134,8 +133,9 @@ const mocks = vi.hoisted(() => {
   };
 
   const reset = () => {
-    threadState = [{ ...baseThread }];
+    threadState = baseThreads.map((thread) => ({ ...thread }));
     terminalDataHandler = null;
+    window.localStorage.clear();
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -181,14 +181,11 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 vi.mock('../../src/components/TerminalPanel', () => ({
   TerminalPanel: (props: { onData?: (data: string) => void }) => (
     <section className="terminal-panel" data-testid="terminal-panel-mock">
-      <button type="button" onClick={() => props.onData?.('   First prompt title line\r')}>
-        send-first-prompt
-      </button>
-      <button type="button" onClick={() => props.onData?.('Second title should not apply\r')}>
-        send-second-prompt
-      </button>
       <button type="button" onClick={() => props.onData?.('x')}>
         type-char
+      </button>
+      <button type="button" onClick={() => props.onData?.('Submitted prompt\r')}>
+        submit-input
       </button>
     </section>
   )
@@ -196,82 +193,89 @@ vi.mock('../../src/components/TerminalPanel', () => ({
 
 import App from '../../src/App';
 
-describe('Sidebar behavior', () => {
+function getThreadOrder(): string[] {
+  return Array.from(document.querySelectorAll('.workspace-thread-list .thread-title'))
+    .map((node) => node.textContent?.trim() ?? '')
+    .filter((value) => value.length > 0);
+}
+
+describe('Left rail recency and sorting semantics', () => {
   beforeEach(() => {
+    vi.useRealTimers();
     mocks.reset();
   });
 
-  it('does not render Crunching/Running/Completed labels in the UI', async () => {
+  it('keeps the header clear of timer badges even after terminal output events', async () => {
     render(<App />);
 
-    await screen.findByRole('button', { name: /First thread/i });
-
-    expect(screen.queryByText(/Crunching/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Running for/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/^Completed$/i)).not.toBeInTheDocument();
-  });
-
-  it('does not show a header timer badge even after output is emitted', async () => {
-    render(<App />);
-
-    await screen.findByRole('button', { name: /First thread/i });
-    expect(screen.queryByTestId('header-output-age')).not.toBeInTheDocument();
+    await screen.findByRole('button', { name: /Newer thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+    });
 
     act(() => {
-      mocks.emitTerminalData({ sessionId: 'session-thread-1', data: 'Claude output\n' });
+      mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
     });
 
     expect(screen.queryByTestId('header-output-age')).not.toBeInTheDocument();
   });
 
-  it('sets title once from first prompt and does not change while typing or later submits', async () => {
-    const user = userEvent.setup();
-    render(<App />);
+  it('hides recency under one minute and shows minute-level values after one minute', async () => {
+    const baseMs = Date.parse('2026-02-22T10:00:00.000Z');
+    let nowMs = baseMs;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+    try {
+      const user = userEvent.setup();
+      render(<App />);
 
-    await screen.findByRole('button', { name: /First thread/i });
-    await waitFor(() => {
-      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-1' }));
-    });
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
 
-    fireEvent.click(screen.getByTestId('workspace-compose-ws-1'));
+      expect(screen.queryByTestId('thread-recency-thread-newer')).not.toBeInTheDocument();
+      nowMs = baseMs + 61_000;
 
-    await waitFor(() => {
-      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
-      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-2' }));
-    });
-
-    await user.click(screen.getByRole('button', { name: 'send-first-prompt' }));
-    await waitFor(() => {
-      expect(mocks.api.renameThread).toHaveBeenCalledWith('ws-1', 'thread-2', 'First prompt title line');
-    });
-
-    await user.click(screen.getByRole('button', { name: 'type-char' }));
-    await user.click(screen.getByRole('button', { name: 'send-second-prompt' }));
-
-    await waitFor(() => {
-      expect(mocks.api.renameThread).toHaveBeenCalledTimes(1);
-    });
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+      expect(screen.getByTestId('thread-recency-thread-newer')).toHaveTextContent('1m');
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
-  it('does not rerender the sidebar on terminal keystrokes', async () => {
+  it('does not change thread order when only selecting threads', async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await screen.findByRole('button', { name: /First thread/i });
+    await screen.findByRole('button', { name: /Newer thread/i });
+    expect(getThreadOrder()).toEqual(['Newer thread', 'Older thread']);
 
-    act(() => {
-      mocks.emitTerminalData({ sessionId: 'session-thread-1', data: 'ready\n' });
+    await user.click(screen.getByRole('button', { name: /Older thread/i }));
+    expect(getThreadOrder()).toEqual(['Newer thread', 'Older thread']);
+  });
+
+  it('re-sorts only after explicit submit events, not clicks, typing, or output', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Newer thread/i });
+    expect(getThreadOrder()).toEqual(['Newer thread', 'Older thread']);
+
+    await user.click(screen.getByRole('button', { name: /Older thread/i }));
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
     });
-
-    const sidebar = await screen.findByTestId('sidebar');
-    const before = Number(sidebar.getAttribute('data-render-count') ?? '0');
+    expect(getThreadOrder()).toEqual(['Newer thread', 'Older thread']);
 
     await user.click(screen.getByRole('button', { name: 'type-char' }));
-    await waitFor(() => {
-      expect(mocks.api.terminalWrite).toHaveBeenCalled();
-    });
+    expect(getThreadOrder()).toEqual(['Newer thread', 'Older thread']);
 
-    const after = Number(screen.getByTestId('sidebar').getAttribute('data-render-count') ?? '0');
-    expect(after).toBe(before);
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-older', data: 'assistant reply\n' });
+    });
+    expect(getThreadOrder()).toEqual(['Newer thread', 'Older thread']);
+
+    await user.click(screen.getByRole('button', { name: 'submit-input' }));
+    await waitFor(() => {
+      expect(getThreadOrder()).toEqual(['Older thread', 'Newer thread']);
+    });
   });
 });
