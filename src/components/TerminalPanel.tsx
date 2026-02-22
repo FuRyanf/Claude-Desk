@@ -77,6 +77,7 @@ export function TerminalPanel({
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
   const debugMetricsRef = useRef<TerminalDebugMetrics>(emptyDebugMetrics());
   const writeQueueRef = useRef<TerminalWriteQueue>(new TerminalWriteQueue());
+  const shouldScrollToBottomRef = useRef(true);
 
   const logDebugSnapshot = useCallback((reason: string, force = false) => {
     if (!debugEnabledRef.current) {
@@ -142,6 +143,19 @@ export function TerminalPanel({
 
   const clearPendingWrites = useCallback(() => {
     writeQueueRef.current.clear();
+  }, []);
+
+  const scrollTerminalToBottom = useCallback(() => {
+    const term = terminalRef.current;
+    if (!term) {
+      return;
+    }
+
+    shouldScrollToBottomRef.current = false;
+    term.scrollToBottom();
+    window.requestAnimationFrame(() => {
+      terminalRef.current?.scrollToBottom();
+    });
   }, []);
 
   const resetTerminalContent = useCallback(
@@ -265,6 +279,7 @@ export function TerminalPanel({
           queueWrite(contentRef.current);
         }
         writeQueueRef.current.flushImmediate();
+        scrollTerminalToBottom();
         logDebugSnapshot('terminal-ready', true);
       };
 
@@ -333,6 +348,7 @@ export function TerminalPanel({
           inputFlushTimerRef.current = null;
         }
         lastSentSizeRef.current = null;
+        shouldScrollToBottomRef.current = true;
       };
     } catch {
       setFallback(true);
@@ -373,6 +389,7 @@ export function TerminalPanel({
     sessionRef.current = sessionId;
     hasLiveDataRef.current = false;
     hydratedSessionRef.current = null;
+    shouldScrollToBottomRef.current = true;
     clearPendingWrites();
     inputBufferRef.current = '';
     if (inputFlushTimerRef.current !== null) {
@@ -384,8 +401,9 @@ export function TerminalPanel({
     if (contentRef.current.length > 0) {
       hydratedSessionRef.current = sessionId;
     }
+    scrollTerminalToBottom();
     logDebugSnapshot('session-switch', true);
-  }, [clearPendingWrites, logDebugSnapshot, resetTerminalContent, sessionId, terminalReady]);
+  }, [clearPendingWrites, logDebugSnapshot, resetTerminalContent, scrollTerminalToBottom, sessionId, terminalReady]);
 
   useEffect(() => {
     if (!readOnly && sessionId) {
@@ -398,7 +416,9 @@ export function TerminalPanel({
     }
 
     resetTerminalContent(content);
-  }, [content, readOnly, resetTerminalContent, sessionId, terminalReady]);
+    shouldScrollToBottomRef.current = true;
+    scrollTerminalToBottom();
+  }, [content, readOnly, resetTerminalContent, scrollTerminalToBottom, sessionId, terminalReady]);
 
   useEffect(() => {
     if (fallback || readOnly || !sessionId || !terminalReady) {
@@ -417,8 +437,19 @@ export function TerminalPanel({
     resetTerminalContent(content);
     hydratedSessionRef.current = sessionId;
     writeQueueRef.current.flushImmediate();
+    shouldScrollToBottomRef.current = true;
+    scrollTerminalToBottom();
     logDebugSnapshot('hydrate-content');
-  }, [content, fallback, logDebugSnapshot, readOnly, resetTerminalContent, sessionId, terminalReady]);
+  }, [
+    content,
+    fallback,
+    logDebugSnapshot,
+    readOnly,
+    resetTerminalContent,
+    scrollTerminalToBottom,
+    sessionId,
+    terminalReady
+  ]);
 
   useEffect(() => {
     if (fallback || readOnly || !sessionId || !terminalReady) {
@@ -437,6 +468,9 @@ export function TerminalPanel({
       debugMetricsRef.current.ptyBytes += event.data.length;
       onOutputRef.current?.(event.data);
       queueWrite(event.data);
+      if (shouldScrollToBottomRef.current) {
+        scrollTerminalToBottom();
+      }
       logDebugSnapshot('pty-data');
     }).then((cleanup) => {
       if (disposed) {
@@ -451,7 +485,16 @@ export function TerminalPanel({
       flushOutgoingInput();
       unlisten?.();
     };
-  }, [fallback, flushOutgoingInput, logDebugSnapshot, queueWrite, readOnly, sessionId, terminalReady]);
+  }, [
+    fallback,
+    flushOutgoingInput,
+    logDebugSnapshot,
+    queueWrite,
+    readOnly,
+    scrollTerminalToBottom,
+    sessionId,
+    terminalReady
+  ]);
 
   if (fallback) {
     return (

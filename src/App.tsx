@@ -271,13 +271,21 @@ export default function App() {
   }, [allThreads, selectedThreadId]);
 
   const selectedSessionId = runStore.sessionForThread(selectedThreadId);
+  const isSelectedThreadStarting = selectedThread ? Boolean(startingByThread[selectedThread.id]) : false;
+  const isSelectedThreadReady = selectedThread ? Boolean(readyByThread[selectedThread.id]) : false;
 
   const selectedTerminalContent = useMemo(() => {
     if (!selectedThreadId) {
       return '';
     }
+    if (isSelectedThreadStarting) {
+      return '';
+    }
+    if (selectedSessionId && !isSelectedThreadReady) {
+      return '';
+    }
     return lastTerminalLogByThread[selectedThreadId] ?? '';
-  }, [lastTerminalLogByThread, selectedThreadId]);
+  }, [isSelectedThreadReady, isSelectedThreadStarting, lastTerminalLogByThread, selectedSessionId, selectedThreadId]);
 
 
   useEffect(() => {
@@ -1289,8 +1297,6 @@ export default function App() {
     }
   }, [pushToast, selectedWorkspace]);
 
-  const isSelectedThreadStarting = selectedThread ? Boolean(startingByThread[selectedThread.id]) : false;
-  const isSelectedThreadReady = selectedThread ? Boolean(readyByThread[selectedThread.id]) : false;
   const openSettings = useCallback(() => {
     setSettingsOpen(true);
   }, []);
