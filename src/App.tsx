@@ -903,18 +903,8 @@ export default function App() {
   );
 
   const stopSessionsForBranchSwitch = useCallback(async () => {
-    const activeRuns = Object.values(runStore.activeRunsByThread);
-    if (activeRuns.length === 0) {
-      return true;
-    }
-
-    const confirmed = window.confirm('Switching branches may affect the running session. Continue?');
-    if (!confirmed) {
-      return false;
-    }
     await stopSessionsExcept();
-    return true;
-  }, [runStore.activeRunsByThread, stopSessionsExcept]);
+  }, [stopSessionsExcept]);
 
   const onLoadBranchSwitcher = useCallback(async (): Promise<{
     branches: GitBranchEntry[];
@@ -936,10 +926,7 @@ export default function App() {
         return false;
       }
 
-      const shouldContinue = await stopSessionsForBranchSwitch();
-      if (!shouldContinue) {
-        return false;
-      }
+      await stopSessionsForBranchSwitch();
 
       try {
         await api.gitCheckoutBranch(selectedWorkspace.path, branchName);
@@ -968,10 +955,7 @@ export default function App() {
         return false;
       }
 
-      const shouldContinue = await stopSessionsForBranchSwitch();
-      if (!shouldContinue) {
-        return false;
-      }
+      await stopSessionsForBranchSwitch();
 
       try {
         await api.gitCreateAndCheckoutBranch(selectedWorkspace.path, branchName);

@@ -341,14 +341,30 @@ impl TerminalSessionManager {
         Ok(removed)
     }
 
-    pub fn has_active_sessions_for_workspace(&self, workspace_path: &str) -> Result<bool> {
-        let sessions = self
-            .sessions
-            .lock()
-            .map_err(|_| anyhow!("Terminal session lock poisoned"))?;
-        Ok(sessions
-            .values()
-            .any(|session| session.workspace_path == workspace_path))
+    pub fn shutdown_for_workspace(&self, workspace_path: &str) -> Result<()> {
+        let sessions = {
+            let mut guard = self
+                .sessions
+                .lock()
+                .map_err(|_| anyhow!("Terminal session lock poisoned"))?;
+            let matching_session_ids = guard
+                .iter()
+                .filter(|(_, session)| session.workspace_path == workspace_path)
+                .map(|(session_id, _)| session_id.clone())
+                .collect::<Vec<_>>();
+            let mut removed = Vec::new();
+            for session_id in matching_session_ids {
+                if let Some(session) = guard.remove(&session_id) {
+                    removed.push(session);
+                }
+            }
+            removed
+        };
+
+        for session in sessions {
+            terminate_terminal_session_process(&session);
+        }
+        Ok(())
     }
 
     pub fn shutdown_all(&self) {

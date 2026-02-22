@@ -63,17 +63,11 @@ fn git_checkout_branch(
     workspace_path: String,
     branch_name: String,
 ) -> Result<bool, String> {
-    if state
+    state
         .runner
         .terminal_sessions
-        .has_active_sessions_for_workspace(&workspace_path)
-        .map_err(|error| error.to_string())?
-    {
-        return Err(
-            "Cannot switch branches while terminal sessions are active in this workspace."
-                .to_string(),
-        );
-    }
+        .shutdown_for_workspace(&workspace_path)
+        .map_err(|error| error.to_string())?;
     git_tools::checkout_branch(&workspace_path, &branch_name)
         .map(|_| true)
         .map_err(|error| error.to_string())
@@ -85,17 +79,11 @@ fn git_create_and_checkout_branch(
     workspace_path: String,
     branch_name: String,
 ) -> Result<bool, String> {
-    if state
+    state
         .runner
         .terminal_sessions
-        .has_active_sessions_for_workspace(&workspace_path)
-        .map_err(|error| error.to_string())?
-    {
-        return Err(
-            "Cannot switch branches while terminal sessions are active in this workspace."
-                .to_string(),
-        );
-    }
+        .shutdown_for_workspace(&workspace_path)
+        .map_err(|error| error.to_string())?;
     git_tools::create_and_checkout_branch(&workspace_path, &branch_name)
         .map(|_| true)
         .map_err(|error| error.to_string())
