@@ -481,34 +481,6 @@ pub fn resolve_workspace_id_by_path(workspace_path: &str) -> Result<Option<Strin
         .map(|workspace| workspace.id.clone()))
 }
 
-pub fn find_thread_workspace(thread_id: &str) -> Result<Option<String>> {
-    let thread_id = validate_storage_segment(thread_id, "thread id")?;
-    let threads_root = ensure_base_dirs()?.join("threads");
-    if !threads_root.exists() {
-        return Ok(None);
-    }
-
-    for workspace_entry in fs::read_dir(threads_root)? {
-        let workspace_entry = workspace_entry?;
-        let workspace_path = workspace_entry.path();
-        if !workspace_path.is_dir() {
-            continue;
-        }
-        let thread_path = workspace_path.join(thread_id).join("thread.json");
-        if thread_path.exists() {
-            let Some(workspace_id) = workspace_path
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-            else {
-                continue;
-            };
-            return Ok(Some(workspace_id));
-        }
-    }
-
-    Ok(None)
-}
-
 pub fn write_json_file<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let raw = serde_json::to_string_pretty(value)?;
     write_file_atomic(path, raw.as_bytes())?;

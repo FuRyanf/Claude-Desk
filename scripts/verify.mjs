@@ -135,14 +135,7 @@ async function captureScreenshots() {
 
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     await page.goto('http://127.0.0.1:4173', { waitUntil: 'networkidle' });
-    await page.screenshot({ path: path.join(e2eDir, 'landing.png'), fullPage: true });
-
-    const input = page.getByPlaceholder('Type and press Enter');
-    if (await input.count()) {
-      await input.click();
-      await input.type('/');
-      await page.screenshot({ path: path.join(e2eDir, 'slash-palette.png'), fullPage: true });
-    }
+    await page.screenshot({ path: path.join(e2eDir, 'app-shell.png'), fullPage: true });
 
     await browser.close();
   } finally {
@@ -155,7 +148,7 @@ function summarizeRootCause(stepId) {
   if (stepId.includes('ui-tests')) {
     return [
       '- UI behavior regressed against expected interactions.',
-      '- Check `/Users/rfu/Claude Desk/src/App.tsx`, `/Users/rfu/Claude Desk/src/components/SimpleComposer.tsx`, and `/Users/rfu/Claude Desk/src/components/LeftRail.tsx`.'
+      '- Check `/Users/rfu/Claude Desk/src/App.tsx`, `/Users/rfu/Claude Desk/src/components/LeftRail.tsx`, and `/Users/rfu/Claude Desk/src/components/TerminalPanel.tsx`.'
     ];
   }
   if (stepId.includes('rust-tests')) {
@@ -178,7 +171,7 @@ function summarizeRootCause(stepId) {
 
 async function writeDiagnosis(failure) {
   const lines = [];
-  lines.push('# Last Diagnosis');
+  lines.push('Last Diagnosis');
   lines.push('');
 
   if (!failure) {
@@ -188,7 +181,7 @@ async function writeDiagnosis(failure) {
     for (const step of steps) {
       lines.push(`- ${step.id}`);
     }
-    await writeFile(path.join(artifactsDir, 'last_diagnosis.md'), lines.join('\n'), 'utf8');
+    await writeFile(path.join(artifactsDir, 'last_diagnosis.txt'), lines.join('\n'), 'utf8');
     return;
   }
 
@@ -211,7 +204,7 @@ async function writeDiagnosis(failure) {
     lines.push(`    ${line}`);
   }
 
-  await writeFile(path.join(artifactsDir, 'last_diagnosis.md'), lines.slice(0, 190).join('\n'), 'utf8');
+  await writeFile(path.join(artifactsDir, 'last_diagnosis.txt'), lines.slice(0, 190).join('\n'), 'utf8');
 }
 
 async function main() {
