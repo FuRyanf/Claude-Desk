@@ -13,6 +13,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 
 import './styles.css';
 import { AddWorkspaceModal } from './components/AddWorkspaceModal';
+import { BottomBar } from './components/BottomBar';
 import { HeaderBar } from './components/HeaderBar';
 import { LeftRail } from './components/LeftRail';
 import { SettingsModal } from './components/SettingsModal';
@@ -39,6 +40,7 @@ const SIDEBAR_WIDTH_KEY = 'claude-desk:sidebar-width';
 const SIDEBAR_WIDTH_DEFAULT = 320;
 const SIDEBAR_WIDTH_MIN = 260;
 const SIDEBAR_WIDTH_MAX = 460;
+const TERMINAL_LOG_BUFFER_CHARS = 280_000;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
 interface PendingSessionStart {
@@ -218,19 +220,14 @@ export default function App() {
     [selectedWorkspaceId, workspaces]
   );
 
-  const selectedThreads = useMemo(() => {
-    if (!selectedWorkspaceId) {
-      return [];
-    }
-    return threadsByWorkspace[selectedWorkspaceId] ?? [];
-  }, [selectedWorkspaceId, threadsByWorkspace]);
+  const allThreads = useMemo(() => Object.values(threadsByWorkspace).flat(), [threadsByWorkspace]);
 
   const selectedThread = useMemo(() => {
     if (!selectedThreadId) {
       return undefined;
     }
-    return selectedThreads.find((thread) => thread.id === selectedThreadId);
-  }, [selectedThreadId, selectedThreads]);
+    return allThreads.find((thread) => thread.id === selectedThreadId);
+  }, [allThreads, selectedThreadId]);
 
   const selectedSessionId = runStore.sessionForThread(selectedThreadId);
 
@@ -407,6 +404,27 @@ export default function App() {
     }
     delete pendingInputByThreadRef.current[threadId];
     await api.terminalWrite(sessionId, pending);
+  }, []);
+
+  const appendTerminalLogChunk = useCallback((threadId: string, chunk: string) => {
+    if (!chunk) {
+      return;
+    }
+    setLastTerminalLogByThread((current) => {
+      const previous = current[threadId] ?? '';
+      const combined = `${previous}${chunk}`;
+      const next =
+        combined.length > TERMINAL_LOG_BUFFER_CHARS
+          ? combined.slice(combined.length - TERMINAL_LOG_BUFFER_CHARS)
+          : combined;
+      if (next === previous) {
+        return current;
+      }
+      return {
+        ...current,
+        [threadId]: next
+      };
+    });
   }, []);
 
   const bumpSessionStartRequestId = useCallback((threadId: string) => {
@@ -698,6 +716,18 @@ export default function App() {
       }
 
       try {
+        const snapshot = await withTimeout(api.terminalReadOutput(sessionId), 350);
+        if (typeof snapshot === 'string' && snapshot.length > 0) {
+          setLastTerminalLogByThread((current) => ({
+            ...current,
+            [threadId]: snapshot
+          }));
+        }
+      } catch {
+        // best effort
+      }
+
+      try {
         await withTimeout(api.terminalSendSignal(sessionId, 'SIGINT'), 700);
       } catch {
         // best effort
@@ -739,10 +769,13 @@ export default function App() {
   );
 
   const switchToThread = useCallback(
-    async (threadId: string) => {
+    async (workspaceId: string, threadId: string) => {
+      if (selectedWorkspaceIdRef.current !== workspaceId) {
+        setSelectedWorkspace(workspaceId);
+      }
       setSelectedThread(threadId);
     },
-    [setSelectedThread]
+    [setSelectedThread, setSelectedWorkspace]
   );
 
   const restartThreadSession = useCallback(
@@ -847,13 +880,22 @@ export default function App() {
       try {
         await api.gitCheckoutBranch(selectedWorkspace.path, branchName);
         await refreshGitInfo();
+        if (selectedThread?.workspaceId === selectedWorkspace.id) {
+          const snapshot = await api.terminalGetLastLog(selectedWorkspace.id, selectedThread.id).catch(() => '');
+          if (snapshot) {
+            setLastTerminalLogByThread((current) => ({
+              ...current,
+              [selectedThread.id]: snapshot
+            }));
+          }
+        }
         return true;
       } catch (error) {
         pushToast(`Branch checkout failed: ${String(error)}`, 'error');
         throw error;
       }
     },
-    [pushToast, refreshGitInfo, selectedWorkspace, stopSessionsForBranchSwitch]
+    [pushToast, refreshGitInfo, selectedThread, selectedWorkspace, stopSessionsForBranchSwitch]
   );
 
   const onCreateAndCheckoutBranch = useCallback(
@@ -870,13 +912,22 @@ export default function App() {
       try {
         await api.gitCreateAndCheckoutBranch(selectedWorkspace.path, branchName);
         await refreshGitInfo();
+        if (selectedThread?.workspaceId === selectedWorkspace.id) {
+          const snapshot = await api.terminalGetLastLog(selectedWorkspace.id, selectedThread.id).catch(() => '');
+          if (snapshot) {
+            setLastTerminalLogByThread((current) => ({
+              ...current,
+              [selectedThread.id]: snapshot
+            }));
+          }
+        }
         return true;
       } catch (error) {
         pushToast(`Create branch failed: ${String(error)}`, 'error');
         throw error;
       }
     },
-    [pushToast, refreshGitInfo, selectedWorkspace, stopSessionsForBranchSwitch]
+    [pushToast, refreshGitInfo, selectedThread, selectedWorkspace, stopSessionsForBranchSwitch]
   );
 
   const applyFullAccessSetting = useCallback(
@@ -946,6 +997,22 @@ export default function App() {
     window.localStorage.setItem(SELECTED_WORKSPACE_KEY, selectedWorkspaceId);
     void refreshThreadsForWorkspace(selectedWorkspaceId);
   }, [refreshThreadsForWorkspace, selectedWorkspaceId, setSelectedThread]);
+
+  useEffect(() => {
+    if (workspaces.length === 0) {
+      return;
+    }
+
+    void Promise.all(
+      workspaces.map(async (workspace) => {
+        try {
+          await listThreads(workspace.id);
+        } catch {
+          // keep rendering other workspaces even if one fails to refresh
+        }
+      })
+    );
+  }, [listThreads, workspaces]);
 
   useEffect(() => {
     if (!selectedWorkspace) {
@@ -1203,10 +1270,11 @@ export default function App() {
           setAddWorkspaceError(null);
           setAddWorkspaceOpen(true);
         }}
+        onOpenSettings={() => setSettingsOpen(true)}
         onNewThread={() => void onNewThread()}
         onNewThreadInWorkspace={onNewThreadInWorkspace}
         onThreadSearchChange={setThreadSearch}
-        onSelectThread={(threadId) => void switchToThread(threadId)}
+        onSelectThread={(workspaceId, threadId) => void switchToThread(workspaceId, threadId)}
         onRenameThread={onRenameThread}
         onArchiveThread={onArchiveThread}
         onDeleteThread={onDeleteThread}
@@ -1228,16 +1296,9 @@ export default function App() {
       <main className={blockingError ? 'main-panel has-blocking-error' : 'main-panel'} data-testid="main-panel">
         <HeaderBar
           workspace={selectedWorkspace}
-          gitInfo={gitInfo}
           statusLabel={statusLabel}
           runningForLabel={runningForLabel}
           sessionModeLabel={sessionModeLabel}
-          fullAccess={selectedThread?.fullAccess ?? false}
-          fullAccessDisabled={!selectedThread || savingFullAccess}
-          onToggleFullAccess={onToggleFullAccess}
-          onLoadBranchSwitcher={onLoadBranchSwitcher}
-          onCheckoutBranch={onCheckoutBranch}
-          onCreateAndCheckoutBranch={onCreateAndCheckoutBranch}
           onOpenWorkspace={() => {
             if (selectedWorkspace) {
               void api.openInFinder(selectedWorkspace.path);
@@ -1292,6 +1353,7 @@ export default function App() {
                 } else if (terminalChunkSignalsIdle(chunk)) {
                   runStore.stopWorking(selectedThread.id);
                 }
+                appendTerminalLogChunk(selectedThread.id, chunk);
               }}
               onResize={(cols, rows) => {
                 setTerminalSize({ cols, rows });
@@ -1306,6 +1368,18 @@ export default function App() {
             <div className="terminal-empty">Create a thread to start typing.</div>
           )}
         </section>
+        <BottomBar
+          workspace={selectedWorkspace}
+          gitInfo={gitInfo}
+          statusLabel={statusLabel}
+          runningForLabel={runningForLabel}
+          fullAccess={selectedThread?.fullAccess ?? false}
+          fullAccessDisabled={!selectedThread || savingFullAccess}
+          onToggleFullAccess={onToggleFullAccess}
+          onLoadBranchSwitcher={onLoadBranchSwitcher}
+          onCheckoutBranch={onCheckoutBranch}
+          onCreateAndCheckoutBranch={onCreateAndCheckoutBranch}
+        />
       </main>
 
       <SettingsModal

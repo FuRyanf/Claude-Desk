@@ -17,10 +17,11 @@ interface LeftRailProps {
   onSelectWorkspace: (workspaceId: string) => void;
   onOpenWorkspacePicker: () => void;
   onOpenManualWorkspaceModal: () => void;
+  onOpenSettings: () => void;
   onNewThread: () => void;
   onNewThreadInWorkspace: (workspaceId: string) => Promise<void>;
   onThreadSearchChange: (value: string) => void;
-  onSelectThread: (threadId: string) => void;
+  onSelectThread: (workspaceId: string, threadId: string) => void;
   onRenameThread: (workspaceId: string, threadId: string, title: string) => Promise<void>;
   onArchiveThread: (workspaceId: string, threadId: string) => Promise<void>;
   onDeleteThread: (workspaceId: string, threadId: string) => Promise<void>;
@@ -164,6 +165,7 @@ export function LeftRail({
   onSelectWorkspace,
   onOpenWorkspacePicker,
   onOpenManualWorkspaceModal,
+  onOpenSettings,
   onNewThread,
   onNewThreadInWorkspace,
   onThreadSearchChange,
@@ -181,6 +183,7 @@ export function LeftRail({
   const [editingOriginal, setEditingOriginal] = React.useState('');
   const [contextMenu, setContextMenu] = React.useState<ThreadContextMenuState | null>(null);
   const [workspaceContextMenu, setWorkspaceContextMenu] = React.useState<WorkspaceContextMenuState | null>(null);
+  const [expandedWorkspaceIds, setExpandedWorkspaceIds] = React.useState<Record<string, boolean>>({});
   const contextMenuRef = React.useRef<HTMLDivElement | null>(null);
   const workspaceContextMenuRef = React.useRef<HTMLDivElement | null>(null);
 
@@ -218,6 +221,16 @@ export function LeftRail({
       window.removeEventListener('keydown', onEscape);
     };
   }, [contextMenu, workspaceContextMenu]);
+
+  React.useEffect(() => {
+    setExpandedWorkspaceIds((current) => {
+      const next: Record<string, boolean> = {};
+      for (const workspace of workspaces) {
+        next[workspace.id] = current[workspace.id] ?? true;
+      }
+      return next;
+    });
+  }, [workspaces]);
 
   const commitRename = React.useCallback(
     async (thread: ThreadMetadata) => {
@@ -320,9 +333,6 @@ export function LeftRail({
             const isSelectedWorkspace = workspace.id === selectedWorkspaceId;
             const allThreads = threadsByWorkspace[workspace.id] ?? [];
             const visibleThreads = allThreads.filter((thread) => {
-              if (!isSelectedWorkspace) {
-                return false;
-              }
               if (!query) {
                 return true;
               }
@@ -336,7 +346,13 @@ export function LeftRail({
                 <button
                   type="button"
                   className="workspace-group-button"
-                  onClick={() => onSelectWorkspace(workspace.id)}
+                  onClick={() => {
+                    onSelectWorkspace(workspace.id);
+                    setExpandedWorkspaceIds((current) => ({
+                      ...current,
+                      [workspace.id]: true
+                    }));
+                  }}
                   onContextMenu={(event) => {
                     event.preventDefault();
                     const x = Math.min(event.clientX, window.innerWidth - 180);
@@ -347,8 +363,32 @@ export function LeftRail({
                   title={workspace.path}
                 >
                   <span className="workspace-group-leading">
-                    <span className="workspace-chevron" aria-hidden="true">
-                      <ChevronIcon expanded={isSelectedWorkspace} />
+                    <span
+                      className="workspace-chevron workspace-chevron-button"
+                      role="button"
+                      tabIndex={0}
+                      aria-label={expandedWorkspaceIds[workspace.id] === false ? 'Expand folder' : 'Collapse folder'}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setExpandedWorkspaceIds((current) => ({
+                          ...current,
+                          [workspace.id]: !(current[workspace.id] ?? true)
+                        }));
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter' && event.key !== ' ') {
+                          return;
+                        }
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setExpandedWorkspaceIds((current) => ({
+                          ...current,
+                          [workspace.id]: !(current[workspace.id] ?? true)
+                        }));
+                      }}
+                    >
+                      <ChevronIcon expanded={expandedWorkspaceIds[workspace.id] !== false} />
                     </span>
                     <span className="workspace-folder-icon" aria-hidden="true">
                       <FolderIcon />
@@ -358,107 +398,111 @@ export function LeftRail({
                   <span className="workspace-group-count">{allThreads.length}</span>
                 </button>
 
-                {isSelectedWorkspace ? (
-                  visibleThreads.length === 0 ? (
-                    <p className="muted workspace-group-empty">No matching threads.</p>
-                  ) : (
-                    <ul className="workspace-thread-list">
-                      {visibleThreads.map((thread) => {
-                        const active = thread.id === selectedThreadId;
-                        const activeRun = activeRunsByThread[thread.id];
-                        const runningFor = activeRun
-                          ? formatDurationShort((nowMs - Date.parse(activeRun.startedAt)) / 1000)
-                          : null;
-                        const statusLine = summarizeThreadStatus(thread, runningFor);
+                {expandedWorkspaceIds[workspace.id] === false ? null : visibleThreads.length === 0 ? (
+                  <p className="muted workspace-group-empty">No matching threads.</p>
+                ) : (
+                  <ul className="workspace-thread-list">
+                    {visibleThreads.map((thread) => {
+                      const active = thread.id === selectedThreadId;
+                      const activeRun = activeRunsByThread[thread.id];
+                      const runningFor = activeRun
+                        ? formatDurationShort((nowMs - Date.parse(activeRun.startedAt)) / 1000)
+                        : null;
+                      const statusLine = summarizeThreadStatus(thread, runningFor);
 
-                        return (
-                          <li
-                            key={thread.id}
-                            onContextMenu={(event) => {
+                      return (
+                        <li
+                          key={thread.id}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            const x = Math.min(event.clientX, window.innerWidth - 180);
+                            const y = Math.min(event.clientY, window.innerHeight - 160);
+                            setWorkspaceContextMenu(null);
+                            setContextMenu({ thread, x, y });
+                          }}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => onSelectThread(thread.workspaceId, thread.id)}
+                            onDoubleClick={(event) => {
                               event.preventDefault();
-                              const x = Math.min(event.clientX, window.innerWidth - 180);
-                              const y = Math.min(event.clientY, window.innerHeight - 160);
-                              setWorkspaceContextMenu(null);
-                              setContextMenu({ thread, x, y });
+                              setEditingThreadId(thread.id);
+                              setEditingValue(thread.title);
+                              setEditingOriginal(thread.title);
                             }}
+                            className={active ? 'thread-button active' : 'thread-button'}
                           >
-                            <button
-                              type="button"
-                              onClick={() => onSelectThread(thread.id)}
-                              onDoubleClick={(event) => {
-                                event.preventDefault();
-                                setEditingThreadId(thread.id);
-                                setEditingValue(thread.title);
-                                setEditingOriginal(thread.title);
-                              }}
-                              className={active ? 'thread-button active' : 'thread-button'}
-                            >
-                              <span className="thread-main-row">
-                                {editingThreadId === thread.id ? (
-                                  <input
-                                    className="thread-rename-input"
-                                    value={editingValue}
-                                    maxLength={80}
-                                    autoFocus
-                                    onChange={(event) => setEditingValue(event.target.value)}
-                                    onClick={(event) => event.stopPropagation()}
-                                    onKeyDown={async (event) => {
-                                      if (event.key === 'Escape') {
-                                        event.preventDefault();
-                                        setEditingThreadId(null);
-                                        setEditingValue('');
-                                        setEditingOriginal('');
-                                      }
-                                      if (event.key === 'Enter') {
-                                        event.preventDefault();
-                                        await commitRename(thread);
-                                      }
-                                    }}
-                                    onBlur={async () => {
-                                      await commitRename(thread);
-                                    }}
-                                  />
-                                ) : (
-                                  <span
-                                    className="thread-title"
-                                    onDoubleClick={(event) => {
+                            <span className="thread-main-row">
+                              {editingThreadId === thread.id ? (
+                                <input
+                                  className="thread-rename-input"
+                                  value={editingValue}
+                                  maxLength={80}
+                                  autoFocus
+                                  onChange={(event) => setEditingValue(event.target.value)}
+                                  onClick={(event) => event.stopPropagation()}
+                                  onKeyDown={async (event) => {
+                                    if (event.key === 'Escape') {
                                       event.preventDefault();
-                                      event.stopPropagation();
-                                      setEditingThreadId(thread.id);
-                                      setEditingValue(thread.title);
-                                      setEditingOriginal(thread.title);
-                                    }}
-                                  >
-                                    {thread.title}
-                                  </span>
-                                )}
-                                <span className="thread-time">{formatRelativeShort(thread.updatedAt, nowMs)}</span>
-                              </span>
-
-                              {statusLine ? (
-                                <span className="thread-status-row">
-                                  {activeRun ? (
-                                    <span className="thread-running" title="Claude is processing a response">
-                                      <span className="spinner-dot" />
-                                      <span>{statusLine}</span>
-                                    </span>
-                                  ) : (
-                                    <span className="thread-last-status">{statusLine}</span>
-                                  )}
+                                      setEditingThreadId(null);
+                                      setEditingValue('');
+                                      setEditingOriginal('');
+                                    }
+                                    if (event.key === 'Enter') {
+                                      event.preventDefault();
+                                      await commitRename(thread);
+                                    }
+                                  }}
+                                  onBlur={async () => {
+                                    await commitRename(thread);
+                                  }}
+                                />
+                              ) : (
+                                <span
+                                  className="thread-title"
+                                  onDoubleClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    setEditingThreadId(thread.id);
+                                    setEditingValue(thread.title);
+                                    setEditingOriginal(thread.title);
+                                  }}
+                                >
+                                  {thread.title}
                                 </span>
-                              ) : null}
-                            </button>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )
-                ) : null}
+                              )}
+                              <span className="thread-time">{formatRelativeShort(thread.updatedAt, nowMs)}</span>
+                            </span>
+
+                            {statusLine ? (
+                              <span className="thread-status-row">
+                                {activeRun ? (
+                                  <span className="thread-running" title="Claude is processing a response">
+                                    <span className="spinner-dot" />
+                                    <span>{statusLine}</span>
+                                  </span>
+                                ) : (
+                                  <span className="thread-last-status">{statusLine}</span>
+                                )}
+                              </span>
+                            ) : null}
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
               </li>
             );
           })}
         </ul>
       </div>
+
+      <footer className="left-rail-footer">
+        <button type="button" className="icon-ghost-button footer-settings-button" onClick={onOpenSettings}>
+          Settings
+        </button>
+      </footer>
 
       {contextMenu ? (
         <div className="thread-context-menu" ref={contextMenuRef} style={{ left: contextMenu.x, top: contextMenu.y }}>
