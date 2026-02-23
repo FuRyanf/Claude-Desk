@@ -361,6 +361,62 @@ describe('Thread lifecycle integration', () => {
     expect(pullInvocation).toBeLessThan(createInvocation);
   });
 
+  it('shows the pulled commit id in a popup toast after successful pre-step', async () => {
+    const user = userEvent.setup();
+    mocks.api.gitPullMasterForNewThread.mockResolvedValueOnce({
+      outcome: 'pulled',
+      message: 'Checked out master and pulled latest changes to commit 4befdb3.'
+    });
+    render(<App />);
+
+    const workspaceRow = await screen.findByRole('button', { name: /Workspace/i });
+    await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Enable git pull on master for new threads' }));
+    await waitFor(() => {
+      expect(mocks.api.setWorkspaceGitPullOnMasterForNewThreads).toHaveBeenCalledWith('ws-1', true);
+    });
+
+    await user.click(screen.getByTestId('workspace-new-thread-ws-1'));
+    expect(await screen.findByText('Checked out master and pulled latest changes to commit 4befdb3.')).toBeInTheDocument();
+  });
+
+  it('uses the toggled pull setting immediately when creating a thread before setting persistence resolves', async () => {
+    const user = userEvent.setup();
+
+    let resolveSettingUpdate: (() => void) | null = null;
+    mocks.api.setWorkspaceGitPullOnMasterForNewThreads.mockImplementationOnce(
+      async (_workspaceId: string, enabled: boolean) =>
+        await new Promise((resolve) => {
+          resolveSettingUpdate = () =>
+            resolve({
+              id: 'ws-1',
+              name: 'Workspace',
+              path: '/tmp/workspace',
+              gitPullOnMasterForNewThreads: enabled,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            });
+        })
+    );
+
+    render(<App />);
+
+    const workspaceRow = await screen.findByRole('button', { name: /Workspace/i });
+    await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Enable git pull on master for new threads' }));
+
+    await user.click(screen.getByTestId('workspace-new-thread-ws-1'));
+    await waitFor(() => {
+      expect(mocks.api.gitPullMasterForNewThread).toHaveBeenCalledWith('/tmp/workspace');
+    });
+
+    resolveSettingUpdate?.();
+
+    await waitFor(() => {
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
+    });
+  });
+
   it('skips git pull when dirty and still creates thread with non-blocking error toast', async () => {
     const user = userEvent.setup();
     mocks.api.gitPullMasterForNewThread.mockResolvedValueOnce({

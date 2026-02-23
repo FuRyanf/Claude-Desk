@@ -90,6 +90,22 @@ function DotsIcon() {
   );
 }
 
+function ArrowUpIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 18V6M12 6l-4.5 4.5M12 6l4.5 4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ArrowDownIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 6v12M12 18l-4.5-4.5M12 18l4.5-4.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function TrashIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -133,24 +149,19 @@ function formatRecencyShort(lastUserInputAt: number | null, nowMs: number): stri
   return `${diffDays}d`;
 }
 
-function buildReorderedWorkspaceIds(
-  workspaces: Workspace[],
-  draggedWorkspaceId: string,
-  targetWorkspaceId: string
-): string[] | null {
-  if (!draggedWorkspaceId || !targetWorkspaceId || draggedWorkspaceId === targetWorkspaceId) {
-    return null;
-  }
-
+function buildShiftedWorkspaceIds(workspaces: Workspace[], workspaceId: string, offset: -1 | 1): string[] | null {
   const ids = workspaces.map((workspace) => workspace.id);
-  const fromIndex = ids.indexOf(draggedWorkspaceId);
-  const toIndex = ids.indexOf(targetWorkspaceId);
-  if (fromIndex < 0 || toIndex < 0) {
+  const fromIndex = ids.indexOf(workspaceId);
+  if (fromIndex < 0) {
     return null;
   }
-
-  ids.splice(fromIndex, 1);
-  ids.splice(toIndex, 0, draggedWorkspaceId);
+  const toIndex = fromIndex + offset;
+  if (toIndex < 0 || toIndex >= ids.length) {
+    return null;
+  }
+  const moving = ids[fromIndex];
+  ids[fromIndex] = ids[toIndex];
+  ids[toIndex] = moving;
   return ids;
 }
 
@@ -293,8 +304,6 @@ function LeftRailComponent({
   const [contextMenu, setContextMenu] = React.useState<ThreadContextMenuState | null>(null);
   const [workspaceContextMenu, setWorkspaceContextMenu] = React.useState<WorkspaceContextMenuState | null>(null);
   const [expandedWorkspaceIds, setExpandedWorkspaceIds] = React.useState<Record<string, boolean>>({});
-  const [draggingWorkspaceId, setDraggingWorkspaceId] = React.useState<string | null>(null);
-  const [dropTargetWorkspaceId, setDropTargetWorkspaceId] = React.useState<string | null>(null);
   const contextMenuRef = React.useRef<HTMLDivElement | null>(null);
   const workspaceContextMenuRef = React.useRef<HTMLDivElement | null>(null);
   const renderCountRef = React.useRef(0);
@@ -444,7 +453,7 @@ function LeftRailComponent({
 
       <div className="thread-groups">
         <ul className="workspace-groups">
-          {workspaces.map((workspace) => {
+          {workspaces.map((workspace, workspaceIndex) => {
             const isSelectedWorkspace = workspace.id === selectedWorkspaceId;
             const isExpanded = expandedWorkspaceIds[workspace.id] !== false;
             const gitPullEnabled = Boolean(workspace.gitPullOnMasterForNewThreads);
@@ -464,62 +473,15 @@ function LeftRailComponent({
                 className={
                   [
                     'workspace-group',
-                    isSelectedWorkspace ? 'selected' : '',
-                    draggingWorkspaceId === workspace.id ? 'dragging' : '',
-                    dropTargetWorkspaceId === workspace.id && draggingWorkspaceId !== workspace.id ? 'drop-target' : ''
+                    isSelectedWorkspace ? 'selected' : ''
                   ]
                     .filter(Boolean)
                     .join(' ')
                 }
                 data-expanded={isExpanded ? 'true' : 'false'}
-                onDragOver={(event) => {
-                  if (!draggingWorkspaceId) {
-                    return;
-                  }
-                  event.preventDefault();
-                  if (dropTargetWorkspaceId !== workspace.id) {
-                    setDropTargetWorkspaceId(workspace.id);
-                  }
-                }}
-                onDrop={async (event) => {
-                  event.preventDefault();
-                  if (!draggingWorkspaceId) {
-                    return;
-                  }
-
-                  const nextWorkspaceOrder = buildReorderedWorkspaceIds(
-                    workspaces,
-                    draggingWorkspaceId,
-                    workspace.id
-                  );
-                  setDraggingWorkspaceId(null);
-                  setDropTargetWorkspaceId(null);
-                  if (!nextWorkspaceOrder) {
-                    return;
-                  }
-                  await onReorderWorkspaces(nextWorkspaceOrder);
-                }}
               >
                 <div className="workspace-group-container">
-                  <div
-                    className="workspace-group-row"
-                    draggable
-                    onDragStart={(event) => {
-                      const target = event.target as HTMLElement;
-                      if (target.closest('.workspace-action-button')) {
-                        event.preventDefault();
-                        return;
-                      }
-                      event.dataTransfer.effectAllowed = 'move';
-                      event.dataTransfer.setData('text/plain', workspace.id);
-                      setDraggingWorkspaceId(workspace.id);
-                      setDropTargetWorkspaceId(workspace.id);
-                    }}
-                    onDragEnd={() => {
-                      setDraggingWorkspaceId(null);
-                      setDropTargetWorkspaceId(null);
-                    }}
-                  >
+                  <div className="workspace-group-row">
                     <button
                       type="button"
                       className="workspace-group-button"
@@ -585,6 +547,48 @@ function LeftRailComponent({
                       </span>
                     </button>
                     <span className="workspace-group-actions">
+                      {workspaceIndex > 0 ? (
+                        <button
+                          type="button"
+                          className="workspace-action-button workspace-order-button"
+                          aria-label="Move project up"
+                          title="Move project up"
+                          data-testid={`workspace-move-up-${workspace.id}`}
+                          tabIndex={-1}
+                          onClick={async (event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            const nextWorkspaceOrder = buildShiftedWorkspaceIds(workspaces, workspace.id, -1);
+                            if (!nextWorkspaceOrder) {
+                              return;
+                            }
+                            await onReorderWorkspaces(nextWorkspaceOrder);
+                          }}
+                        >
+                          <ArrowUpIcon />
+                        </button>
+                      ) : null}
+                      {workspaceIndex < workspaces.length - 1 ? (
+                        <button
+                          type="button"
+                          className="workspace-action-button workspace-order-button"
+                          aria-label="Move project down"
+                          title="Move project down"
+                          data-testid={`workspace-move-down-${workspace.id}`}
+                          tabIndex={-1}
+                          onClick={async (event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            const nextWorkspaceOrder = buildShiftedWorkspaceIds(workspaces, workspace.id, 1);
+                            if (!nextWorkspaceOrder) {
+                              return;
+                            }
+                            await onReorderWorkspaces(nextWorkspaceOrder);
+                          }}
+                        >
+                          <ArrowDownIcon />
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         className="workspace-action-button"

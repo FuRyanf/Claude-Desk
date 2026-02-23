@@ -83,6 +83,16 @@ fn run_git_checked(workspace_path: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn run_git_success(workspace_path: &str, args: &[&str]) -> Result<bool> {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(workspace_path)
+        .env("GIT_TERMINAL_PROMPT", "0");
+    let output = run_command_with_timeout(command, GIT_TIMEOUT, "git command")?;
+    Ok(output.status.success())
+}
+
 fn is_git_repo(workspace_path: &str) -> Result<bool> {
     let is_repo = run_git(workspace_path, &["rev-parse", "--is-inside-work-tree"])?;
     Ok(is_repo.trim() == "true")
@@ -110,9 +120,10 @@ fn has_repository_operation_in_progress(workspace_path: &str) -> Result<bool> {
     Ok(markers.iter().any(|marker| fs::metadata(git_dir.join(marker)).is_ok()))
 }
 
-fn is_workspace_clean(workspace_path: &str) -> Result<bool> {
-    let status = run_git(workspace_path, &["status", "--porcelain"])?;
-    Ok(status.trim().is_empty())
+fn has_tracked_workspace_changes(workspace_path: &str) -> Result<bool> {
+    let unstaged_clean = run_git_success(workspace_path, &["diff", "--quiet"])?;
+    let staged_clean = run_git_success(workspace_path, &["diff", "--cached", "--quiet"])?;
+    Ok(!(unstaged_clean && staged_clean))
 }
 
 fn has_upstream(workspace_path: &str) -> Result<bool> {
@@ -121,6 +132,14 @@ fn has_upstream(workspace_path: &str) -> Result<bool> {
         &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
     )?;
     Ok(!upstream.trim().is_empty())
+}
+
+fn short_head_commit(workspace_path: &str) -> Result<Option<String>> {
+    let commit = run_git(workspace_path, &["rev-parse", "--short", "HEAD"])?;
+    if commit.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(commit.trim().to_string()))
 }
 
 pub fn get_git_info(workspace_path: &str) -> Result<Option<GitInfo>> {
@@ -310,10 +329,10 @@ pub fn git_pull_master_for_new_thread(workspace_path: &str) -> Result<GitPullFor
         });
     }
 
-    if !is_workspace_clean(workspace_path)? {
+    if has_tracked_workspace_changes(workspace_path)? {
         return Ok(GitPullForNewThreadResult {
             outcome: "skipped".to_string(),
-            message: "Skipped git pull: working tree is dirty. Commit or stash changes first."
+            message: "Skipped git pull: tracked files have local changes. Commit, stash, or discard them first."
                 .to_string(),
         });
     }
@@ -335,6 +354,8 @@ pub fn git_pull_master_for_new_thread(workspace_path: &str) -> Result<GitPullFor
         });
     }
 
+    let before_pull_commit = short_head_commit(workspace_path)?;
+
     if let Err(error) = run_git_checked(workspace_path, &["pull", "--ff-only"]) {
         return Ok(GitPullForNewThreadResult {
             outcome: "failed".to_string(),
@@ -342,9 +363,21 @@ pub fn git_pull_master_for_new_thread(workspace_path: &str) -> Result<GitPullFor
         });
     }
 
+    let after_pull_commit = short_head_commit(workspace_path)?;
+    let message = match after_pull_commit {
+        Some(commit) => {
+            if before_pull_commit.as_deref() == Some(commit.as_str()) {
+                format!("Master already up to date at commit {commit}.")
+            } else {
+                format!("Checked out master and pulled latest changes to commit {commit}.")
+            }
+        }
+        None => "Checked out master and pulled latest changes.".to_string(),
+    };
+
     Ok(GitPullForNewThreadResult {
         outcome: "pulled".to_string(),
-        message: "Checked out master and pulled latest changes.".to_string(),
+        message,
     })
 }
 
@@ -405,6 +438,33 @@ mod tests {
             .expect("git info should resolve after modification")
             .expect("repo should still be detected");
         assert!(dirty.is_dirty);
+
+        let _ = fs::remove_dir_all(temp_repo);
+    }
+
+    #[test]
+    fn tracked_workspace_change_detection_ignores_untracked_files() {
+        let temp_repo =
+            std::env::temp_dir().join(format!("claude-desk-git-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_repo).expect("failed to create temp repo");
+
+        git(&temp_repo, &["init"]);
+        git(&temp_repo, &["config", "user.email", "test@example.com"]);
+        git(&temp_repo, &["config", "user.name", "Claude Desk Test"]);
+
+        fs::write(temp_repo.join("README.md"), "initial\n").expect("failed to write file");
+        git(&temp_repo, &["add", "README.md"]);
+        git(&temp_repo, &["commit", "-m", "initial"]);
+
+        fs::write(temp_repo.join("UNTRACKED.md"), "scratch\n").expect("failed to write untracked file");
+        let only_untracked_dirty = has_tracked_workspace_changes(temp_repo.to_string_lossy().as_ref())
+            .expect("tracked change check should succeed");
+        assert!(!only_untracked_dirty);
+
+        fs::write(temp_repo.join("README.md"), "changed\n").expect("failed to modify tracked file");
+        let tracked_dirty = has_tracked_workspace_changes(temp_repo.to_string_lossy().as_ref())
+            .expect("tracked change check should succeed after tracked modification");
+        assert!(tracked_dirty);
 
         let _ = fs::remove_dir_all(temp_repo);
     }

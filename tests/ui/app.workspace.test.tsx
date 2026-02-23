@@ -1,9 +1,9 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => {
-  const newWorkspace = {
+  const workspaceOne = {
     id: 'ws-added',
     name: 'workspace-added',
     path: '/tmp/workspace-added',
@@ -11,20 +11,36 @@ const mocks = vi.hoisted(() => {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
+  const workspaceTwo = {
+    id: 'ws-second',
+    name: 'workspace-second',
+    path: '/tmp/workspace-second',
+    gitPullOnMasterForNewThreads: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
 
-  let workspaceState = [] as typeof newWorkspace[];
+  let workspaceState = [] as Array<typeof workspaceOne>;
 
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
     listWorkspaces: vi.fn(async () => workspaceState),
     addWorkspace: vi.fn(async () => {
-      workspaceState = [newWorkspace];
-      return newWorkspace;
+      workspaceState = [workspaceOne];
+      return workspaceOne;
     }),
     removeWorkspace: vi.fn(async (workspaceId: string) => {
       const before = workspaceState.length;
       workspaceState = workspaceState.filter((workspace) => workspace.id !== workspaceId);
       return workspaceState.length !== before;
+    }),
+    setWorkspaceOrder: vi.fn(async (workspaceIds: string[]) => {
+      const byId = new Map(workspaceState.map((workspace) => [workspace.id, workspace]));
+      const reordered = workspaceIds
+        .map((workspaceId) => byId.get(workspaceId))
+        .filter((workspace): workspace is typeof workspaceOne => Boolean(workspace));
+      workspaceState = [...reordered, ...workspaceState.filter((workspace) => !workspaceIds.includes(workspace.id))];
+      return workspaceState;
     }),
     setWorkspaceGitPullOnMasterForNewThreads: vi.fn(async (workspaceId: string, enabled: boolean) => {
       workspaceState = workspaceState.map((workspace) =>
@@ -32,7 +48,7 @@ const mocks = vi.hoisted(() => {
           ? { ...workspace, gitPullOnMasterForNewThreads: enabled, updatedAt: new Date().toISOString() }
           : workspace
       );
-      return workspaceState.find((workspace) => workspace.id === workspaceId) ?? newWorkspace;
+      return workspaceState.find((workspace) => workspace.id === workspaceId) ?? workspaceOne;
     }),
     getGitInfo: vi.fn(async () => null),
     getGitDiffSummary: vi.fn(async () => ({ stat: '', diffExcerpt: '' })),
@@ -124,6 +140,13 @@ const mocks = vi.hoisted(() => {
   return {
     api,
     reset,
+    seedWorkspaces: (next: Array<typeof workspaceOne>) => {
+      workspaceState = next.map((workspace) => ({ ...workspace }));
+    },
+    sampleWorkspaces: {
+      workspaceOne,
+      workspaceTwo
+    },
     openDialog,
     confirmDialog,
     onRunStream: vi.fn(async () => () => undefined),
@@ -149,6 +172,24 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }));
 
 import App from '../../src/App';
+
+function createDataTransfer(): DataTransfer {
+  const data = new Map<string, string>();
+  return {
+    dropEffect: 'none',
+    effectAllowed: 'all',
+    setData: (type: string, value: string) => {
+      data.set(type, value);
+    },
+    getData: (type: string) => data.get(type) ?? ''
+  } as unknown as DataTransfer;
+}
+
+function getWorkspaceOrder(): string[] {
+  return Array.from(document.querySelectorAll('.workspace-group .workspace-group-name'))
+    .map((node) => node.textContent?.trim() ?? '')
+    .filter((value) => value.length > 0);
+}
 
 describe('Workspace add flow', () => {
   beforeEach(() => {
@@ -224,5 +265,53 @@ describe('Workspace add flow', () => {
     expect(mocks.confirmDialog).toHaveBeenCalled();
     expect(mocks.api.removeWorkspace).not.toHaveBeenCalled();
     expect(await screen.findByRole('button', { name: /workspace-added/i })).toBeInTheDocument();
+  });
+
+  it('does not reorder workspaces by drag-and-drop when drag is disabled', async () => {
+    mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne, mocks.sampleWorkspaces.workspaceTwo]);
+    render(<App />);
+
+    await screen.findByRole('button', { name: /workspace-added/i });
+    expect(getWorkspaceOrder()).toEqual(['workspace-added', 'workspace-second']);
+
+    const sourceRow = screen.getByRole('button', { name: /workspace-added/i }).closest('.workspace-group-row');
+    const targetGroup = screen.getByRole('button', { name: /workspace-second/i }).closest('.workspace-group');
+    expect(sourceRow).not.toBeNull();
+    expect(targetGroup).not.toBeNull();
+
+    const dataTransfer = createDataTransfer();
+    fireEvent.dragStart(sourceRow as HTMLElement, { dataTransfer });
+    fireEvent.dragOver(targetGroup as HTMLElement, { dataTransfer });
+    fireEvent.drop(targetGroup as HTMLElement, { dataTransfer });
+    fireEvent.dragEnd(sourceRow as HTMLElement, { dataTransfer });
+
+    expect(mocks.api.setWorkspaceOrder).not.toHaveBeenCalled();
+    expect(getWorkspaceOrder()).toEqual(['workspace-added', 'workspace-second']);
+  });
+
+  it('reorders workspaces with move arrows when drag events are unavailable', async () => {
+    const user = userEvent.setup();
+    mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne, mocks.sampleWorkspaces.workspaceTwo]);
+    render(<App />);
+
+    await screen.findByRole('button', { name: /workspace-added/i });
+    expect(getWorkspaceOrder()).toEqual(['workspace-added', 'workspace-second']);
+
+    const moveUpFirst = screen.queryByTestId('workspace-move-up-ws-added');
+    const moveDownFirst = screen.getByTestId('workspace-move-down-ws-added');
+    const moveDownLast = screen.queryByTestId('workspace-move-down-ws-second');
+    expect(moveUpFirst).toBeNull();
+    expect(moveDownLast).toBeNull();
+
+    fireEvent.click(moveDownFirst);
+
+    await waitFor(() => {
+      expect(mocks.api.setWorkspaceOrder).toHaveBeenCalledWith(['ws-second', 'ws-added']);
+    });
+    await waitFor(() => {
+      expect(getWorkspaceOrder()).toEqual(['workspace-second', 'workspace-added']);
+    });
+    expect(screen.queryByTestId('workspace-move-down-ws-added')).toBeNull();
+    expect(screen.getByTestId('workspace-move-up-ws-added')).toBeInTheDocument();
   });
 });

@@ -336,21 +336,6 @@ body.sidebar-resizing {
   min-height: 38px;
   padding: 3px 4px;
   transition: background-color var(--motion-fast);
-  cursor: grab;
-}
-
-.workspace-group.dragging .workspace-group-row {
-  cursor: grabbing;
-}
-
-.workspace-group.dragging .workspace-group-container {
-  opacity: 0.72;
-  border-style: dashed;
-}
-
-.workspace-group.drop-target .workspace-group-container {
-  border-color: rgba(88, 136, 226, 0.56);
-  box-shadow: inset 0 0 0 1px rgba(88, 136, 226, 0.16);
 }
 
 .workspace-group-button {

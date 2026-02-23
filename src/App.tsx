@@ -1157,9 +1157,12 @@ export default function App() {
       if (workspace?.gitPullOnMasterForNewThreads) {
         try {
           const pullResult = await api.gitPullMasterForNewThread(workspace.path);
-          if (pullResult.outcome === 'pulled' && selectedWorkspaceIdRef.current === workspaceId) {
-            await refreshGitInfo();
-          } else if (pullResult.outcome !== 'pulled') {
+          if (pullResult.outcome === 'pulled') {
+            pushToast(pullResult.message, 'info');
+            if (selectedWorkspaceIdRef.current === workspaceId) {
+              await refreshGitInfo();
+            }
+          } else {
             pushToast(pullResult.message, 'error');
           }
         } catch (error) {
@@ -1171,6 +1174,7 @@ export default function App() {
         setSelectedWorkspace(workspaceId);
       }
       const thread = await createThread(workspaceId);
+      markThreadUserInput(workspaceId, thread.id);
       delete deletedThreadIdsRef.current[thread.id];
       setSelectedThread(thread.id);
       setTerminalFocusRequestId((current) => current + 1);
@@ -1178,6 +1182,7 @@ export default function App() {
     },
     [
       createThread,
+      markThreadUserInput,
       pushToast,
       refreshGitInfo,
       refreshThreadsForWorkspace,
@@ -1189,6 +1194,17 @@ export default function App() {
 
   const onSetWorkspaceGitPullOnMasterForNewThreads = useCallback(
     async (workspaceId: string, enabled: boolean) => {
+      setWorkspaces((current) =>
+        current.map((workspace) =>
+          workspace.id === workspaceId
+            ? {
+                ...workspace,
+                gitPullOnMasterForNewThreads: enabled,
+                updatedAt: new Date().toISOString()
+              }
+            : workspace
+        )
+      );
       try {
         const updatedWorkspace = await api.setWorkspaceGitPullOnMasterForNewThreads(workspaceId, enabled);
         setWorkspaces((current) =>
@@ -1196,9 +1212,10 @@ export default function App() {
         );
       } catch (error) {
         pushToast(`Workspace setting update failed: ${String(error)}`, 'error');
+        await refreshWorkspaces();
       }
     },
-    [pushToast]
+    [pushToast, refreshWorkspaces]
   );
 
   const onReorderWorkspaces = useCallback(

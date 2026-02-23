@@ -153,6 +153,9 @@ const mocks = vi.hoisted(() => {
   return {
     api,
     reset,
+    prependThread: (thread: (typeof baseThreads)[number]) => {
+      threadState = [thread, ...threadState];
+    },
     emitTerminalData: (event: { sessionId: string; data: string }) => {
       terminalDataHandler?.(event);
     },
@@ -285,6 +288,49 @@ describe('Left rail recency and sorting semantics', () => {
     await user.click(screen.getByRole('button', { name: 'submit-input' }));
     await waitFor(() => {
       expect(getThreadOrder()).toEqual(['Older thread', 'Newer thread']);
+    });
+  });
+
+  it('puts a newly created thread at the top even when another thread has recent submitted input', async () => {
+    const user = userEvent.setup();
+    mocks.api.createThread.mockImplementationOnce(async () => {
+      const next = {
+        id: 'thread-new',
+        workspaceId: 'ws-1',
+        agentId: 'claude-code',
+        fullAccess: false,
+        enabledSkills: [] as string[],
+        title: 'Newest thread',
+        isArchived: false,
+        lastRunStatus: 'Idle' as const,
+        lastRunStartedAt: null,
+        lastRunEndedAt: null,
+        claudeSessionId: null,
+        lastResumeAt: null,
+        lastNewSessionAt: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      mocks.prependThread(next);
+      return next;
+    });
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Newer thread/i });
+    await user.click(screen.getByRole('button', { name: /Older thread/i }));
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
+    });
+    await user.click(screen.getByRole('button', { name: 'submit-input' }));
+    await waitFor(() => {
+      expect(getThreadOrder()).toEqual(['Older thread', 'Newer thread']);
+    });
+
+    await user.click(screen.getByTestId('workspace-new-thread-ws-1'));
+
+    await waitFor(() => {
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
+      expect(getThreadOrder()).toEqual(['Newest thread', 'Older thread', 'Newer thread']);
     });
   });
 });
