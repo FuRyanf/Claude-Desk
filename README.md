@@ -20,6 +20,7 @@ Claude Desk solves this by keeping Claude CLI local while adding a desktop contr
 - Workspace + thread management in one left rail.
 - One-click start/resume for thread-scoped Claude sessions.
 - Embedded PTY terminal behavior (ANSI, keyboard, streaming) with local log persistence.
+- Attachment workflow for prompts: click `+` or drag files/images into the bottom bar, then send with your next Enter submit.
 - Built-in project helpers (open folder/terminal, git branch/status context).
 - Optional per-thread controls like `Full access`, plus thread-level settings such as agent/skills.
 

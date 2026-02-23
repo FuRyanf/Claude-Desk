@@ -180,8 +180,9 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }));
 
 vi.mock('../../src/components/TerminalPanel', () => ({
-  TerminalPanel: (props: { onData?: (data: string) => void }) => (
+  TerminalPanel: (props: { content?: string; onData?: (data: string) => void }) => (
     <section className="terminal-panel" data-testid="terminal-panel-mock">
+      <pre data-testid="terminal-content-mock">{props.content ?? ''}</pre>
       <button type="button" onClick={() => props.onData?.('   First prompt title line\r')}>
         send-first-prompt
       </button>
@@ -223,6 +224,67 @@ describe('Sidebar behavior', () => {
     });
 
     expect(screen.queryByTestId('header-output-age')).not.toBeInTheDocument();
+  });
+
+  it('merges output received during pending snapshot hydration so first prompt is visible without typing', async () => {
+    let resolveSnapshot: ((value: string) => void) | null = null;
+    mocks.api.terminalReadOutput.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSnapshot = resolve;
+        })
+    );
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /First thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-1' }));
+    });
+
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-1', data: '\n> Try "create a test"\n' });
+    });
+
+    act(() => {
+      resolveSnapshot?.('Claude Code banner\n');
+    });
+
+    await waitFor(() => {
+      const rendered = screen.getByTestId('terminal-content-mock').textContent ?? '';
+      expect(rendered).toContain('Claude Code banner');
+      expect(rendered).toContain('Try "create a test"');
+    });
+  });
+
+  it('queues attachments and sends them with the next Enter submit', async () => {
+    const user = userEvent.setup();
+    mocks.openDialog.mockResolvedValueOnce(['/tmp/screenshot.png', '/tmp/spec.md']);
+    render(<App />);
+
+    await screen.findByRole('button', { name: /First thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-1' }));
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Add attachments' }));
+
+    expect(mocks.api.terminalWrite).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'send-first-prompt' }));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalWrite).toHaveBeenCalled();
+    });
+
+    const matchingCall = (mocks.api.terminalWrite as { mock: { calls: Array<[string, string]> } }).mock.calls.find(
+      ([, payload]) => payload.includes('/tmp/screenshot.png') && payload.includes('/tmp/spec.md')
+    );
+    expect(matchingCall).toBeDefined();
+    expect(matchingCall?.[0]).toBe('session-thread-1');
+    expect(matchingCall?.[1]).toContain('For image/screenshot files');
+    expect(matchingCall?.[1]).toContain('First prompt title line');
+    expect(matchingCall?.[1].endsWith('\r')).toBe(true);
   });
 
   it('sets title once from first prompt and does not change while typing or later submits', async () => {

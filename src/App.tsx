@@ -40,8 +40,11 @@ const SIDEBAR_WIDTH_DEFAULT = 320;
 const SIDEBAR_WIDTH_MIN = 260;
 const SIDEBAR_WIDTH_MAX = 460;
 const TERMINAL_LOG_BUFFER_CHARS = 280_000;
+const MAX_ATTACHMENT_DRAFTS = 24;
+const MAX_ATTACHMENTS_PER_MESSAGE = 12;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const TERMINAL_INPUT_ESCAPE_REGEX = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|O.)/g;
+const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
 
 interface PendingSessionStart {
   requestId: number;
@@ -111,6 +114,90 @@ function extractSubmittedInputLines(
   }
 
   return { nextBuffer: buffer, submittedLines };
+}
+
+function normalizeAttachmentPaths(raw: string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+
+  for (const value of raw) {
+    const path = value.trim();
+    if (!path || seen.has(path)) {
+      continue;
+    }
+    seen.add(path);
+    normalized.push(path);
+  }
+
+  return normalized;
+}
+
+function mergeAttachmentPaths(existing: string[], incoming: string[]): string[] {
+  const merged = [...existing];
+  const seen = new Set(existing);
+  for (const path of incoming) {
+    if (seen.has(path)) {
+      continue;
+    }
+    merged.push(path);
+    seen.add(path);
+    if (merged.length >= MAX_ATTACHMENT_DRAFTS) {
+      break;
+    }
+  }
+  return merged;
+}
+
+function isImageAttachmentPath(path: string): boolean {
+  const lastSegment = path.split(/[\\/]/).pop() ?? '';
+  const dotIndex = lastSegment.lastIndexOf('.');
+  if (dotIndex < 0) {
+    return false;
+  }
+  const extension = lastSegment.slice(dotIndex + 1).toLowerCase();
+  return IMAGE_ATTACHMENT_EXTENSIONS.has(extension);
+}
+
+function quotePathForPrompt(path: string): string {
+  return `"${path.replace(/"/g, '\\"')}"`;
+}
+
+function buildAttachmentPrompt(paths: string[]): string {
+  const limited = paths.slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
+  const omittedCount = Math.max(0, paths.length - limited.length);
+  const hasImages = limited.some(isImageAttachmentPath);
+
+  const parts = [
+    `Use these attachments from Claude Desk as context: ${limited.map(quotePathForPrompt).join(', ')}.`,
+    hasImages ? 'For image/screenshot files, analyze the visual content.' : 'Read each file directly from the provided path.',
+    'If any path cannot be accessed, tell me exactly which one failed.'
+  ];
+
+  if (omittedCount > 0) {
+    parts.push(
+      `${omittedCount} additional attachment${omittedCount === 1 ? '' : 's'} were selected but omitted to keep the prompt compact.`
+    );
+  }
+
+  return parts.join(' ');
+}
+
+function mergeSnapshotWithBufferedOutput(snapshot: string, buffered: string): string {
+  if (!snapshot) {
+    return buffered;
+  }
+  if (!buffered) {
+    return snapshot;
+  }
+
+  const maxOverlap = Math.min(snapshot.length, buffered.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    if (snapshot.endsWith(buffered.slice(0, overlap))) {
+      return `${snapshot}${buffered.slice(overlap)}`;
+    }
+  }
+
+  return `${snapshot}${buffered}`;
 }
 
 function clampTerminalLog(text: string): string {
@@ -200,6 +287,7 @@ export default function App() {
   const [terminalFocused, setTerminalFocused] = useState(false);
   const [terminalSize, setTerminalSize] = useState({ cols: 120, rows: 32 });
   const [lastTerminalLogByThread, setLastTerminalLogByThread] = useState<Record<string, string>>({});
+  const [draftAttachmentsByThread, setDraftAttachmentsByThread] = useState<Record<string, string[]>>({});
 
   const [settings, setSettings] = useState<Settings>({ claudeCliPath: null });
   const [detectedCliPath, setDetectedCliPath] = useState<string | null>(null);
@@ -230,12 +318,14 @@ export default function App() {
   const sessionStartRequestIdByThreadRef = useRef<Record<string, number>>({});
   const threadsByWorkspaceRef = useRef<Record<string, ThreadMetadata[]>>({});
   const lastTerminalLogByThreadRef = useRef<Record<string, string>>({});
+  const draftAttachmentsByThreadRef = useRef<Record<string, string[]>>({});
   const inputBufferByThreadRef = useRef<Record<string, string>>({});
   const threadTitleInitializedRef = useRef<Record<string, true>>({});
   const deletedThreadIdsRef = useRef<Record<string, true>>({});
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
   const pendingSnapshotBySessionRef = useRef<Record<string, true>>({});
+  const bufferedOutputBySessionRef = useRef<Record<string, string>>({});
   const sessionMetaBySessionIdRef = useRef<
     Record<
       string,
@@ -273,6 +363,13 @@ export default function App() {
     return lastTerminalLogByThread[selectedThreadId] ?? '';
   }, [lastTerminalLogByThread, selectedThreadId]);
 
+  const selectedThreadDraftAttachments = useMemo(() => {
+    if (!selectedThreadId) {
+      return [];
+    }
+    return draftAttachmentsByThread[selectedThreadId] ?? [];
+  }, [draftAttachmentsByThread, selectedThreadId]);
+
 
   useEffect(() => {
     selectedWorkspaceIdRef.current = selectedWorkspaceId;
@@ -289,6 +386,10 @@ export default function App() {
   useEffect(() => {
     lastTerminalLogByThreadRef.current = lastTerminalLogByThread;
   }, [lastTerminalLogByThread]);
+
+  useEffect(() => {
+    draftAttachmentsByThreadRef.current = draftAttachmentsByThread;
+  }, [draftAttachmentsByThread]);
 
   useEffect(() => {
     threadsByWorkspaceRef.current = threadsByWorkspace;
@@ -469,6 +570,58 @@ export default function App() {
     await api.terminalWrite(sessionId, pending);
   }, []);
 
+  const setAttachmentDraftForThread = useCallback((threadId: string, paths: string[]) => {
+    setDraftAttachmentsByThread((current) => {
+      const next = { ...current };
+      if (paths.length === 0) {
+        if (!(threadId in next)) {
+          return current;
+        }
+        delete next[threadId];
+        return next;
+      }
+      const existing = current[threadId] ?? [];
+      if (existing.length === paths.length && existing.every((item, index) => item === paths[index])) {
+        return current;
+      }
+      next[threadId] = paths;
+      return next;
+    });
+  }, []);
+
+  const addAttachmentDraftPaths = useCallback(
+    (threadId: string, rawPaths: string[]) => {
+      const incoming = normalizeAttachmentPaths(rawPaths);
+      if (incoming.length === 0) {
+        return 0;
+      }
+      const existing = draftAttachmentsByThreadRef.current[threadId] ?? [];
+      const merged = mergeAttachmentPaths(existing, incoming);
+      setAttachmentDraftForThread(threadId, merged);
+      return merged.length - existing.length;
+    },
+    [setAttachmentDraftForThread]
+  );
+
+  const clearAttachmentDraftForThread = useCallback(
+    (threadId: string) => {
+      setAttachmentDraftForThread(threadId, []);
+    },
+    [setAttachmentDraftForThread]
+  );
+
+  const removeAttachmentDraftPath = useCallback(
+    (threadId: string, path: string) => {
+      const existing = draftAttachmentsByThreadRef.current[threadId] ?? [];
+      if (existing.length === 0) {
+        return;
+      }
+      const next = existing.filter((item) => item !== path);
+      setAttachmentDraftForThread(threadId, next);
+    },
+    [setAttachmentDraftForThread]
+  );
+
   const appendTerminalLogChunk = useCallback((threadId: string, chunk: string) => {
     if (!chunk) {
       return;
@@ -499,6 +652,10 @@ export default function App() {
     });
   }, []);
 
+  const hasCachedTerminalLog = useCallback((threadId: string) => {
+    return (lastTerminalLogByThreadRef.current[threadId] ?? '').length > 0;
+  }, []);
+
   const hydrateSessionSnapshot = useCallback(
     async (threadId: string, sessionId: string, retries = 12, delayMs = 180) => {
       pendingSnapshotBySessionRef.current[sessionId] = true;
@@ -507,14 +664,18 @@ export default function App() {
         const liveSessionId = runStore.sessionForThread(threadId);
         if (!liveSessionId || liveSessionId !== sessionId) {
           delete pendingSnapshotBySessionRef.current[sessionId];
+          delete bufferedOutputBySessionRef.current[sessionId];
           return;
         }
 
         const snapshot = await api.terminalReadOutput(sessionId).catch(() => '');
         if (snapshot && snapshot.length > 0) {
+          const buffered = bufferedOutputBySessionRef.current[sessionId] ?? '';
+          delete bufferedOutputBySessionRef.current[sessionId];
+          const merged = mergeSnapshotWithBufferedOutput(snapshot, buffered);
           setLastTerminalLogByThread((current) => ({
             ...current,
-            [threadId]: clampTerminalLog(snapshot)
+            [threadId]: clampTerminalLog(merged)
           }));
           setStartingByThread((current) => removeThreadFlag(current, threadId));
           setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
@@ -532,11 +693,16 @@ export default function App() {
         });
       }
 
+      const buffered = bufferedOutputBySessionRef.current[sessionId] ?? '';
+      delete bufferedOutputBySessionRef.current[sessionId];
+      if (buffered.length > 0) {
+        appendTerminalLogChunk(threadId, buffered);
+      }
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
       delete pendingSnapshotBySessionRef.current[sessionId];
     },
-    [runStore]
+    [appendTerminalLogChunk, runStore]
   );
 
   const bumpSessionStartRequestId = useCallback((threadId: string) => {
@@ -564,8 +730,18 @@ export default function App() {
       const existing = runStore.sessionForThread(thread.id);
       if (existing) {
         setStartingByThread((current) => removeThreadFlag(current, thread.id));
-        setReadyByThread((current) => removeThreadFlag(current, thread.id));
-        void hydrateSessionSnapshot(thread.id, existing, 8, 150);
+        if (hasCachedTerminalLog(thread.id)) {
+          setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
+          delete pendingSnapshotBySessionRef.current[existing];
+          const buffered = bufferedOutputBySessionRef.current[existing] ?? '';
+          delete bufferedOutputBySessionRef.current[existing];
+          if (buffered.length > 0) {
+            appendTerminalLogChunk(thread.id, buffered);
+          }
+        } else {
+          setReadyByThread((current) => removeThreadFlag(current, thread.id));
+          void hydrateSessionSnapshot(thread.id, existing, 8, 150);
+        }
         await flushPendingThreadInput(thread.id, existing);
         return existing;
       }
@@ -661,7 +837,9 @@ export default function App() {
       applyThreadUpdate,
       bumpSessionStartRequestId,
       flushPendingThreadInput,
+      hasCachedTerminalLog,
       hydrateSessionSnapshot,
+      appendTerminalLogChunk,
       resetTerminalLog,
       runStore,
       terminalSize.cols,
@@ -669,6 +847,81 @@ export default function App() {
       workspaces
     ]
   );
+
+  const addAttachmentPathsForSelectedThread = useCallback(
+    (rawPaths: string[]) => {
+      if (!selectedThread) {
+        return 0;
+      }
+      return addAttachmentDraftPaths(selectedThread.id, rawPaths);
+    },
+    [addAttachmentDraftPaths, selectedThread]
+  );
+
+  const queueAttachmentPathsForSelectedThread = useCallback(
+    (rawPaths: string[], showMissingThreadToast = true) => {
+      if (!selectedThread) {
+        if (showMissingThreadToast) {
+          pushToast('Select a thread before adding attachments.', 'error');
+        }
+        return 0;
+      }
+      const added = addAttachmentPathsForSelectedThread(rawPaths);
+      if (added > 0) {
+        pushToast(`Queued ${added} attachment${added === 1 ? '' : 's'} for next Enter submit.`, 'info');
+      }
+      return added;
+    },
+    [addAttachmentPathsForSelectedThread, pushToast, selectedThread]
+  );
+
+  const pickAttachmentFiles = useCallback(async () => {
+    if (!selectedThread) {
+      pushToast('Select a thread before adding attachments.', 'error');
+      return;
+    }
+
+    try {
+      const picked = await open({
+        title: 'Add attachments',
+        directory: false,
+        multiple: true,
+        defaultPath: selectedWorkspace?.path
+      });
+
+      if (!picked) {
+        return;
+      }
+
+      queueAttachmentPathsForSelectedThread((Array.isArray(picked) ? picked : [picked]).filter(Boolean), false);
+    } catch (error) {
+      pushToast(`Attach failed: ${String(error)}`, 'error');
+    }
+  }, [pushToast, queueAttachmentPathsForSelectedThread, selectedThread, selectedWorkspace?.path]);
+
+  const addAttachmentPathsFromDrop = useCallback(
+    (paths: string[]) => {
+      return queueAttachmentPathsForSelectedThread(paths) > 0;
+    },
+    [queueAttachmentPathsForSelectedThread]
+  );
+
+  const removeSelectedThreadAttachmentPath = useCallback(
+    (path: string) => {
+      if (!selectedThread) {
+        return;
+      }
+      removeAttachmentDraftPath(selectedThread.id, path);
+    },
+    [removeAttachmentDraftPath, selectedThread]
+  );
+
+  const clearSelectedThreadAttachmentDraft = useCallback(() => {
+    if (!selectedThread) {
+      return;
+    }
+    clearAttachmentDraftForThread(selectedThread.id);
+  }, [clearAttachmentDraftForThread, selectedThread]);
 
   const addWorkspaceByPath = useCallback(
     async (path: string) => {
@@ -785,6 +1038,7 @@ export default function App() {
         runStore.finishSession(existingSessionId);
         delete sessionMetaBySessionIdRef.current[existingSessionId];
         delete pendingSnapshotBySessionRef.current[existingSessionId];
+        delete bufferedOutputBySessionRef.current[existingSessionId];
       }
 
       try {
@@ -861,6 +1115,7 @@ export default function App() {
       setThreadRunState(threadId, 'Canceled', null, endedAt);
       delete sessionMetaBySessionIdRef.current[sessionId];
       delete pendingSnapshotBySessionRef.current[sessionId];
+      delete bufferedOutputBySessionRef.current[sessionId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
     },
@@ -1124,13 +1379,13 @@ export default function App() {
           return;
         }
 
-        if (selectedThreadIdRef.current !== threadId) {
-          return;
+        const isSelectedThread = selectedThreadIdRef.current === threadId;
+        if (isSelectedThread) {
+          setStartingByThread((current) => removeThreadFlag(current, threadId));
+          setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
         }
-
-        setStartingByThread((current) => removeThreadFlag(current, threadId));
-        setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
         if (pendingSnapshotBySessionRef.current[event.sessionId]) {
+          bufferedOutputBySessionRef.current[event.sessionId] = `${bufferedOutputBySessionRef.current[event.sessionId] ?? ''}${event.data}`;
           return;
         }
         appendTerminalLogChunk(threadId, event.data);
@@ -1150,8 +1405,20 @@ export default function App() {
     const existingSessionId = runStore.sessionForThread(selectedThread.id);
     if (existingSessionId) {
       setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
-      setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
-      void hydrateSessionSnapshot(selectedThread.id, existingSessionId, 3, 100);
+      if (hasCachedTerminalLog(selectedThread.id)) {
+        setReadyByThread((current) =>
+          current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
+        );
+        delete pendingSnapshotBySessionRef.current[existingSessionId];
+        const buffered = bufferedOutputBySessionRef.current[existingSessionId] ?? '';
+        delete bufferedOutputBySessionRef.current[existingSessionId];
+        if (buffered.length > 0) {
+          appendTerminalLogChunk(selectedThread.id, buffered);
+        }
+      } else {
+        setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
+        void hydrateSessionSnapshot(selectedThread.id, existingSessionId, 3, 100);
+      }
       return;
     }
 
@@ -1165,7 +1432,15 @@ export default function App() {
       setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
       pushToast(`Failed to start Claude session: ${String(error)}`, 'error');
     });
-  }, [ensureSessionForThread, hydrateSessionSnapshot, pushToast, runStore, selectedThread]);
+  }, [
+    ensureSessionForThread,
+    hasCachedTerminalLog,
+    hydrateSessionSnapshot,
+    pushToast,
+    runStore,
+    selectedThread,
+    appendTerminalLogChunk
+  ]);
 
   useEffect(() => {
     let unlistenExit: (() => void) | null = null;
@@ -1175,6 +1450,7 @@ export default function App() {
         const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
         delete sessionMetaBySessionIdRef.current[event.sessionId];
         delete pendingSnapshotBySessionRef.current[event.sessionId];
+        delete bufferedOutputBySessionRef.current[event.sessionId];
 
         const endedThreadId = runStore.finishSession(event.sessionId);
         if (!endedThreadId) {
@@ -1539,17 +1815,26 @@ export default function App() {
                   markThreadUserInput(selectedThread.workspaceId, selectedThread.id);
                 }
 
+                let outboundData = data;
+                if (submittedLines.length > 0) {
+                  const attachmentDraft = draftAttachmentsByThreadRef.current[selectedThread.id] ?? [];
+                  if (attachmentDraft.length > 0) {
+                    outboundData = `${buildAttachmentPrompt(attachmentDraft)}\r${data}`;
+                    clearAttachmentDraftForThread(selectedThread.id);
+                  }
+                }
+
                 if (isSelectedThreadStarting || !selectedSessionId) {
                   return;
                 }
 
                 const sessionId = runStore.sessionForThread(selectedThread.id);
                 if (sessionId) {
-                  void api.terminalWrite(sessionId, data);
+                  void api.terminalWrite(sessionId, outboundData);
                   return;
                 }
 
-                pendingInputByThreadRef.current[selectedThread.id] = `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${data}`;
+                pendingInputByThreadRef.current[selectedThread.id] = `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
                 void ensureSessionForThread(selectedThread);
               }}
               onResize={(cols, rows) => {
@@ -1568,8 +1853,14 @@ export default function App() {
         <BottomBar
           workspace={selectedWorkspace}
           selectedThread={selectedThread}
+          attachmentDraftPaths={selectedThreadDraftAttachments}
+          attachmentsEnabled={Boolean(selectedThread)}
           fullAccessUpdating={fullAccessUpdating}
           gitInfo={gitInfo}
+          onPickAttachments={pickAttachmentFiles}
+          onAddAttachmentPaths={addAttachmentPathsFromDrop}
+          onRemoveAttachmentPath={removeSelectedThreadAttachmentPath}
+          onClearAttachmentPaths={clearSelectedThreadAttachmentDraft}
           onToggleFullAccess={toggleFullAccess}
           onLoadBranchSwitcher={onLoadBranchSwitcher}
           onCheckoutBranch={onCheckoutBranch}

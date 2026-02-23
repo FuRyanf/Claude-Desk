@@ -32,10 +32,10 @@ export function SettingsModal({
   return (
     <div className="modal-backdrop">
       <section className="modal settings-modal">
-        <h2>Settings</h2>
-        <p>Configure the Claude CLI path used by Claude Desk.</p>
+        <h2>Claude path</h2>
+        <p>Set the Claude CLI binary path used by Claude Desk.</p>
 
-        <label htmlFor="cli-path">Claude CLI path</label>
+        <label htmlFor="cli-path">Claude path</label>
         <input
           id="cli-path"
           type="text"

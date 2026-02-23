@@ -34,6 +34,20 @@ interface WorkspaceContextMenuState {
   y: number;
 }
 
+const CONTEXT_MENU_WIDTH = 220;
+const THREAD_CONTEXT_MENU_HEIGHT = 116;
+const WORKSPACE_CONTEXT_MENU_HEIGHT = 168;
+const CONTEXT_MENU_MARGIN = 8;
+
+function clampMenuCoordinate(x: number, y: number, width: number, height: number) {
+  const maxX = Math.max(CONTEXT_MENU_MARGIN, window.innerWidth - width - CONTEXT_MENU_MARGIN);
+  const maxY = Math.max(CONTEXT_MENU_MARGIN, window.innerHeight - height - CONTEXT_MENU_MARGIN);
+  return {
+    x: Math.max(CONTEXT_MENU_MARGIN, Math.min(x, maxX)),
+    y: Math.max(CONTEXT_MENU_MARGIN, Math.min(y, maxY))
+  };
+}
+
 function FolderIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -342,8 +356,12 @@ function LeftRailComponent({
 
   const onOpenThreadContextMenu = React.useCallback((event: React.MouseEvent, thread: ThreadMetadata) => {
     event.preventDefault();
-    const x = Math.min(event.clientX, window.innerWidth - 180);
-    const y = Math.min(event.clientY, window.innerHeight - 160);
+    const { x, y } = clampMenuCoordinate(
+      event.clientX,
+      event.clientY,
+      CONTEXT_MENU_WIDTH,
+      THREAD_CONTEXT_MENU_HEIGHT
+    );
     setWorkspaceContextMenu(null);
     setContextMenu({ thread, x, y });
   }, []);
@@ -374,14 +392,23 @@ function LeftRailComponent({
           <div className="codex-rail-toolbar">
             <button
               type="button"
+              className="icon-ghost-button claude-path-button"
+              onClick={onOpenSettings}
+              title="Configure Claude path"
+            >
+              Claude path
+            </button>
+            <button
+              type="button"
               className="icon-ghost-button add-project-button"
               onClick={onOpenWorkspacePicker}
               title="Add new project"
+              aria-label="Add new project"
             >
               <span className="rail-icon" aria-hidden="true">
                 <PlusIcon />
               </span>
-              <span>Add new project</span>
+              <span>Add project</span>
             </button>
           </div>
         </div>
@@ -437,8 +464,12 @@ function LeftRailComponent({
                       }}
                       onContextMenu={(event) => {
                         event.preventDefault();
-                        const x = Math.min(event.clientX, window.innerWidth - 180);
-                        const y = Math.min(event.clientY, window.innerHeight - 140);
+                        const { x, y } = clampMenuCoordinate(
+                          event.clientX,
+                          event.clientY,
+                          CONTEXT_MENU_WIDTH,
+                          WORKSPACE_CONTEXT_MENU_HEIGHT
+                        );
                         setContextMenu(null);
                         setWorkspaceContextMenu({ workspace, x, y });
                       }}
@@ -487,8 +518,12 @@ function LeftRailComponent({
                           event.preventDefault();
                           event.stopPropagation();
                           const rect = event.currentTarget.getBoundingClientRect();
-                          const x = Math.min(rect.left, window.innerWidth - 180);
-                          const y = Math.min(rect.bottom + 8, window.innerHeight - 140);
+                          const { x, y } = clampMenuCoordinate(
+                            rect.right - CONTEXT_MENU_WIDTH,
+                            rect.bottom + 8,
+                            CONTEXT_MENU_WIDTH,
+                            WORKSPACE_CONTEXT_MENU_HEIGHT
+                          );
                           setContextMenu(null);
                           setWorkspaceContextMenu({ workspace, x, y });
                         }}
@@ -547,12 +582,6 @@ function LeftRailComponent({
           })}
         </ul>
       </div>
-
-      <footer className="left-rail-footer">
-        <button type="button" className="icon-ghost-button footer-settings-button" onClick={onOpenSettings}>
-          Settings
-        </button>
-      </footer>
 
       {contextMenu ? (
         <div className="thread-context-menu" ref={contextMenuRef} style={{ left: contextMenu.x, top: contextMenu.y }}>

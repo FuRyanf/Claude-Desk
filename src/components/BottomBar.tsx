@@ -10,12 +10,84 @@ interface BranchSwitcherSnapshot {
 interface BottomBarProps {
   workspace?: Workspace;
   selectedThread?: ThreadMetadata;
+  attachmentDraftPaths: string[];
+  attachmentsEnabled: boolean;
   fullAccessUpdating?: boolean;
   gitInfo: GitInfo | null;
+  onPickAttachments: () => Promise<void>;
+  onAddAttachmentPaths: (paths: string[]) => boolean;
+  onRemoveAttachmentPath: (path: string) => void;
+  onClearAttachmentPaths: () => void;
   onToggleFullAccess: () => Promise<void>;
   onLoadBranchSwitcher: () => Promise<BranchSwitcherSnapshot>;
   onCheckoutBranch: (branchName: string) => Promise<boolean>;
   onCreateAndCheckoutBranch: (branchName: string) => Promise<boolean>;
+}
+
+function decodeFileUriToPath(uri: string): string {
+  const trimmed = uri.trim();
+  if (!trimmed.startsWith('file://')) {
+    return trimmed;
+  }
+
+  let decoded = trimmed.replace(/^file:\/\//, '');
+  try {
+    decoded = decodeURIComponent(decoded);
+  } catch {
+    // keep raw value when URI decoding fails
+  }
+  if (/^\/[a-zA-Z]:\//.test(decoded)) {
+    return decoded.slice(1);
+  }
+  return decoded;
+}
+
+function normalizeDroppedPaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+
+  for (const path of paths) {
+    const trimmed = path.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+
+  return normalized;
+}
+
+function extractAttachmentPathsFromDrop(dataTransfer: DataTransfer): string[] {
+  const paths: string[] = [];
+
+  const uriList = dataTransfer.getData('text/uri-list');
+  if (uriList) {
+    for (const line of uriList.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) {
+        continue;
+      }
+      paths.push(decodeFileUriToPath(trimmed));
+    }
+  }
+
+  const plain = dataTransfer.getData('text/plain');
+  if (plain) {
+    const trimmed = plain.trim();
+    if (trimmed.startsWith('/') || trimmed.startsWith('~/') || trimmed.startsWith('file://')) {
+      paths.push(decodeFileUriToPath(trimmed));
+    }
+  }
+
+  for (const file of Array.from(dataTransfer.files)) {
+    const withPath = file as File & { path?: string };
+    if (withPath.path) {
+      paths.push(withPath.path);
+    }
+  }
+
+  return normalizeDroppedPaths(paths);
 }
 
 function BranchGlyph() {
@@ -38,8 +110,14 @@ function BranchGlyph() {
 export function BottomBar({
   workspace,
   selectedThread,
+  attachmentDraftPaths,
+  attachmentsEnabled,
   fullAccessUpdating = false,
   gitInfo,
+  onPickAttachments,
+  onAddAttachmentPaths,
+  onRemoveAttachmentPath,
+  onClearAttachmentPaths,
   onToggleFullAccess,
   onLoadBranchSwitcher,
   onCheckoutBranch,
@@ -52,6 +130,7 @@ export function BottomBar({
   const [isLoadingBranches, setIsLoadingBranches] = React.useState(false);
   const [isSwitchingBranch, setIsSwitchingBranch] = React.useState(false);
   const [highlightedIndex, setHighlightedIndex] = React.useState(0);
+  const [attachmentDragActive, setAttachmentDragActive] = React.useState(false);
 
   const popoverRef = React.useRef<HTMLDivElement | null>(null);
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -114,6 +193,65 @@ export function BottomBar({
       searchInputRef.current?.select();
     }, 0);
   }, [branchPopoverOpen]);
+
+  React.useEffect(() => {
+    setAttachmentDragActive(false);
+  }, [selectedThread?.id]);
+
+  React.useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+
+    if (!attachmentsEnabled) {
+      setAttachmentDragActive(false);
+      return () => undefined;
+    }
+
+    if (typeof window === 'undefined') {
+      return () => undefined;
+    }
+
+    const tauriWindow = window as unknown as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown };
+    if (!tauriWindow.__TAURI__ && !tauriWindow.__TAURI_INTERNALS__) {
+      return () => undefined;
+    }
+
+    void import('@tauri-apps/api/window')
+      .then(({ getCurrentWindow }) =>
+        getCurrentWindow().onDragDropEvent((event) => {
+          if (!active) {
+            return;
+          }
+          const payload = event.payload;
+          if (payload.type === 'over') {
+            setAttachmentDragActive(true);
+            return;
+          }
+          if (payload.type === 'drop') {
+            setAttachmentDragActive(false);
+            if (payload.paths.length > 0) {
+              onAddAttachmentPaths(payload.paths);
+            }
+            return;
+          }
+          setAttachmentDragActive(false);
+        })
+      )
+      .then((cleanup) => {
+        if (!active) {
+          cleanup();
+          return;
+        }
+        unlisten = cleanup;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      active = false;
+      setAttachmentDragActive(false);
+      unlisten?.();
+    };
+  }, [attachmentsEnabled, onAddAttachmentPaths]);
 
   const openBranchPopover = React.useCallback(async () => {
     if (!workspace || !gitInfo) {
@@ -210,6 +348,55 @@ export function BottomBar({
     [filteredBranches, highlightedIndex, runCheckout]
   );
 
+  const onAttachmentDragEnter = React.useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!attachmentsEnabled) {
+        return;
+      }
+      event.preventDefault();
+      setAttachmentDragActive(true);
+    },
+    [attachmentsEnabled]
+  );
+
+  const onAttachmentDragOver = React.useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!attachmentsEnabled) {
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      if (!attachmentDragActive) {
+        setAttachmentDragActive(true);
+      }
+    },
+    [attachmentDragActive, attachmentsEnabled]
+  );
+
+  const onAttachmentDragLeave = React.useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    const nextTarget = event.relatedTarget as Node | null;
+    if (nextTarget && event.currentTarget.contains(nextTarget)) {
+      return;
+    }
+    setAttachmentDragActive(false);
+  }, []);
+
+  const onAttachmentDrop = React.useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      setAttachmentDragActive(false);
+      if (!attachmentsEnabled) {
+        return;
+      }
+      const paths = extractAttachmentPathsFromDrop(event.dataTransfer);
+      if (paths.length === 0) {
+        return;
+      }
+      onAddAttachmentPaths(paths);
+    },
+    [attachmentsEnabled, onAddAttachmentPaths]
+  );
+
   return (
     <footer className="bottom-bar" data-testid="bottom-bar">
       <div className="bottom-bar-left">
@@ -300,6 +487,68 @@ export function BottomBar({
                 </button>
               </div>
             </section>
+          ) : null}
+        </div>
+      </div>
+
+      <div
+        className={attachmentDragActive ? 'attachment-composer attachment-drop-active' : 'attachment-composer'}
+        data-testid="attachment-composer"
+        onDragEnter={onAttachmentDragEnter}
+        onDragOver={onAttachmentDragOver}
+        onDragLeave={onAttachmentDragLeave}
+        onDrop={onAttachmentDrop}
+      >
+        <div className="attachment-composer-row">
+          <button
+            type="button"
+            className="attachment-add-button"
+            aria-label="Add attachments"
+            title="Add attachments"
+            onClick={() => void onPickAttachments()}
+            disabled={!attachmentsEnabled}
+          >
+            +
+          </button>
+
+          <div className="attachment-composer-main">
+            {attachmentDraftPaths.length > 0 ? (
+              <div className="attachment-chip-list" data-testid="attachment-chip-list">
+                {attachmentDraftPaths.map((path) => (
+                  <span key={path} className="attachment-chip" title={path}>
+                    <span className="attachment-chip-text">{path}</span>
+                    <button
+                      type="button"
+                      className="attachment-chip-remove"
+                      aria-label={`Remove attachment ${path}`}
+                      onClick={() => onRemoveAttachmentPath(path)}
+                      disabled={!attachmentsEnabled}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="attachment-drop-hint">
+                {attachmentsEnabled
+                  ? attachmentDragActive
+                    ? 'Drop files to attach'
+                    : 'Drop files here or click + to attach (sent on Enter)'
+                  : 'Select a thread to add attachments'}
+              </p>
+            )}
+          </div>
+
+          {attachmentDraftPaths.length > 0 ? (
+            <button
+              type="button"
+              className="attachment-clear-button"
+              onClick={onClearAttachmentPaths}
+              disabled={!attachmentsEnabled}
+            >
+              Clear
+            </button>
           ) : null}
         </div>
       </div>
