@@ -235,6 +235,7 @@ export default function App() {
   const deletedThreadIdsRef = useRef<Record<string, true>>({});
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
+  const pendingSnapshotBySessionRef = useRef<Record<string, true>>({});
   const sessionMetaBySessionIdRef = useRef<
     Record<
       string,
@@ -486,12 +487,26 @@ export default function App() {
     });
   }, []);
 
+  const resetTerminalLog = useCallback((threadId: string) => {
+    setLastTerminalLogByThread((current) => {
+      if ((current[threadId] ?? '') === '') {
+        return current;
+      }
+      return {
+        ...current,
+        [threadId]: ''
+      };
+    });
+  }, []);
+
   const hydrateSessionSnapshot = useCallback(
     async (threadId: string, sessionId: string, retries = 12, delayMs = 180) => {
+      pendingSnapshotBySessionRef.current[sessionId] = true;
       let attempts = 0;
       while (attempts < retries) {
         const liveSessionId = runStore.sessionForThread(threadId);
         if (!liveSessionId || liveSessionId !== sessionId) {
+          delete pendingSnapshotBySessionRef.current[sessionId];
           return;
         }
 
@@ -503,6 +518,7 @@ export default function App() {
           }));
           setStartingByThread((current) => removeThreadFlag(current, threadId));
           setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
+          delete pendingSnapshotBySessionRef.current[sessionId];
           return;
         }
 
@@ -518,6 +534,7 @@ export default function App() {
 
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
+      delete pendingSnapshotBySessionRef.current[sessionId];
     },
     [runStore]
   );
@@ -611,6 +628,7 @@ export default function App() {
           return '';
         }
         applyThreadUpdate(response.thread);
+        resetTerminalLog(thread.id);
 
         const startedAt = new Date().toISOString();
         runStore.bindSession(thread.id, sessionId, startedAt);
@@ -644,6 +662,7 @@ export default function App() {
       bumpSessionStartRequestId,
       flushPendingThreadInput,
       hydrateSessionSnapshot,
+      resetTerminalLog,
       runStore,
       terminalSize.cols,
       terminalSize.rows,
@@ -765,6 +784,7 @@ export default function App() {
         }
         runStore.finishSession(existingSessionId);
         delete sessionMetaBySessionIdRef.current[existingSessionId];
+        delete pendingSnapshotBySessionRef.current[existingSessionId];
       }
 
       try {
@@ -840,6 +860,7 @@ export default function App() {
       const endedAt = new Date().toISOString();
       setThreadRunState(threadId, 'Canceled', null, endedAt);
       delete sessionMetaBySessionIdRef.current[sessionId];
+      delete pendingSnapshotBySessionRef.current[sessionId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
     },
@@ -1109,6 +1130,9 @@ export default function App() {
 
         setStartingByThread((current) => removeThreadFlag(current, threadId));
         setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
+        if (pendingSnapshotBySessionRef.current[event.sessionId]) {
+          return;
+        }
         appendTerminalLogChunk(threadId, event.data);
       });
     };
@@ -1150,6 +1174,7 @@ export default function App() {
       unlistenExit = await onTerminalExit((event: TerminalExitEvent) => {
         const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
         delete sessionMetaBySessionIdRef.current[event.sessionId];
+        delete pendingSnapshotBySessionRef.current[event.sessionId];
 
         const endedThreadId = runStore.finishSession(event.sessionId);
         if (!endedThreadId) {
