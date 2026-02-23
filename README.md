@@ -6,6 +6,37 @@ The app does not call Anthropic APIs directly. It launches your local `claude` b
 
 ![Claude Desk UI](assets/claude-desk-ui.png)
 
+## Why This Exists
+
+Using Claude only in Terminal works well for one repo/thread, but gets painful when you juggle many:
+
+- Too many tabs/windows across projects, with no single thread/workspace view.
+- Session continuity is manual (resume ids and logs are easy to lose track of).
+- Project operations (switching branches, opening folders, jumping threads) are fragmented.
+- Per-thread runtime controls (like `Full access`) are harder to manage consistently.
+
+Claude Desk solves this by keeping Claude CLI local while adding a desktop control plane:
+
+- Workspace + thread management in one left rail.
+- One-click start/resume for thread-scoped Claude sessions.
+- Embedded PTY terminal behavior (ANSI, keyboard, streaming) with local log persistence.
+- Built-in project helpers (open folder/terminal, git branch/status context).
+- Optional per-thread controls like `Full access`, plus thread-level settings such as agent/skills.
+
+## Quick Start (No Dev Setup)
+
+Download the latest DMG:
+
+```bash
+curl -L -o "$HOME/Downloads/Claude-Desk.dmg" "https://github.com/FuRyanf/Claude-Desk/releases/latest/download/Claude-Desk.dmg"
+```
+
+Then install + trust + launch:
+
+```bash
+bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/Claude-Desk.dmg"; VOL="$(hdiutil attach "$DMG" -nobrowse | sed -n '\''s|^.*\(/Volumes/.*\)$|\1|p'\'' | head -n 1)"; trap '\''hdiutil detach "$VOL" -quiet >/dev/null 2>&1 || true'\'' EXIT; ditto "$VOL/Claude Desk.app" "/Applications/Claude Desk.app"; xattr -dr com.apple.quarantine "/Applications/Claude Desk.app" || true; open "/Applications/Claude Desk.app"'
+```
+
 ## Requirements
 
 - macOS (desktop build target)
@@ -44,16 +75,14 @@ Built app output:
 
 ## Downloads
 
-- A macOS build is produced in GitHub Actions on every push to `master`/`main`, every pull request targeting `master`/`main`, and every `v*` tag push.
-- Open the run in GitHub Actions, then download `Claude-Desk.dmg` and `Claude-Desk.app.zip` from the **Artifacts** section.
-- For `v*` tags, the same DMG and ZIP are also attached automatically to the GitHub Release.
+- Latest public build:
+  - [Latest release](https://github.com/FuRyanf/Claude-Desk/releases/latest)
+  - [Direct DMG download](https://github.com/FuRyanf/Claude-Desk/releases/latest/download/Claude-Desk.dmg)
+- CI build runs (every push to `master`/`main`, every PR targeting `master`/`main`, and every `v*` tag push):
+  - [Build workflow runs](https://github.com/FuRyanf/Claude-Desk/actions/workflows/build-macos.yml)
+  - Each run publishes `Claude-Desk.dmg` and `Claude-Desk.app.zip` as artifacts (artifact retention is time-limited by GitHub Actions).
+- For `v*` tags, the same DMG and ZIP are attached to the GitHub Release automatically.
 - If signing secrets are not configured, builds are unsigned. macOS Gatekeeper may show a warning on first launch. Use Finder `Open` (or `System Settings > Privacy & Security > Open Anyway`) to run the app.
-
-### Trust Unsigned DMG (One-Liner)
-
-```bash
-bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/Claude-Desk.dmg"; VOL="$(hdiutil attach "$DMG" -nobrowse | sed -n '\''s|^.*\(/Volumes/.*\)$|\1|p'\'' | head -n 1)"; trap '\''hdiutil detach "$VOL" -quiet >/dev/null 2>&1 || true'\'' EXIT; ditto "$VOL/Claude Desk.app" "/Applications/Claude Desk.app"; xattr -dr com.apple.quarantine "/Applications/Claude Desk.app" || true; open "/Applications/Claude Desk.app"'
-```
 
 ## Developer ID Signing (GitHub Actions)
 
@@ -106,7 +135,7 @@ Claude is started through `terminal_start_session`, which launches your login sh
 - `claude --resume <uuid>` for a resumed thread session
 - optional `--dangerously-skip-permissions` when thread `Full access` is enabled
 
-Terminal rendering is PTY-native: Rust reads PTY output, appends to `output.log`, emits `terminal:data` events, and the UI writes buffered chunks into `xterm.js`. On open/switch, the app hydrates from a snapshot (`terminal_read_output` / `terminal_get_last_log`) instead of replaying historical events.
+Terminal rendering is PTY-native: Rust reads PTY output, appends to `output.log`, emits `terminal:data` events, and the UI writes buffered chunks into `xterm.js`. On open/switch, the app hydrates from a snapshot (`terminal_read_output` / `terminal_get_last_log`) instead of replaying historical events, and temporarily defers live `terminal:data` appends for that session until snapshot hydration completes.
 
 Session resume is thread-scoped. `thread.json` stores `claudeSessionId`, `lastResumeAt`, and `lastNewSessionAt`; startup decides new vs resumed mode from this metadata (with log-based session-id recovery fallback). If resume likely failed, the UI offers `Start fresh` (clears the saved Claude session id, then restarts).
 
