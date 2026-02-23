@@ -9,6 +9,8 @@ interface LeftRailProps {
   selectedThreadId?: string;
   threadSearch: string;
   threadLastUserInputAt: (threadId?: string) => number | null;
+  isThreadWorking?: (threadId: string) => boolean;
+  hasUnreadThreadOutput?: (threadId: string) => boolean;
   onOpenWorkspacePicker: () => void;
   onOpenSettings: () => void;
   onNewThreadInWorkspace: (workspaceId: string) => Promise<void>;
@@ -169,6 +171,8 @@ interface ThreadRowProps {
   thread: ThreadMetadata;
   active: boolean;
   relativeTime: string | null;
+  isWorking: boolean;
+  hasUnreadOutput: boolean;
   isEditing: boolean;
   editingValue: string;
   onEditingValueChange: (value: string) => void;
@@ -184,6 +188,8 @@ const ThreadRow = React.memo(function ThreadRow({
   thread,
   active,
   relativeTime,
+  isWorking,
+  hasUnreadOutput,
   isEditing,
   editingValue,
   onEditingValueChange,
@@ -248,14 +254,20 @@ const ThreadRow = React.memo(function ThreadRow({
                 {thread.title}
               </span>
             )}
-          </span>
-          <span className="thread-main-trailing">
-            {relativeTime ? (
+        </span>
+        <span className="thread-main-trailing">
+          {isWorking ? (
+            <span className="thread-running" data-testid={`thread-running-${thread.id}`} aria-label="Thread is working">
+              <span className="spinner-dot" />
+            </span>
+          ) : hasUnreadOutput && !active ? (
+            <span className="thread-unread-dot" data-testid={`thread-unread-${thread.id}`} aria-label="Unread output" />
+          ) : relativeTime ? (
               <span className="thread-time" data-testid={`thread-recency-${thread.id}`}>
                 {relativeTime}
               </span>
             ) : null}
-          </span>
+        </span>
         </span>
       </button>
       <button
@@ -284,6 +296,8 @@ function LeftRailComponent({
   selectedThreadId,
   threadSearch,
   threadLastUserInputAt,
+  isThreadWorking,
+  hasUnreadThreadOutput,
   onOpenWorkspacePicker,
   onOpenSettings,
   onNewThreadInWorkspace,
@@ -637,6 +651,8 @@ function LeftRailComponent({
                                 thread={thread}
                                 active={thread.id === selectedThreadId}
                                 relativeTime={formatRecencyShort(threadLastUserInputAt(thread.id), Date.now())}
+                                isWorking={Boolean(isThreadWorking?.(thread.id))}
+                                hasUnreadOutput={Boolean(hasUnreadThreadOutput?.(thread.id))}
                                 isEditing={editingThreadId === thread.id}
                                 editingValue={editingValue}
                                 onEditingValueChange={setEditingValue}

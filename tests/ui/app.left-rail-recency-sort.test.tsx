@@ -52,6 +52,7 @@ const mocks = vi.hoisted(() => {
 
   let threadState = baseThreads.map((thread) => ({ ...thread }));
   let terminalDataHandler: ((event: { sessionId: string; data: string }) => void) | null = null;
+  let terminalExitHandler: ((event: { sessionId: string; code: number | null; signal: number | null }) => void) | null = null;
 
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
@@ -142,6 +143,7 @@ const mocks = vi.hoisted(() => {
   const reset = () => {
     threadState = baseThreads.map((thread) => ({ ...thread }));
     terminalDataHandler = null;
+    terminalExitHandler = null;
     window.localStorage.clear();
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
@@ -159,6 +161,9 @@ const mocks = vi.hoisted(() => {
     emitTerminalData: (event: { sessionId: string; data: string }) => {
       terminalDataHandler?.(event);
     },
+    emitTerminalExit: (event: { sessionId: string; code: number | null; signal: number | null }) => {
+      terminalExitHandler?.(event);
+    },
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
     onRunStream: vi.fn(async () => () => undefined),
@@ -171,7 +176,16 @@ const mocks = vi.hoisted(() => {
         }
       };
     }),
-    onTerminalExit: vi.fn(async () => () => undefined),
+    onTerminalExit: vi.fn(
+      async (handler: (event: { sessionId: string; code: number | null; signal: number | null }) => void) => {
+        terminalExitHandler = handler;
+        return () => {
+          if (terminalExitHandler === handler) {
+            terminalExitHandler = null;
+          }
+        };
+      }
+    ),
     onThreadUpdated: vi.fn(async () => () => undefined)
   };
 });
@@ -241,11 +255,29 @@ describe('Left rail recency and sorting semantics', () => {
       render(<App />);
 
       await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
       await user.click(screen.getByRole('button', { name: 'submit-input' }));
 
       expect(screen.queryByTestId('thread-recency-thread-newer')).not.toBeInTheDocument();
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+      });
       nowMs = baseMs + 61_000;
 
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+      act(() => {
+        mocks.emitTerminalExit({ sessionId: 'session-thread-newer', code: 0, signal: null });
+      });
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
+      });
+      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+      });
       await user.click(screen.getByRole('button', { name: /Older thread/i }));
       expect(screen.getByTestId('thread-recency-thread-newer')).toHaveTextContent('1m');
     } finally {
@@ -331,6 +363,42 @@ describe('Left rail recency and sorting semantics', () => {
     await waitFor(() => {
       expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
       expect(getThreadOrder()).toEqual(['Newest thread', 'Older thread', 'Newer thread']);
+    });
+  });
+
+  it('shows working spinner while generating and blue unread marker after completion on non-selected threads', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Newer thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+    });
+
+    await user.click(screen.getByRole('button', { name: 'submit-input' }));
+    expect(screen.getByTestId('thread-running-thread-newer')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Older thread/i }));
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
+    });
+
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+    });
+    expect(screen.getByTestId('thread-running-thread-newer')).toBeInTheDocument();
+
+    await waitFor(
+      () => {
+        expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      },
+      { timeout: 2500 }
+    );
+
+    await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+    await waitFor(() => {
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
     });
   });
 });

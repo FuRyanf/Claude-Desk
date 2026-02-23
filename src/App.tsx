@@ -47,6 +47,7 @@ const SIDEBAR_WIDTH_MAX = 460;
 const TERMINAL_LOG_BUFFER_CHARS = 280_000;
 const SNAPSHOT_BUFFER_MAX_CHARS = TERMINAL_LOG_BUFFER_CHARS;
 const TERMINAL_LOG_FLUSH_INTERVAL_MS = 16;
+const THREAD_WORKING_IDLE_TIMEOUT_MS = 1200;
 const MAX_ATTACHMENT_DRAFTS = 24;
 const MAX_ATTACHMENTS_PER_MESSAGE = 12;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
@@ -298,6 +299,7 @@ export default function App() {
   const [terminalFocused, setTerminalFocused] = useState(false);
   const [terminalSize, setTerminalSize] = useState({ cols: 120, rows: 32 });
   const [lastTerminalLogByThread, setLastTerminalLogByThread] = useState<Record<string, string>>({});
+  const [unreadOutputByThread, setUnreadOutputByThread] = useState<Record<string, boolean>>({});
   const [draftAttachmentsByThread, setDraftAttachmentsByThread] = useState<Record<string, string[]>>({});
 
   const [settings, setSettings] = useState<Settings>({ claudeCliPath: null });
@@ -325,11 +327,13 @@ export default function App() {
   const selectedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const selectedThreadIdRef = useRef<string | undefined>(undefined);
   const activeRunsByThreadRef = useRef(runStore.activeRunsByThread);
+  const workingByThreadRef = useRef(runStore.workingByThread);
   const sidebarResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const startingSessionByThreadRef = useRef<Record<string, PendingSessionStart>>({});
   const sessionStartRequestIdByThreadRef = useRef<Record<string, number>>({});
   const threadsByWorkspaceRef = useRef<Record<string, ThreadMetadata[]>>({});
   const lastTerminalLogByThreadRef = useRef<Record<string, string>>({});
+  const workingStopTimerByThreadRef = useRef<Record<string, number>>({});
   const pendingTerminalChunksByThreadRef = useRef<Record<string, string>>({});
   const terminalLogFlushHandleRef = useRef<number | null>(null);
   const terminalLogFlushUsesAnimationFrameRef = useRef(false);
@@ -397,6 +401,10 @@ export default function App() {
     activeRunsByThreadRef.current = runStore.activeRunsByThread;
   }, [runStore.activeRunsByThread]);
 
+  useEffect(() => {
+    workingByThreadRef.current = runStore.workingByThread;
+  }, [runStore.workingByThread]);
+
   const bindSession = useCallback(
     (threadId: string, sessionId: string, startedAt: string) => {
       activeRunsByThreadRef.current = {
@@ -412,6 +420,29 @@ export default function App() {
     [runStore]
   );
 
+  const startThreadWorking = useCallback(
+    (threadId: string, startedAt = new Date().toISOString()) => {
+      workingByThreadRef.current = {
+        ...workingByThreadRef.current,
+        [threadId]: { startedAt }
+      };
+      runStore.startWorking(threadId, startedAt);
+    },
+    [runStore]
+  );
+
+  const stopThreadWorking = useCallback(
+    (threadId: string) => {
+      if (workingByThreadRef.current[threadId]) {
+        const next = { ...workingByThreadRef.current };
+        delete next[threadId];
+        workingByThreadRef.current = next;
+      }
+      runStore.stopWorking(threadId);
+    },
+    [runStore]
+  );
+
   const finishSessionBinding = useCallback(
     (sessionId: string): string | null => {
       const removedThreadId =
@@ -422,7 +453,13 @@ export default function App() {
         activeRunsByThreadRef.current = next;
       }
       const removedFromStore = runStore.finishSession(sessionId);
-      return removedThreadId ?? removedFromStore;
+      const removed = removedThreadId ?? removedFromStore;
+      if (removed && workingByThreadRef.current[removed]) {
+        const nextWorking = { ...workingByThreadRef.current };
+        delete nextWorking[removed];
+        workingByThreadRef.current = nextWorking;
+      }
+      return removed;
     },
     [runStore]
   );
@@ -576,6 +613,51 @@ export default function App() {
     window.clearTimeout(handle);
   }, []);
 
+  const clearThreadWorkingStopTimer = useCallback((threadId: string) => {
+    const handle = workingStopTimerByThreadRef.current[threadId];
+    if (typeof handle === 'number') {
+      window.clearTimeout(handle);
+    }
+    delete workingStopTimerByThreadRef.current[threadId];
+  }, []);
+
+  const clearAllThreadWorkingStopTimers = useCallback(() => {
+    for (const handle of Object.values(workingStopTimerByThreadRef.current)) {
+      window.clearTimeout(handle);
+    }
+    workingStopTimerByThreadRef.current = {};
+  }, []);
+
+  const clearThreadUnread = useCallback((threadId: string) => {
+    setUnreadOutputByThread((current) => removeThreadFlag(current, threadId));
+  }, []);
+
+  const markThreadUnread = useCallback((threadId: string) => {
+    setUnreadOutputByThread((current) => {
+      if (current[threadId]) {
+        return current;
+      }
+      return {
+        ...current,
+        [threadId]: true
+      };
+    });
+  }, []);
+
+  const scheduleThreadWorkingStop = useCallback(
+    (threadId: string) => {
+      clearThreadWorkingStopTimer(threadId);
+      workingStopTimerByThreadRef.current[threadId] = window.setTimeout(() => {
+        delete workingStopTimerByThreadRef.current[threadId];
+        stopThreadWorking(threadId);
+        if (selectedThreadIdRef.current !== threadId) {
+          markThreadUnread(threadId);
+        }
+      }, THREAD_WORKING_IDLE_TIMEOUT_MS);
+    },
+    [clearThreadWorkingStopTimer, markThreadUnread, stopThreadWorking]
+  );
+
   const scheduleTerminalLogFlush = useCallback(() => {
     if (terminalLogFlushHandleRef.current !== null) {
       return;
@@ -598,9 +680,10 @@ export default function App() {
   useEffect(() => {
     return () => {
       cancelScheduledTerminalLogFlush();
+      clearAllThreadWorkingStopTimers();
       pendingTerminalChunksByThreadRef.current = {};
     };
-  }, [cancelScheduledTerminalLogFlush]);
+  }, [cancelScheduledTerminalLogFlush, clearAllThreadWorkingStopTimers]);
 
   const beginSidebarResize = useCallback(
     (clientX: number) => {
@@ -1248,6 +1331,9 @@ export default function App() {
     async (workspaceId: string, threadId: string) => {
       deletedThreadIdsRef.current[threadId] = true;
       invalidatePendingSessionStart(threadId);
+      clearThreadWorkingStopTimer(threadId);
+      stopThreadWorking(threadId);
+      clearThreadUnread(threadId);
       const existingSessionId = activeRunsByThreadRef.current[threadId]?.sessionId ?? runStore.sessionForThread(threadId);
       if (existingSessionId) {
         try {
@@ -1277,10 +1363,10 @@ export default function App() {
       }
       const deletedThread = (threadsByWorkspaceRef.current[workspaceId] ?? []).find((thread) => thread.id === threadId);
       if (deletedThread) {
-        applyThreadUpdate({
-          ...deletedThread,
-          isArchived: true
-        });
+      applyThreadUpdate({
+        ...deletedThread,
+        isArchived: true
+      });
       }
       delete inputBufferByThreadRef.current[threadId];
       delete threadTitleInitializedRef.current[threadId];
@@ -1302,6 +1388,9 @@ export default function App() {
       pushToast,
       refreshThreadsForWorkspace,
       runStore,
+      clearThreadUnread,
+      clearThreadWorkingStopTimer,
+      stopThreadWorking,
       setSelectedThread
     ]
   );
@@ -1343,12 +1432,22 @@ export default function App() {
       finishSessionBinding(sessionId);
       const endedAt = new Date().toISOString();
       setThreadRunState(threadId, 'Canceled', null, endedAt);
+      clearThreadWorkingStopTimer(threadId);
+      stopThreadWorking(threadId);
       delete sessionMetaBySessionIdRef.current[sessionId];
       delete pendingSnapshotBySessionRef.current[sessionId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
     },
-    [finishSessionBinding, invalidatePendingSessionStart, runStore, setThreadRunState, updateTerminalLogMap]
+    [
+      finishSessionBinding,
+      invalidatePendingSessionStart,
+      runStore,
+      setThreadRunState,
+      stopThreadWorking,
+      updateTerminalLogMap,
+      clearThreadWorkingStopTimer
+    ]
   );
 
   const stopSessionsExcept = useCallback(
@@ -1568,6 +1667,13 @@ export default function App() {
   }, [selectedThreadId, selectedWorkspaceId]);
 
   useEffect(() => {
+    if (!selectedThreadId) {
+      return;
+    }
+    clearThreadUnread(selectedThreadId);
+  }, [clearThreadUnread, selectedThreadId]);
+
+  useEffect(() => {
     if (!selectedWorkspaceId || !selectedThreadId || selectedSessionId) {
       return;
     }
@@ -1636,12 +1742,23 @@ export default function App() {
             event.data,
             SNAPSHOT_BUFFER_MAX_CHARS
           );
+          if (workingByThreadRef.current[threadId]) {
+            scheduleThreadWorkingStop(threadId);
+          } else if (!isSelectedThread) {
+            markThreadUnread(threadId);
+          }
           return;
         }
 
         if (isSelectedThread) {
           setStartingByThread((current) => removeThreadFlag(current, threadId));
           setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
+          clearThreadUnread(threadId);
+        }
+        if (workingByThreadRef.current[threadId]) {
+          scheduleThreadWorkingStop(threadId);
+        } else if (!isSelectedThread) {
+          markThreadUnread(threadId);
         }
         appendTerminalLogChunk(threadId, event.data);
       });
@@ -1651,7 +1768,7 @@ export default function App() {
     return () => {
       unlistenData?.();
     };
-  }, [appendTerminalLogChunk]);
+  }, [appendTerminalLogChunk, clearThreadUnread, markThreadUnread, scheduleThreadWorkingStop]);
 
   useEffect(() => {
     if (!selectedThread) {
@@ -1704,11 +1821,17 @@ export default function App() {
         if (!endedThreadId) {
           return;
         }
+        const exitStatus = statusFromExit(event);
         setStartingByThread((current) => removeThreadFlag(current, endedThreadId));
         setReadyByThread((current) => removeThreadFlag(current, endedThreadId));
+        clearThreadWorkingStopTimer(endedThreadId);
+        stopThreadWorking(endedThreadId);
 
         const endedAt = new Date().toISOString();
-        setThreadRunState(endedThreadId, statusFromExit(event), null, endedAt);
+        setThreadRunState(endedThreadId, exitStatus, null, endedAt);
+        if (exitStatus === 'Succeeded' && selectedThreadIdRef.current !== endedThreadId) {
+          markThreadUnread(endedThreadId);
+        }
 
         const workspaceId =
           sessionMeta?.workspaceId ??
@@ -1755,7 +1878,16 @@ export default function App() {
     return () => {
       unlistenExit?.();
     };
-  }, [finishSessionBinding, refreshThreadsForWorkspace, setThreadRunState, threadsByWorkspace, updateTerminalLogMap]);
+  }, [
+    finishSessionBinding,
+    refreshThreadsForWorkspace,
+    setThreadRunState,
+    stopThreadWorking,
+    threadsByWorkspace,
+    updateTerminalLogMap,
+    clearThreadWorkingStopTimer,
+    markThreadUnread
+  ]);
 
   useEffect(() => {
     let unlistenThreadUpdate: (() => void) | null = null;
@@ -1907,6 +2039,8 @@ export default function App() {
 
       for (const threadId of threadIds) {
         invalidatePendingSessionStart(threadId);
+        clearThreadWorkingStopTimer(threadId);
+        stopThreadWorking(threadId);
       }
       await stopSessionsForWorkspace(workspace.id);
 
@@ -1957,6 +2091,18 @@ export default function App() {
         }
         return changed ? next : current;
       });
+      setUnreadOutputByThread((current) => {
+        let changed = false;
+        const next = { ...current };
+        for (const threadId of threadIds) {
+          if (!(threadId in next)) {
+            continue;
+          }
+          delete next[threadId];
+          changed = true;
+        }
+        return changed ? next : current;
+      });
 
       if (threadIds.includes(selectedThreadIdRef.current ?? '')) {
         setSelectedThread(undefined);
@@ -1969,7 +2115,9 @@ export default function App() {
       invalidatePendingSessionStart,
       pushToast,
       refreshWorkspaces,
+      clearThreadWorkingStopTimer,
       setSelectedThread,
+      stopThreadWorking,
       stopSessionsForWorkspace,
       updateTerminalLogMap
     ]
@@ -2009,6 +2157,8 @@ export default function App() {
         onReorderWorkspaces={onReorderWorkspaces}
         onRemoveWorkspace={onRemoveWorkspace}
         threadLastUserInputAt={threadLastUserInputAt}
+        isThreadWorking={runStore.isThreadWorking}
+        hasUnreadThreadOutput={(threadId) => Boolean(unreadOutputByThread[threadId])}
         getSearchTextForThread={getSearchTextForThread}
       />
       <div
@@ -2081,6 +2231,7 @@ export default function App() {
 
                 if (submittedLines.length > 0) {
                   markThreadUserInput(selectedThread.workspaceId, selectedThread.id);
+                  clearThreadUnread(selectedThread.id);
                 }
 
                 let outboundData = data;
@@ -2093,17 +2244,27 @@ export default function App() {
                 }
 
                 if (isSelectedThreadStarting || !selectedSessionId) {
+                  if (submittedLines.length > 0) {
+                    pendingInputByThreadRef.current[selectedThread.id] = `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
+                    void ensureSessionForThread(selectedThread);
+                  }
                   return;
                 }
 
                 const sessionId = runStore.sessionForThread(selectedThread.id);
                 if (sessionId) {
+                  if (submittedLines.length > 0) {
+                    clearThreadWorkingStopTimer(selectedThread.id);
+                    startThreadWorking(selectedThread.id);
+                  }
                   void api.terminalWrite(sessionId, outboundData);
                   return;
                 }
 
-                pendingInputByThreadRef.current[selectedThread.id] = `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
-                void ensureSessionForThread(selectedThread);
+                if (submittedLines.length > 0) {
+                  pendingInputByThreadRef.current[selectedThread.id] = `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
+                  void ensureSessionForThread(selectedThread);
+                }
               }}
               onResize={(cols, rows) => {
                 setTerminalSize({ cols, rows });
