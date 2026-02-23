@@ -18,55 +18,35 @@ permissions:
 jobs:
   build-macos:
     runs-on: macos-latest
-    env:
-      NPM_CONFIG_PACKAGE_MANAGER_STRICT: "false"
-      NPM_CONFIG_FROZEN_LOCKFILE: "false"
-      NPM_CONFIG_PRODUCTION: "false"
-      NODE_ENV: development
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js (LTS)
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version: "20.19.0"
+          cache: "yarn"
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - name: Configure pnpm store path
-        run: echo "PNPM_STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_ENV"
-
-      - name: Cache node_modules
-        uses: actions/cache@v4
-        with:
-          path: |
-            node_modules
-            ${{ env.PNPM_STORE_PATH }}
-          key: ${{ runner.os }}-node-${{ hashFiles('pnpm-lock.yaml', 'package.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
+      - name: Enable corepack
+        run: corepack enable
 
       - name: Setup Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry and target
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src-tauri/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: Install dependencies
-        run: pnpm install --force
+        run: yarn install --immutable
 
       - name: Import Developer ID certificate (optional)
         shell: bash
@@ -108,12 +88,20 @@ jobs:
       - name: Ensure Tauri CLI is available
         shell: bash
         run: |
-          if pnpm exec tauri --version; then
+          if yarn tauri --version; then
             echo "Using project-local Tauri CLI"
           else
             npm install -g @tauri-apps/cli@2.1.0
             tauri --version
           fi
+
+      - name: Clean stale bundle artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf src-tauri/target/release/bundle
+          rm -f src-tauri/target/release/claude_desk
+          rm -rf dist
 
       - name: Build app
         env:
@@ -145,7 +133,7 @@ jobs:
             echo "Notarization credentials incomplete; skipping notarization."
           fi
 
-          pnpm exec tauri build --config '{"build":{"beforeBuildCommand":"npm run build"}}'
+          yarn tauri build
         # If Developer ID + notarization secrets are configured, Tauri signs/notarizes the app.
         # Otherwise this remains an unsigned build.
 
@@ -171,9 +159,12 @@ jobs:
             exit 1
           fi
 
+          latest_dmg="$(ls -t "${dmg_files[@]}" | head -n 1)"
+          latest_app_bundle="$(ls -dt "${app_bundles[@]}" | head -n 1)"
+
           mkdir -p dist
-          cp "${dmg_files[0]}" "dist/Claude-Desk.dmg"
-          ditto -c -k --sequesterRsrc --keepParent "${app_bundles[0]}" "dist/Claude-Desk.app.zip"
+          cp "$latest_dmg" "dist/Claude-Desk.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "$latest_app_bundle" "dist/Claude-Desk.app.zip"
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
