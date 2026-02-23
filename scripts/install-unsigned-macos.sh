@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="Claude Desk.app"
-DMG_PATH="${1:-$HOME/Downloads/Claude Desk_0.1.0_aarch64.dmg}"
+DMG_PATH="${1:-$HOME/Downloads/Claude-Desk.dmg}"
 
 if [[ ! -f "$DMG_PATH" ]]; then
   echo "DMG not found: $DMG_PATH"
@@ -11,7 +11,7 @@ if [[ ! -f "$DMG_PATH" ]]; then
 fi
 
 echo "Mounting DMG: $DMG_PATH"
-MOUNT_DIR="$(hdiutil attach "$DMG_PATH" -nobrowse | awk '/\/Volumes\// {print $NF; exit}')"
+MOUNT_DIR="$(hdiutil attach "$DMG_PATH" -nobrowse | sed -n 's|^.*\(/Volumes/.*\)$|\1|p' | head -n 1)"
 
 if [[ -z "${MOUNT_DIR:-}" ]]; then
   echo "Failed to mount DMG."

@@ -52,7 +52,7 @@ Built app output:
 ### Trust Unsigned DMG (One-Liner)
 
 ```bash
-bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/Claude-Desk.dmg"; VOL="$(hdiutil attach "$DMG" -nobrowse | awk '\''/\/Volumes\// {print $NF; exit}'\'')"; trap '\''hdiutil detach "$VOL" -quiet >/dev/null 2>&1 || true'\'' EXIT; ditto "$VOL/Claude Desk.app" "/Applications/Claude Desk.app"; xattr -dr com.apple.quarantine "/Applications/Claude Desk.app" || true; open "/Applications/Claude Desk.app"'
+bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/Claude-Desk.dmg"; VOL="$(hdiutil attach "$DMG" -nobrowse | sed -n '\''s|^.*\(/Volumes/.*\)$|\1|p'\'' | head -n 1)"; trap '\''hdiutil detach "$VOL" -quiet >/dev/null 2>&1 || true'\'' EXIT; ditto "$VOL/Claude Desk.app" "/Applications/Claude Desk.app"; xattr -dr com.apple.quarantine "/Applications/Claude Desk.app" || true; open "/Applications/Claude Desk.app"'
 ```
 
 ## Developer ID Signing (GitHub Actions)
