@@ -35,6 +35,7 @@ export const api = {
   listWorkspaces: () => invoke<Workspace[]>('list_workspaces'),
   addWorkspace: (path: string) => invoke<Workspace>('add_workspace', { path }),
   removeWorkspace: (workspaceId: string) => invoke<boolean>('remove_workspace', { workspaceId }),
+  setWorkspaceOrder: (workspaceIds: string[]) => invoke<Workspace[]>('set_workspace_order', { workspaceIds }),
   setWorkspaceGitPullOnMasterForNewThreads: (workspaceId: string, enabled: boolean) =>
     invoke<Workspace>('set_workspace_git_pull_on_master_for_new_threads', { workspaceId, enabled }),
   getGitInfo: (workspacePath: string) =>

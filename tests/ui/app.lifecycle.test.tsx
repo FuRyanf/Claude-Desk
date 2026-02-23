@@ -342,14 +342,23 @@ describe('Thread lifecycle integration', () => {
       expect(mocks.api.setWorkspaceGitPullOnMasterForNewThreads).toHaveBeenCalledWith('ws-1', true);
     });
 
-    const indicator = screen.getByLabelText('git pull on master is enabled for new threads');
-    expect(indicator).toHaveAttribute('title', 'git pull on master is enabled for new threads');
+    const indicator = screen.getByText('master pull enabled');
+    expect(indicator).toHaveAttribute(
+      'title',
+      'Upon new threads, master is checked out and pulled automatically.'
+    );
 
     await user.click(screen.getByTestId('workspace-new-thread-ws-1'));
     await waitFor(() => {
       expect(mocks.api.gitPullMasterForNewThread).toHaveBeenCalledWith('/tmp/workspace');
       expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
     });
+
+    const pullInvocation = (mocks.api.gitPullMasterForNewThread as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    const createInvocation = (mocks.api.createThread as { mock: { invocationCallOrder: number[] } }).mock
+      .invocationCallOrder[0];
+    expect(pullInvocation).toBeLessThan(createInvocation);
   });
 
   it('skips git pull when dirty and still creates thread with non-blocking error toast', async () => {

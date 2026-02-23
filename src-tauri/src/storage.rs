@@ -184,6 +184,36 @@ pub fn set_workspace_git_pull_on_master_for_new_threads(
     Ok(updated)
 }
 
+pub fn set_workspace_order(workspace_ids: Vec<String>) -> Result<Vec<Workspace>> {
+    let mut workspaces = load_workspaces()?;
+    if workspaces.len() <= 1 {
+        return Ok(workspaces);
+    }
+
+    let mut requested_ids = Vec::new();
+    for workspace_id in workspace_ids {
+        let normalized = validate_storage_segment(&workspace_id, "workspace id")?.to_string();
+        if requested_ids.iter().any(|existing: &String| existing == &normalized) {
+            continue;
+        }
+        requested_ids.push(normalized);
+    }
+
+    if requested_ids.is_empty() {
+        return Ok(workspaces);
+    }
+
+    let mut ordered = Vec::with_capacity(workspaces.len());
+    for workspace_id in requested_ids {
+        if let Some(index) = workspaces.iter().position(|workspace| workspace.id == workspace_id) {
+            ordered.push(workspaces.remove(index));
+        }
+    }
+    ordered.extend(workspaces);
+    save_workspaces(&ordered)?;
+    Ok(ordered)
+}
+
 pub fn thread_workspace_dir(workspace_id: &str) -> Result<PathBuf> {
     let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
     Ok(ensure_base_dirs()?.join("threads").join(workspace_id))

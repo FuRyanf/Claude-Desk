@@ -46,6 +46,7 @@ const SIDEBAR_WIDTH_MIN = 260;
 const SIDEBAR_WIDTH_MAX = 460;
 const TERMINAL_LOG_BUFFER_CHARS = 280_000;
 const SNAPSHOT_BUFFER_MAX_CHARS = TERMINAL_LOG_BUFFER_CHARS;
+const TERMINAL_LOG_FLUSH_INTERVAL_MS = 16;
 const MAX_ATTACHMENT_DRAFTS = 24;
 const MAX_ATTACHMENTS_PER_MESSAGE = 12;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
@@ -228,6 +229,28 @@ function clampSidebarWidth(width: number): number {
   return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, Math.round(width)));
 }
 
+function reorderWorkspacesByIds(currentWorkspaces: Workspace[], workspaceIds: string[]): Workspace[] {
+  if (currentWorkspaces.length <= 1 || workspaceIds.length === 0) {
+    return currentWorkspaces;
+  }
+
+  const remaining = [...currentWorkspaces];
+  const ordered: Workspace[] = [];
+  for (const workspaceId of workspaceIds) {
+    const index = remaining.findIndex((workspace) => workspace.id === workspaceId);
+    if (index < 0) {
+      continue;
+    }
+    ordered.push(remaining[index]);
+    remaining.splice(index, 1);
+  }
+
+  if (ordered.length === 0) {
+    return currentWorkspaces;
+  }
+  return [...ordered, ...remaining];
+}
+
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
   return await Promise.race<T | null>([
     promise,
@@ -307,6 +330,9 @@ export default function App() {
   const sessionStartRequestIdByThreadRef = useRef<Record<string, number>>({});
   const threadsByWorkspaceRef = useRef<Record<string, ThreadMetadata[]>>({});
   const lastTerminalLogByThreadRef = useRef<Record<string, string>>({});
+  const pendingTerminalChunksByThreadRef = useRef<Record<string, string>>({});
+  const terminalLogFlushHandleRef = useRef<number | null>(null);
+  const terminalLogFlushUsesAnimationFrameRef = useRef(false);
   const draftAttachmentsByThreadRef = useRef<Record<string, string[]>>({});
   const inputBufferByThreadRef = useRef<Record<string, string>>({});
   const threadTitleInitializedRef = useRef<Record<string, true>>({});
@@ -494,6 +520,88 @@ export default function App() {
     }, 4500);
   }, []);
 
+  const updateTerminalLogMap = useCallback(
+    (updater: (current: Record<string, string>) => Record<string, string>): Record<string, string> => {
+      const current = lastTerminalLogByThreadRef.current;
+      const next = updater(current);
+      if (next === current) {
+        return current;
+      }
+      lastTerminalLogByThreadRef.current = next;
+      setLastTerminalLogByThread(next);
+      return next;
+    },
+    []
+  );
+
+  const flushPendingTerminalLogChunks = useCallback(() => {
+    const pendingByThread = pendingTerminalChunksByThreadRef.current;
+    const entries = Object.entries(pendingByThread);
+    if (entries.length === 0) {
+      return;
+    }
+
+    pendingTerminalChunksByThreadRef.current = {};
+    updateTerminalLogMap((current) => {
+      let next = current;
+      for (const [threadId, chunk] of entries) {
+        if (!chunk) {
+          continue;
+        }
+        const previous = next[threadId] ?? '';
+        const combined = `${previous}${chunk}`;
+        const clamped = clampTerminalLog(combined);
+        if (clamped === previous) {
+          continue;
+        }
+        if (next === current) {
+          next = { ...current };
+        }
+        next[threadId] = clamped;
+      }
+      return next;
+    });
+  }, [updateTerminalLogMap]);
+
+  const cancelScheduledTerminalLogFlush = useCallback(() => {
+    const handle = terminalLogFlushHandleRef.current;
+    if (handle === null) {
+      return;
+    }
+    terminalLogFlushHandleRef.current = null;
+    if (terminalLogFlushUsesAnimationFrameRef.current && typeof window.cancelAnimationFrame === 'function') {
+      window.cancelAnimationFrame(handle);
+      return;
+    }
+    window.clearTimeout(handle);
+  }, []);
+
+  const scheduleTerminalLogFlush = useCallback(() => {
+    if (terminalLogFlushHandleRef.current !== null) {
+      return;
+    }
+    if (typeof window.requestAnimationFrame === 'function') {
+      terminalLogFlushUsesAnimationFrameRef.current = true;
+      terminalLogFlushHandleRef.current = window.requestAnimationFrame(() => {
+        terminalLogFlushHandleRef.current = null;
+        flushPendingTerminalLogChunks();
+      });
+      return;
+    }
+    terminalLogFlushUsesAnimationFrameRef.current = false;
+    terminalLogFlushHandleRef.current = window.setTimeout(() => {
+      terminalLogFlushHandleRef.current = null;
+      flushPendingTerminalLogChunks();
+    }, TERMINAL_LOG_FLUSH_INTERVAL_MS);
+  }, [flushPendingTerminalLogChunks]);
+
+  useEffect(() => {
+    return () => {
+      cancelScheduledTerminalLogFlush();
+      pendingTerminalChunksByThreadRef.current = {};
+    };
+  }, [cancelScheduledTerminalLogFlush]);
+
   const beginSidebarResize = useCallback(
     (clientX: number) => {
       const safeClientX = Number.isFinite(clientX) ? clientX : 0;
@@ -644,22 +752,18 @@ export default function App() {
     if (!chunk) {
       return;
     }
-    setLastTerminalLogByThread((current) => {
-      const previous = current[threadId] ?? '';
-      const combined = `${previous}${chunk}`;
-      const next = clampTerminalLog(combined);
-      if (next === previous) {
-        return current;
-      }
-      return {
-        ...current,
-        [threadId]: next
-      };
-    });
-  }, []);
+    const pending = pendingTerminalChunksByThreadRef.current[threadId] ?? '';
+    const combined = `${pending}${chunk}`;
+    pendingTerminalChunksByThreadRef.current[threadId] =
+      combined.length <= TERMINAL_LOG_BUFFER_CHARS
+        ? combined
+        : combined.slice(combined.length - TERMINAL_LOG_BUFFER_CHARS);
+    scheduleTerminalLogFlush();
+  }, [scheduleTerminalLogFlush]);
 
   const resetTerminalLog = useCallback((threadId: string) => {
-    setLastTerminalLogByThread((current) => {
+    delete pendingTerminalChunksByThreadRef.current[threadId];
+    updateTerminalLogMap((current) => {
       if ((current[threadId] ?? '') === '') {
         return current;
       }
@@ -668,10 +772,13 @@ export default function App() {
         [threadId]: ''
       };
     });
-  }, []);
+  }, [updateTerminalLogMap]);
 
   const hasCachedTerminalLog = useCallback((threadId: string) => {
-    return (lastTerminalLogByThreadRef.current[threadId] ?? '').length > 0;
+    return (
+      (lastTerminalLogByThreadRef.current[threadId] ?? '').length > 0 ||
+      (pendingTerminalChunksByThreadRef.current[threadId] ?? '').length > 0
+    );
   }, []);
 
   const hydrateSessionSnapshot = useCallback(
@@ -719,7 +826,8 @@ export default function App() {
             pendingHydration?.threadId === threadId ? pendingHydration.bufferedLive : '';
           const mergedSnapshot = clampTerminalLog(mergeSnapshotAndBufferedLive(settledSnapshot, bufferedLive));
           delete pendingSnapshotBySessionRef.current[sessionId];
-          setLastTerminalLogByThread((current) => ({
+          delete pendingTerminalChunksByThreadRef.current[threadId];
+          updateTerminalLogMap((current) => ({
             ...current,
             [threadId]: mergedSnapshot
           }));
@@ -743,7 +851,8 @@ export default function App() {
         pendingHydration?.threadId === threadId ? pendingHydration.bufferedLive : '';
       delete pendingSnapshotBySessionRef.current[sessionId];
       if (bufferedLive.length > 0) {
-        setLastTerminalLogByThread((current) => {
+        delete pendingTerminalChunksByThreadRef.current[threadId];
+        updateTerminalLogMap((current) => {
           const existing = current[threadId] ?? '';
           const merged = clampTerminalLog(mergeSnapshotAndBufferedLive(existing, bufferedLive));
           if (merged === existing) {
@@ -758,7 +867,7 @@ export default function App() {
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
     },
-    []
+    [updateTerminalLogMap]
   );
 
   const bumpSessionStartRequestId = useCallback((threadId: string) => {
@@ -1092,6 +1201,20 @@ export default function App() {
     [pushToast]
   );
 
+  const onReorderWorkspaces = useCallback(
+    async (workspaceIds: string[]) => {
+      setWorkspaces((current) => reorderWorkspacesByIds(current, workspaceIds));
+      try {
+        const reordered = await api.setWorkspaceOrder(workspaceIds);
+        setWorkspaces(reordered);
+      } catch (error) {
+        pushToast(`Workspace reorder failed: ${String(error)}`, 'error');
+        await refreshWorkspaces();
+      }
+    },
+    [pushToast, refreshWorkspaces]
+  );
+
   const onRenameThread = useCallback(
     async (workspaceId: string, threadId: string, title: string) => {
       try {
@@ -1144,6 +1267,7 @@ export default function App() {
       }
       delete inputBufferByThreadRef.current[threadId];
       delete threadTitleInitializedRef.current[threadId];
+      delete pendingTerminalChunksByThreadRef.current[threadId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
 
@@ -1176,7 +1300,8 @@ export default function App() {
       try {
         const snapshot = await withTimeout(api.terminalReadOutput(sessionId), 350);
         if (typeof snapshot === 'string' && snapshot.length > 0) {
-          setLastTerminalLogByThread((current) => ({
+          delete pendingTerminalChunksByThreadRef.current[threadId];
+          updateTerminalLogMap((current) => ({
             ...current,
             [threadId]: clampTerminalLog(snapshot)
           }));
@@ -1206,7 +1331,7 @@ export default function App() {
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
     },
-    [finishSessionBinding, invalidatePendingSessionStart, runStore, setThreadRunState]
+    [finishSessionBinding, invalidatePendingSessionStart, runStore, setThreadRunState, updateTerminalLogMap]
   );
 
   const stopSessionsExcept = useCallback(
@@ -1312,7 +1437,8 @@ export default function App() {
         if (selectedThread?.workspaceId === selectedWorkspace.id) {
           const snapshot = await api.terminalGetLastLog(selectedWorkspace.id, selectedThread.id).catch(() => '');
           if (snapshot) {
-            setLastTerminalLogByThread((current) => ({
+            delete pendingTerminalChunksByThreadRef.current[selectedThread.id];
+            updateTerminalLogMap((current) => ({
               ...current,
               [selectedThread.id]: clampTerminalLog(snapshot)
             }));
@@ -1324,7 +1450,7 @@ export default function App() {
         throw error;
       }
     },
-    [pushToast, refreshGitInfo, selectedThread, selectedWorkspace, stopSessionsForBranchSwitch]
+    [pushToast, refreshGitInfo, selectedThread, selectedWorkspace, stopSessionsForBranchSwitch, updateTerminalLogMap]
   );
 
   const onCreateAndCheckoutBranch = useCallback(
@@ -1341,7 +1467,8 @@ export default function App() {
         if (selectedThread?.workspaceId === selectedWorkspace.id) {
           const snapshot = await api.terminalGetLastLog(selectedWorkspace.id, selectedThread.id).catch(() => '');
           if (snapshot) {
-            setLastTerminalLogByThread((current) => ({
+            delete pendingTerminalChunksByThreadRef.current[selectedThread.id];
+            updateTerminalLogMap((current) => ({
               ...current,
               [selectedThread.id]: clampTerminalLog(snapshot)
             }));
@@ -1353,7 +1480,7 @@ export default function App() {
         throw error;
       }
     },
-    [pushToast, refreshGitInfo, selectedThread, selectedWorkspace, stopSessionsForBranchSwitch]
+    [pushToast, refreshGitInfo, selectedThread, selectedWorkspace, stopSessionsForBranchSwitch, updateTerminalLogMap]
   );
 
   useEffect(() => {
@@ -1443,7 +1570,8 @@ export default function App() {
         ) {
           return;
         }
-        setLastTerminalLogByThread((current) => ({
+        delete pendingTerminalChunksByThreadRef.current[selectedThreadId];
+        updateTerminalLogMap((current) => ({
           ...current,
           [selectedThreadId]: clampTerminalLog(log)
         }));
@@ -1458,7 +1586,8 @@ export default function App() {
         ) {
           return;
         }
-        setLastTerminalLogByThread((current) => ({
+        delete pendingTerminalChunksByThreadRef.current[selectedThreadId];
+        updateTerminalLogMap((current) => ({
           ...current,
           [selectedThreadId]: ''
         }));
@@ -1466,7 +1595,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedSessionId, selectedThreadId, selectedWorkspaceId, startingByThread]);
+  }, [selectedSessionId, selectedThreadId, selectedWorkspaceId, startingByThread, updateTerminalLogMap]);
 
   useEffect(() => {
     let unlistenData: (() => void) | null = null;
@@ -1576,7 +1705,8 @@ export default function App() {
         void api
           .terminalReadOutput(event.sessionId)
           .then((snapshot) => {
-            setLastTerminalLogByThread((current) => ({
+            delete pendingTerminalChunksByThreadRef.current[endedThreadId];
+            updateTerminalLogMap((current) => ({
               ...current,
               [endedThreadId]: clampTerminalLog(snapshot)
             }));
@@ -1608,7 +1738,7 @@ export default function App() {
     return () => {
       unlistenExit?.();
     };
-  }, [finishSessionBinding, refreshThreadsForWorkspace, setThreadRunState, threadsByWorkspace]);
+  }, [finishSessionBinding, refreshThreadsForWorkspace, setThreadRunState, threadsByWorkspace, updateTerminalLogMap]);
 
   useEffect(() => {
     let unlistenThreadUpdate: (() => void) | null = null;
@@ -1771,7 +1901,10 @@ export default function App() {
       }
 
       window.localStorage.removeItem(threadSelectionKey(workspace.id));
-      setLastTerminalLogByThread((current) => {
+      for (const threadId of threadIds) {
+        delete pendingTerminalChunksByThreadRef.current[threadId];
+      }
+      updateTerminalLogMap((current) => {
         let changed = false;
         const next = { ...current };
         for (const threadId of threadIds) {
@@ -1815,7 +1948,14 @@ export default function App() {
       await refreshWorkspaces();
       pushToast(`Removed project "${workspace.name}".`, 'info');
     },
-    [invalidatePendingSessionStart, pushToast, refreshWorkspaces, setSelectedThread, stopSessionsForWorkspace]
+    [
+      invalidatePendingSessionStart,
+      pushToast,
+      refreshWorkspaces,
+      setSelectedThread,
+      stopSessionsForWorkspace,
+      updateTerminalLogMap
+    ]
   );
 
   const getSearchTextForThread = useCallback((threadId: string) => {
@@ -1849,6 +1989,7 @@ export default function App() {
         onOpenWorkspaceInFinder={openWorkspaceInFinder}
         onOpenWorkspaceInTerminal={openWorkspaceInTerminal}
         onSetWorkspaceGitPullOnMasterForNewThreads={onSetWorkspaceGitPullOnMasterForNewThreads}
+        onReorderWorkspaces={onReorderWorkspaces}
         onRemoveWorkspace={onRemoveWorkspace}
         threadLastUserInputAt={threadLastUserInputAt}
         getSearchTextForThread={getSearchTextForThread}
@@ -1893,6 +2034,7 @@ export default function App() {
             <TerminalPanel
               sessionId={selectedSessionId}
               content={selectedTerminalContent}
+              contentLimitChars={TERMINAL_LOG_BUFFER_CHARS}
               readOnly={false}
               inputEnabled={Boolean(selectedSessionId) && isSelectedThreadReady && !isSelectedThreadStarting}
               overlayMessage={isSelectedThreadStarting || !selectedSessionId ? 'Starting Claude session...' : undefined}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { appendBufferedLive, mergeSnapshotAndBufferedLive } from '../../src/lib/terminalHydration';
+import { appendBufferedLive, findSuffixPrefixOverlap, mergeSnapshotAndBufferedLive } from '../../src/lib/terminalHydration';
 
 describe('terminal hydration merge', () => {
   it('returns snapshot when there is no buffered live output', () => {
@@ -31,5 +31,10 @@ describe('terminal hydration merge', () => {
 describe('terminal hydration buffering', () => {
   it('clamps buffered live output to max chars', () => {
     expect(appendBufferedLive('1234', '56', 5)).toBe('23456');
+  });
+
+  it('calculates suffix/prefix overlaps deterministically', () => {
+    expect(findSuffixPrefixOverlap('abcdef', 'defghi')).toBe(3);
+    expect(findSuffixPrefixOverlap('abcdef', 'xyz')).toBe(0);
   });
 });

@@ -35,7 +35,7 @@ function buildLps(pattern: string): number[] {
   return lps;
 }
 
-function longestPrefixAtSuffix(text: string, pattern: string): number {
+export function findSuffixPrefixOverlap(text: string, pattern: string): number {
   if (!text || !pattern) {
     return 0;
   }
@@ -63,7 +63,7 @@ export function mergeSnapshotAndBufferedLive(snapshot: string, bufferedLive: str
   if (!bufferedLive) {
     return snapshot;
   }
-  const overlap = longestPrefixAtSuffix(snapshot, bufferedLive);
+  const overlap = findSuffixPrefixOverlap(snapshot, bufferedLive);
   if (overlap === 0) {
     return bufferedLive;
   }

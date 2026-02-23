@@ -336,6 +336,21 @@ body.sidebar-resizing {
   min-height: 38px;
   padding: 3px 4px;
   transition: background-color var(--motion-fast);
+  cursor: grab;
+}
+
+.workspace-group.dragging .workspace-group-row {
+  cursor: grabbing;
+}
+
+.workspace-group.dragging .workspace-group-container {
+  opacity: 0.72;
+  border-style: dashed;
+}
+
+.workspace-group.drop-target .workspace-group-container {
+  border-color: rgba(88, 136, 226, 0.56);
+  box-shadow: inset 0 0 0 1px rgba(88, 136, 226, 0.16);
 }
 
 .workspace-group-button {
@@ -430,31 +445,17 @@ body.sidebar-resizing {
   letter-spacing: -0.008em;
 }
 
-.workspace-git-pull-indicator-slot {
-  width: 14px;
-  min-width: 14px;
-  height: 14px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: 2px;
-}
-
-.workspace-git-pull-indicator,
-.workspace-git-pull-indicator-placeholder {
-  width: 8px;
-  height: 8px;
+.workspace-git-pull-label {
+  margin-left: 4px;
+  border: 1px solid rgba(194, 90, 0, 0.32);
   border-radius: 999px;
-  display: inline-block;
-}
-
-.workspace-git-pull-indicator {
-  background: #3b82f6;
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.22);
-}
-
-.workspace-git-pull-indicator-placeholder {
-  background: transparent;
+  background: rgba(255, 161, 77, 0.12);
+  color: #c25a00;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
 }
 
 .workspace-group-actions {

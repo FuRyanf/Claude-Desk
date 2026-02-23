@@ -19,6 +19,7 @@ interface LeftRailProps {
   onOpenWorkspaceInFinder: (workspacePath: string) => void;
   onOpenWorkspaceInTerminal: (workspacePath: string) => void;
   onSetWorkspaceGitPullOnMasterForNewThreads: (workspaceId: string, enabled: boolean) => Promise<void>;
+  onReorderWorkspaces: (workspaceIds: string[]) => Promise<void>;
   onRemoveWorkspace: (workspace: Workspace) => Promise<void>;
   getSearchTextForThread?: (threadId: string) => string;
 }
@@ -130,6 +131,27 @@ function formatRecencyShort(lastUserInputAt: number | null, nowMs: number): stri
   }
 
   return `${diffDays}d`;
+}
+
+function buildReorderedWorkspaceIds(
+  workspaces: Workspace[],
+  draggedWorkspaceId: string,
+  targetWorkspaceId: string
+): string[] | null {
+  if (!draggedWorkspaceId || !targetWorkspaceId || draggedWorkspaceId === targetWorkspaceId) {
+    return null;
+  }
+
+  const ids = workspaces.map((workspace) => workspace.id);
+  const fromIndex = ids.indexOf(draggedWorkspaceId);
+  const toIndex = ids.indexOf(targetWorkspaceId);
+  if (fromIndex < 0 || toIndex < 0) {
+    return null;
+  }
+
+  ids.splice(fromIndex, 1);
+  ids.splice(toIndex, 0, draggedWorkspaceId);
+  return ids;
 }
 
 interface ThreadRowProps {
@@ -261,6 +283,7 @@ function LeftRailComponent({
   onOpenWorkspaceInFinder,
   onOpenWorkspaceInTerminal,
   onSetWorkspaceGitPullOnMasterForNewThreads,
+  onReorderWorkspaces,
   onRemoveWorkspace,
   getSearchTextForThread
 }: LeftRailProps) {
@@ -270,6 +293,8 @@ function LeftRailComponent({
   const [contextMenu, setContextMenu] = React.useState<ThreadContextMenuState | null>(null);
   const [workspaceContextMenu, setWorkspaceContextMenu] = React.useState<WorkspaceContextMenuState | null>(null);
   const [expandedWorkspaceIds, setExpandedWorkspaceIds] = React.useState<Record<string, boolean>>({});
+  const [draggingWorkspaceId, setDraggingWorkspaceId] = React.useState<string | null>(null);
+  const [dropTargetWorkspaceId, setDropTargetWorkspaceId] = React.useState<string | null>(null);
   const contextMenuRef = React.useRef<HTMLDivElement | null>(null);
   const workspaceContextMenuRef = React.useRef<HTMLDivElement | null>(null);
   const renderCountRef = React.useRef(0);
@@ -436,11 +461,65 @@ function LeftRailComponent({
             return (
               <li
                 key={workspace.id}
-                className={isSelectedWorkspace ? 'workspace-group selected' : 'workspace-group'}
+                className={
+                  [
+                    'workspace-group',
+                    isSelectedWorkspace ? 'selected' : '',
+                    draggingWorkspaceId === workspace.id ? 'dragging' : '',
+                    dropTargetWorkspaceId === workspace.id && draggingWorkspaceId !== workspace.id ? 'drop-target' : ''
+                  ]
+                    .filter(Boolean)
+                    .join(' ')
+                }
                 data-expanded={isExpanded ? 'true' : 'false'}
+                onDragOver={(event) => {
+                  if (!draggingWorkspaceId) {
+                    return;
+                  }
+                  event.preventDefault();
+                  if (dropTargetWorkspaceId !== workspace.id) {
+                    setDropTargetWorkspaceId(workspace.id);
+                  }
+                }}
+                onDrop={async (event) => {
+                  event.preventDefault();
+                  if (!draggingWorkspaceId) {
+                    return;
+                  }
+
+                  const nextWorkspaceOrder = buildReorderedWorkspaceIds(
+                    workspaces,
+                    draggingWorkspaceId,
+                    workspace.id
+                  );
+                  setDraggingWorkspaceId(null);
+                  setDropTargetWorkspaceId(null);
+                  if (!nextWorkspaceOrder) {
+                    return;
+                  }
+                  await onReorderWorkspaces(nextWorkspaceOrder);
+                }}
               >
                 <div className="workspace-group-container">
-                  <div className="workspace-group-row">
+                  <div
+                    className="workspace-group-row"
+                    draggable
+                    onDragStart={(event) => {
+                      const target = event.target as HTMLElement;
+                      if (target.closest('.workspace-action-button')) {
+                        event.preventDefault();
+                        return;
+                      }
+                      event.dataTransfer.effectAllowed = 'move';
+                      event.dataTransfer.setData('text/plain', workspace.id);
+                      setDraggingWorkspaceId(workspace.id);
+                      setDropTargetWorkspaceId(workspace.id);
+                    }}
+                    onDragEnd={() => {
+                      setDraggingWorkspaceId(null);
+                      setDropTargetWorkspaceId(null);
+                    }}
+                  >
                     <button
                       type="button"
                       className="workspace-group-button"
@@ -494,17 +573,15 @@ function LeftRailComponent({
                           <FolderIcon />
                         </span>
                         <span className="workspace-group-name">{workspace.name}</span>
-                        <span className="workspace-git-pull-indicator-slot" aria-hidden={!gitPullEnabled}>
-                          {gitPullEnabled ? (
-                            <span
-                              className="workspace-git-pull-indicator"
-                              title="git pull on master is enabled for new threads"
-                              aria-label="git pull on master is enabled for new threads"
-                            />
-                          ) : (
-                            <span className="workspace-git-pull-indicator-placeholder" />
-                          )}
-                        </span>
+                        {gitPullEnabled ? (
+                          <span
+                            className="workspace-git-pull-label"
+                            title="Upon new threads, master is checked out and pulled automatically."
+                            aria-label="master pull enabled for new threads"
+                          >
+                            master pull enabled
+                          </span>
+                        ) : null}
                       </span>
                     </button>
                     <span className="workspace-group-actions">

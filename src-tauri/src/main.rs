@@ -38,6 +38,11 @@ fn add_workspace(path: String) -> Result<Workspace, String> {
 }
 
 #[tauri::command]
+fn set_workspace_order(workspace_ids: Vec<String>) -> Result<Vec<Workspace>, String> {
+    storage::set_workspace_order(workspace_ids).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn remove_workspace(state: State<'_, AppState>, workspace_id: String) -> Result<bool, String> {
     let workspace = storage::load_workspaces()
         .map_err(|error| error.to_string())?
@@ -400,6 +405,7 @@ fn main() {
             get_app_storage_root,
             list_workspaces,
             add_workspace,
+            set_workspace_order,
             remove_workspace,
             set_workspace_git_pull_on_master_for_new_threads,
             get_git_info,

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import 'xterm/css/xterm.css';
 import { FitAddon } from 'xterm-addon-fit';
 import { Terminal } from 'xterm';
+import { resolveTerminalContentUpdate } from '../lib/terminalContentUpdate';
 import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
 
 const INPUT_FLUSH_MS = 8;
@@ -13,6 +14,7 @@ const STICKY_SCROLL_TOLERANCE = 2;
 interface TerminalPanelProps {
   sessionId?: string | null;
   content: string;
+  contentLimitChars?: number;
   readOnly?: boolean;
   inputEnabled?: boolean;
   overlayMessage?: string;
@@ -25,6 +27,7 @@ interface TerminalPanelProps {
 export function TerminalPanel({
   sessionId = null,
   content,
+  contentLimitChars,
   readOnly = false,
   inputEnabled = true,
   overlayMessage,
@@ -341,17 +344,22 @@ export function TerminalPanel({
     }
 
     const rendered = renderedContentRef.current;
-    if (content === rendered) {
+    const nextUpdate = resolveTerminalContentUpdate({
+      rendered,
+      content,
+      sessionId,
+      readOnly,
+      contentLimitChars
+    });
+
+    if (nextUpdate.kind === 'none') {
       return;
     }
 
-    if (!readOnly && sessionId && content.length > rendered.length && content.startsWith(rendered)) {
-      const delta = content.slice(rendered.length);
-      if (delta.length === 0) {
-        renderedContentRef.current = content;
-        return;
+    if (nextUpdate.kind === 'append') {
+      if (nextUpdate.delta.length > 0) {
+        queueWrite(nextUpdate.delta);
       }
-      queueWrite(delta);
       renderedContentRef.current = content;
       if (shouldStickToBottomRef.current) {
         scrollToBottomSoon(term);
@@ -361,7 +369,7 @@ export function TerminalPanel({
 
     resetTerminalContent(content);
     renderedContentRef.current = content;
-  }, [content, readOnly, resetTerminalContent, sessionId, queueWrite, scrollToBottomSoon]);
+  }, [content, contentLimitChars, readOnly, resetTerminalContent, sessionId, queueWrite, scrollToBottomSoon]);
 
   useEffect(() => {
     if (previousFocusRequestRef.current === focusRequestId) {
