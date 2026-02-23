@@ -49,6 +49,33 @@ Built app output:
 - For `v*` tags, the same DMG and ZIP are also attached automatically to the GitHub Release.
 - If signing secrets are not configured, builds are unsigned. macOS Gatekeeper may show a warning on first launch. Use Finder `Open` (or `System Settings > Privacy & Security > Open Anyway`) to run the app.
 
+### Trust Unsigned DMG (Script)
+
+Use the helper script to mount the DMG, copy the app to `/Applications`, clear quarantine, and launch:
+
+```bash
+bash scripts/install-unsigned-macos.sh /path/to/Claude-Desk.dmg
+```
+
+If you omit the path, it defaults to:
+
+```bash
+bash scripts/install-unsigned-macos.sh
+```
+
+Default DMG path used by the script:
+
+```text
+~/Downloads/Claude Desk_0.1.0_aarch64.dmg
+```
+
+Manual equivalent (if app is already in `/Applications`):
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Claude Desk.app"
+open "/Applications/Claude Desk.app"
+```
+
 ## Developer ID Signing (GitHub Actions)
 
 The workflow supports optional macOS Developer ID signing and notarization when these repository secrets are configured:
