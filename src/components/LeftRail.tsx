@@ -18,6 +18,7 @@ interface LeftRailProps {
   onDeleteThread: (workspaceId: string, threadId: string) => Promise<void>;
   onOpenWorkspaceInFinder: (workspacePath: string) => void;
   onOpenWorkspaceInTerminal: (workspacePath: string) => void;
+  onSetWorkspaceGitPullOnMasterForNewThreads: (workspaceId: string, enabled: boolean) => Promise<void>;
   onRemoveWorkspace: (workspace: Workspace) => Promise<void>;
   getSearchTextForThread?: (threadId: string) => string;
 }
@@ -36,7 +37,7 @@ interface WorkspaceContextMenuState {
 
 const CONTEXT_MENU_WIDTH = 220;
 const THREAD_CONTEXT_MENU_HEIGHT = 116;
-const WORKSPACE_CONTEXT_MENU_HEIGHT = 168;
+const WORKSPACE_CONTEXT_MENU_HEIGHT = 214;
 const CONTEXT_MENU_MARGIN = 8;
 
 function clampMenuCoordinate(x: number, y: number, width: number, height: number) {
@@ -84,21 +85,6 @@ function DotsIcon() {
       <circle cx="6" cy="12" r="1.6" fill="currentColor" />
       <circle cx="12" cy="12" r="1.6" fill="currentColor" />
       <circle cx="18" cy="12" r="1.6" fill="currentColor" />
-    </svg>
-  );
-}
-
-function ComposeIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        d="M14.3 4.5h4.2c.55 0 1 .45 1 1v4.2M19 5 11 13M6.25 8h2.6M5.5 19h13c.55 0 1-.45 1-1V11M5.5 19a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h4.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.65"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
     </svg>
   );
 }
@@ -274,6 +260,7 @@ function LeftRailComponent({
   onDeleteThread,
   onOpenWorkspaceInFinder,
   onOpenWorkspaceInTerminal,
+  onSetWorkspaceGitPullOnMasterForNewThreads,
   onRemoveWorkspace,
   getSearchTextForThread
 }: LeftRailProps) {
@@ -435,6 +422,7 @@ function LeftRailComponent({
           {workspaces.map((workspace) => {
             const isSelectedWorkspace = workspace.id === selectedWorkspaceId;
             const isExpanded = expandedWorkspaceIds[workspace.id] !== false;
+            const gitPullEnabled = Boolean(workspace.gitPullOnMasterForNewThreads);
             const allThreads = threadsByWorkspace[workspace.id] ?? [];
             const visibleThreads = allThreads.filter((thread) => {
               if (!query) {
@@ -506,6 +494,17 @@ function LeftRailComponent({
                           <FolderIcon />
                         </span>
                         <span className="workspace-group-name">{workspace.name}</span>
+                        <span className="workspace-git-pull-indicator-slot" aria-hidden={!gitPullEnabled}>
+                          {gitPullEnabled ? (
+                            <span
+                              className="workspace-git-pull-indicator"
+                              title="git pull on master is enabled for new threads"
+                              aria-label="git pull on master is enabled for new threads"
+                            />
+                          ) : (
+                            <span className="workspace-git-pull-indicator-placeholder" />
+                          )}
+                        </span>
                       </span>
                     </button>
                     <span className="workspace-group-actions">
@@ -530,28 +529,25 @@ function LeftRailComponent({
                       >
                         <DotsIcon />
                       </button>
-                      <button
-                        type="button"
-                        className="workspace-action-button"
-                        aria-label="Create thread"
-                        data-testid={`workspace-compose-${workspace.id}`}
-                        tabIndex={-1}
-                        onClick={async (event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          await onNewThreadInWorkspace(workspace.id);
-                        }}
-                      >
-                        <ComposeIcon />
-                      </button>
                     </span>
                   </div>
 
                   {!isExpanded ? null : (
                     <div className="workspace-group-children">
-                      {visibleThreads.length === 0 ? (
-                        <p className="muted workspace-group-empty">No matching threads.</p>
-                      ) : (
+                      <button
+                        type="button"
+                        className="workspace-new-thread-row"
+                        data-testid={`workspace-new-thread-${workspace.id}`}
+                        onClick={async () => {
+                          await onNewThreadInWorkspace(workspace.id);
+                        }}
+                      >
+                        <span className="workspace-new-thread-icon" aria-hidden="true">
+                          <PlusIcon />
+                        </span>
+                        <span>New thread</span>
+                      </button>
+                      {visibleThreads.length > 0 ? (
                         <ul className="workspace-thread-list">
                           {visibleThreads.map((thread) => {
                             return (
@@ -573,7 +569,9 @@ function LeftRailComponent({
                             );
                           })}
                         </ul>
-                      )}
+                      ) : query && allThreads.length > 0 ? (
+                        <p className="muted workspace-group-empty">No matching threads.</p>
+                      ) : null}
                     </div>
                   )}
                 </div>
@@ -630,6 +628,19 @@ function LeftRailComponent({
             }}
           >
             Open terminal
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              const workspace = workspaceContextMenu.workspace;
+              const enabled = !workspace.gitPullOnMasterForNewThreads;
+              setWorkspaceContextMenu(null);
+              await onSetWorkspaceGitPullOnMasterForNewThreads(workspace.id, enabled);
+            }}
+          >
+            {workspaceContextMenu.workspace.gitPullOnMasterForNewThreads
+              ? 'Disable git pull on master for new threads'
+              : 'Enable git pull on master for new threads'}
           </button>
           <div className="thread-context-divider" />
           <button

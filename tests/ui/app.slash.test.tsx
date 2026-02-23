@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => {
     id: 'ws-1',
     name: 'Workspace',
     path: '/tmp/workspace',
+    gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -37,6 +38,7 @@ const mocks = vi.hoisted(() => {
     listWorkspaces: vi.fn(async () => [workspace]),
     addWorkspace: vi.fn(async () => workspace),
     removeWorkspace: vi.fn(async () => true),
+    setWorkspaceGitPullOnMasterForNewThreads: vi.fn(async () => workspace),
     getGitInfo: vi.fn(async () => ({
       branch: 'main',
       shortHash: 'abc123',
@@ -54,6 +56,10 @@ const mocks = vi.hoisted(() => {
     })),
     gitCheckoutBranch: vi.fn(async () => true),
     gitCreateAndCheckoutBranch: vi.fn(async () => true),
+    gitPullMasterForNewThread: vi.fn(async () => ({
+      outcome: 'pulled' as const,
+      message: 'Checked out master and pulled latest changes.'
+    })),
     listThreads: vi.fn(async () => threadState),
     createThread: vi.fn(async () => {
       const next = {
@@ -151,6 +157,7 @@ const mocks = vi.hoisted(() => {
       terminalDataHandler?.(event);
     },
     openDialog: vi.fn(async () => null),
+    confirmDialog: vi.fn(async () => true),
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async (handler: (event: { sessionId: string; data: string }) => void) => {
@@ -176,7 +183,8 @@ vi.mock('../../src/lib/api', () => ({
 }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
-  open: mocks.openDialog
+  open: mocks.openDialog,
+  confirm: mocks.confirmDialog
 }));
 
 vi.mock('../../src/components/TerminalPanel', () => ({
@@ -185,6 +193,16 @@ vi.mock('../../src/components/TerminalPanel', () => ({
       <pre data-testid="terminal-content-mock">{props.content ?? ''}</pre>
       <button type="button" onClick={() => props.onData?.('   First prompt title line\r')}>
         send-first-prompt
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          props.onData?.(
+            '   This title is intentionally very long and should be trimmed to fifty characters max\r'
+          )
+        }
+      >
+        send-long-first-prompt
       </button>
       <button type="button" onClick={() => props.onData?.('Second title should not apply\r')}>
         send-second-prompt
@@ -326,16 +344,20 @@ describe('Sidebar behavior', () => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-1' }));
     });
 
-    fireEvent.click(screen.getByTestId('workspace-compose-ws-1'));
+    fireEvent.click(screen.getByTestId('workspace-new-thread-ws-1'));
 
     await waitFor(() => {
       expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-2' }));
     });
 
-    await user.click(screen.getByRole('button', { name: 'send-first-prompt' }));
+    await user.click(screen.getByRole('button', { name: 'send-long-first-prompt' }));
     await waitFor(() => {
-      expect(mocks.api.renameThread).toHaveBeenCalledWith('ws-1', 'thread-2', 'First prompt title line');
+      expect(mocks.api.renameThread).toHaveBeenCalledWith(
+        'ws-1',
+        'thread-2',
+        'This title is intentionally very long and should b'
+      );
     });
 
     await user.click(screen.getByRole('button', { name: 'type-char' }));

@@ -430,6 +430,33 @@ body.sidebar-resizing {
   letter-spacing: -0.008em;
 }
 
+.workspace-git-pull-indicator-slot {
+  width: 14px;
+  min-width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 2px;
+}
+
+.workspace-git-pull-indicator,
+.workspace-git-pull-indicator-placeholder {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.workspace-git-pull-indicator {
+  background: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.22);
+}
+
+.workspace-git-pull-indicator-placeholder {
+  background: transparent;
+}
+
 .workspace-group-actions {
   flex-shrink: 0;
   display: inline-flex;
@@ -491,6 +518,42 @@ body.sidebar-resizing {
 
 .workspace-group-children {
   padding: 2px 6px 6px;
+}
+
+.workspace-new-thread-row {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #43536b;
+  min-height: 30px;
+  padding: 6px 10px 6px 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 540;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
+}
+
+.workspace-new-thread-row:hover {
+  background: rgba(255, 255, 255, 0.3);
+  border-color: rgba(138, 157, 185, 0.22);
+  color: #1f2937;
+}
+
+.workspace-new-thread-icon {
+  width: 12px;
+  height: 12px;
+  display: inline-flex;
+  color: #607086;
+}
+
+.workspace-new-thread-icon svg {
+  width: 100%;
+  height: 100%;
 }
 
 .workspace-thread-list {
@@ -696,6 +759,7 @@ body.sidebar-resizing {
 .danger-button:focus-visible,
 .workspace-group-button:focus-visible,
 .workspace-action-button:focus-visible,
+.workspace-new-thread-row:focus-visible,
 .thread-button:focus-visible,
 .thread-delete-button:focus-visible {
   outline: 2px solid rgba(118, 142, 255, 0.5);

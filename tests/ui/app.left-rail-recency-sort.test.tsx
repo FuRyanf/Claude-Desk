@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => {
     id: 'ws-1',
     name: 'Workspace',
     path: '/tmp/workspace',
+    gitPullOnMasterForNewThreads: false,
     createdAt: new Date(baseNow - 10_000).toISOString(),
     updatedAt: new Date(baseNow - 10_000).toISOString()
   };
@@ -57,6 +58,7 @@ const mocks = vi.hoisted(() => {
     listWorkspaces: vi.fn(async () => [workspace]),
     addWorkspace: vi.fn(async () => workspace),
     removeWorkspace: vi.fn(async () => true),
+    setWorkspaceGitPullOnMasterForNewThreads: vi.fn(async () => workspace),
     getGitInfo: vi.fn(async () => ({
       branch: 'main',
       shortHash: 'abc123',
@@ -74,6 +76,10 @@ const mocks = vi.hoisted(() => {
     })),
     gitCheckoutBranch: vi.fn(async () => true),
     gitCreateAndCheckoutBranch: vi.fn(async () => true),
+    gitPullMasterForNewThread: vi.fn(async () => ({
+      outcome: 'pulled' as const,
+      message: 'Checked out master and pulled latest changes.'
+    })),
     listThreads: vi.fn(async () => threadState),
     createThread: vi.fn(async () => {
       throw new Error('not needed');
@@ -151,6 +157,7 @@ const mocks = vi.hoisted(() => {
       terminalDataHandler?.(event);
     },
     openDialog: vi.fn(async () => null),
+    confirmDialog: vi.fn(async () => true),
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async (handler: (event: { sessionId: string; data: string }) => void) => {
@@ -176,7 +183,8 @@ vi.mock('../../src/lib/api', () => ({
 }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
-  open: mocks.openDialog
+  open: mocks.openDialog,
+  confirm: mocks.confirmDialog
 }));
 
 vi.mock('../../src/components/TerminalPanel', () => ({

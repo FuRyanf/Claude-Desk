@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => {
     id: 'ws-added',
     name: 'workspace-added',
     path: '/tmp/workspace-added',
+    gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -25,8 +26,20 @@ const mocks = vi.hoisted(() => {
       workspaceState = workspaceState.filter((workspace) => workspace.id !== workspaceId);
       return workspaceState.length !== before;
     }),
+    setWorkspaceGitPullOnMasterForNewThreads: vi.fn(async (workspaceId: string, enabled: boolean) => {
+      workspaceState = workspaceState.map((workspace) =>
+        workspace.id === workspaceId
+          ? { ...workspace, gitPullOnMasterForNewThreads: enabled, updatedAt: new Date().toISOString() }
+          : workspace
+      );
+      return workspaceState.find((workspace) => workspace.id === workspaceId) ?? newWorkspace;
+    }),
     getGitInfo: vi.fn(async () => null),
     getGitDiffSummary: vi.fn(async () => ({ stat: '', diffExcerpt: '' })),
+    gitPullMasterForNewThread: vi.fn(async () => ({
+      outcome: 'pulled' as const,
+      message: 'Checked out master and pulled latest changes.'
+    })),
     listThreads: vi.fn(async () => []),
     createThread: vi.fn(async () => {
       throw new Error('not needed');
@@ -94,6 +107,8 @@ const mocks = vi.hoisted(() => {
     openInTerminal: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics')
   };
+  const openDialog = vi.fn(async () => null);
+  const confirmDialog = vi.fn(async () => true);
 
   const reset = () => {
     Object.values(api).forEach((fn) => {
@@ -101,13 +116,16 @@ const mocks = vi.hoisted(() => {
         (fn as { mockClear: () => void }).mockClear();
       }
     });
+    openDialog.mockClear();
+    confirmDialog.mockClear();
     workspaceState = [];
   };
 
   return {
     api,
     reset,
-    openDialog: vi.fn(async () => null),
+    openDialog,
+    confirmDialog,
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
@@ -126,7 +144,8 @@ vi.mock('../../src/lib/api', () => ({
 }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
-  open: mocks.openDialog
+  open: mocks.openDialog,
+  confirm: mocks.confirmDialog
 }));
 
 import App from '../../src/App';
@@ -163,8 +182,8 @@ describe('Workspace add flow', () => {
 
   it('removes workspace from the workspace context menu', async () => {
     const user = userEvent.setup();
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     mocks.openDialog.mockRejectedValueOnce(new Error('picker unavailable'));
+    mocks.confirmDialog.mockResolvedValueOnce(true);
     render(<App />);
 
     await user.click(await screen.findByRole('button', { name: 'Add new project' }));
@@ -178,12 +197,32 @@ describe('Workspace add flow', () => {
     await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
     await user.click(await screen.findByRole('button', { name: 'Remove project' }));
 
-    expect(confirmSpy).toHaveBeenCalled();
+    expect(mocks.confirmDialog).toHaveBeenCalled();
     expect(mocks.api.removeWorkspace).toHaveBeenCalledWith('ws-added');
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: /workspace-added/i })).not.toBeInTheDocument();
     });
+  });
 
-    confirmSpy.mockRestore();
+  it('does not remove workspace when remove confirmation is canceled', async () => {
+    const user = userEvent.setup();
+    mocks.openDialog.mockRejectedValueOnce(new Error('picker unavailable'));
+    mocks.confirmDialog.mockResolvedValueOnce(false);
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
+    const input = await screen.findByLabelText('Manual path');
+    await user.clear(input);
+    await user.type(input, '/tmp/workspace-added');
+    await user.click(screen.getByRole('button', { name: 'Add Workspace' }));
+    await screen.findByRole('button', { name: /workspace-added/i });
+
+    const workspaceRow = await screen.findByRole('button', { name: /workspace-added/i });
+    await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Remove project' }));
+
+    expect(mocks.confirmDialog).toHaveBeenCalled();
+    expect(mocks.api.removeWorkspace).not.toHaveBeenCalled();
+    expect(await screen.findByRole('button', { name: /workspace-added/i })).toBeInTheDocument();
   });
 });

@@ -16,6 +16,7 @@ interface TerminalPanelProps {
   readOnly?: boolean;
   inputEnabled?: boolean;
   overlayMessage?: string;
+  focusRequestId?: number;
   onData?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
   onFocusChange?: (focused: boolean) => void;
@@ -27,6 +28,7 @@ export function TerminalPanel({
   readOnly = false,
   inputEnabled = true,
   overlayMessage,
+  focusRequestId = 0,
   onData,
   onResize,
   onFocusChange
@@ -48,6 +50,7 @@ export function TerminalPanel({
   const inputBufferRef = useRef('');
   const inputFlushTimerRef = useRef<number | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
+  const previousFocusRequestRef = useRef(focusRequestId);
 
   const scrollToBottomSoon = useCallback((term: Terminal) => {
     term.scrollToBottom();
@@ -359,6 +362,20 @@ export function TerminalPanel({
     resetTerminalContent(content);
     renderedContentRef.current = content;
   }, [content, readOnly, resetTerminalContent, sessionId, queueWrite, scrollToBottomSoon]);
+
+  useEffect(() => {
+    if (previousFocusRequestRef.current === focusRequestId) {
+      return;
+    }
+    previousFocusRequestRef.current = focusRequestId;
+    const term = terminalRef.current;
+    if (!term) {
+      return;
+    }
+    term.focus();
+    shouldStickToBottomRef.current = true;
+    scrollToBottomSoon(term);
+  }, [focusRequestId, scrollToBottomSoon]);
 
   if (fallback) {
     return (

@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => {
       id: 'ws-1',
       name: 'Workspace One',
       path: '/tmp/workspace-one',
+      gitPullOnMasterForNewThreads: false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     },
@@ -15,6 +16,7 @@ const mocks = vi.hoisted(() => {
       id: 'ws-2',
       name: 'Workspace Two',
       path: '/tmp/workspace-two',
+      gitPullOnMasterForNewThreads: false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     }
@@ -66,6 +68,14 @@ const mocks = vi.hoisted(() => {
     listWorkspaces: vi.fn(async () => workspaces),
     addWorkspace: vi.fn(async () => workspaces[0]),
     removeWorkspace: vi.fn(async () => true),
+    setWorkspaceGitPullOnMasterForNewThreads: vi.fn(async (workspaceId: string, enabled: boolean) => {
+      const workspace = workspaces.find((item) => item.id === workspaceId) ?? workspaces[0];
+      return {
+        ...workspace,
+        gitPullOnMasterForNewThreads: enabled,
+        updatedAt: new Date().toISOString()
+      };
+    }),
     getGitInfo: vi.fn(async (workspacePath: string) => ({
       branch: workspacePath.includes('two') ? 'feature/two' : 'main',
       shortHash: 'abc123',
@@ -83,6 +93,10 @@ const mocks = vi.hoisted(() => {
     })),
     gitCheckoutBranch: vi.fn(async () => true),
     gitCreateAndCheckoutBranch: vi.fn(async () => true),
+    gitPullMasterForNewThread: vi.fn(async () => ({
+      outcome: 'pulled' as const,
+      message: 'Checked out master and pulled latest changes.'
+    })),
     listThreads: vi.fn(async (workspaceId: string) => threadsByWorkspace[workspaceId as 'ws-1' | 'ws-2'] ?? []),
     createThread: vi.fn(async () => {
       throw new Error('not needed');
@@ -145,6 +159,7 @@ const mocks = vi.hoisted(() => {
     api,
     reset,
     openDialog: vi.fn(async () => null),
+    confirmDialog: vi.fn(async () => true),
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
@@ -163,7 +178,8 @@ vi.mock('../../src/lib/api', () => ({
 }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
-  open: mocks.openDialog
+  open: mocks.openDialog,
+  confirm: mocks.confirmDialog
 }));
 
 import App from '../../src/App';

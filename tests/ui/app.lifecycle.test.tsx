@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => {
     id: 'ws-1',
     name: 'Workspace',
     path: '/tmp/workspace',
+    gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -50,12 +51,21 @@ const mocks = vi.hoisted(() => {
   ];
 
   let threadState = baseThreads.map((thread) => ({ ...thread }));
+  let workspaceState = { ...workspace };
 
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
-    listWorkspaces: vi.fn(async () => [workspace]),
-    addWorkspace: vi.fn(async () => workspace),
+    listWorkspaces: vi.fn(async () => [workspaceState]),
+    addWorkspace: vi.fn(async () => workspaceState),
     removeWorkspace: vi.fn(async () => true),
+    setWorkspaceGitPullOnMasterForNewThreads: vi.fn(async (_workspaceId: string, enabled: boolean) => {
+      workspaceState = {
+        ...workspaceState,
+        gitPullOnMasterForNewThreads: enabled,
+        updatedAt: new Date().toISOString()
+      };
+      return workspaceState;
+    }),
     getGitInfo: vi.fn(async () => ({
       branch: 'main',
       shortHash: 'abc123',
@@ -76,6 +86,10 @@ const mocks = vi.hoisted(() => {
     })),
     gitCheckoutBranch: vi.fn(async () => true),
     gitCreateAndCheckoutBranch: vi.fn(async () => true),
+    gitPullMasterForNewThread: vi.fn(async () => ({
+      outcome: 'pulled' as const,
+      message: 'Checked out master and pulled latest changes.'
+    })),
     listThreads: vi.fn(async () => threadState),
     createThread: vi.fn(async () => {
       const next = {
@@ -165,6 +179,7 @@ const mocks = vi.hoisted(() => {
 
   const reset = () => {
     threadState = baseThreads.map((thread) => ({ ...thread }));
+    workspaceState = { ...workspace };
     window.localStorage.clear();
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
@@ -177,6 +192,7 @@ const mocks = vi.hoisted(() => {
     api,
     reset,
     openDialog: vi.fn(async () => null),
+    confirmDialog: vi.fn(async () => true),
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
@@ -195,7 +211,8 @@ vi.mock('../../src/lib/api', () => ({
 }));
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
-  open: mocks.openDialog
+  open: mocks.openDialog,
+  confirm: mocks.confirmDialog
 }));
 
 import App from '../../src/App';
@@ -283,16 +300,80 @@ describe('Thread lifecycle integration', () => {
     confirmSpy.mockRestore();
   });
 
-  it('creates a new thread from workspace compose icon', async () => {
+  it('shows exactly one thread creation entry point under expanded workspace', async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await screen.findByRole('button', { name: /Workspace/i });
-    fireEvent.click(screen.getByTestId('workspace-compose-ws-1'));
+    expect(screen.getByTestId('workspace-new-thread-ws-1')).toBeInTheDocument();
+    expect(screen.queryByTestId('workspace-compose-ws-1')).not.toBeInTheDocument();
+
+    const workspaceRow = await screen.findByRole('button', { name: /Workspace/i });
+    await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
+    const menu = (await screen.findByRole('button', { name: 'Open folder' })).closest('.thread-context-menu');
+    expect(menu).not.toBeNull();
+    expect(within(menu as HTMLElement).queryByRole('button', { name: /^New thread$/i })).not.toBeInTheDocument();
+  });
+
+  it('creates a new thread from the in-list new thread row and selects it', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Workspace/i });
+    await user.click(screen.getByTestId('workspace-new-thread-ws-1'));
 
     await waitFor(() => {
       expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-3' })
+      );
     });
+  });
+
+  it('runs git pull pre-step before creating a thread when project setting is enabled', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const workspaceRow = await screen.findByRole('button', { name: /Workspace/i });
+    await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Enable git pull on master for new threads' }));
+
+    await waitFor(() => {
+      expect(mocks.api.setWorkspaceGitPullOnMasterForNewThreads).toHaveBeenCalledWith('ws-1', true);
+    });
+
+    const indicator = screen.getByLabelText('git pull on master is enabled for new threads');
+    expect(indicator).toHaveAttribute('title', 'git pull on master is enabled for new threads');
+
+    await user.click(screen.getByTestId('workspace-new-thread-ws-1'));
+    await waitFor(() => {
+      expect(mocks.api.gitPullMasterForNewThread).toHaveBeenCalledWith('/tmp/workspace');
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
+    });
+  });
+
+  it('skips git pull when dirty and still creates thread with non-blocking error toast', async () => {
+    const user = userEvent.setup();
+    mocks.api.gitPullMasterForNewThread.mockResolvedValueOnce({
+      outcome: 'skipped',
+      message: 'Skipped git pull: working tree is dirty. Commit or stash changes first.'
+    });
+    render(<App />);
+
+    const workspaceRow = await screen.findByRole('button', { name: /Workspace/i });
+    await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Enable git pull on master for new threads' }));
+    await waitFor(() => {
+      expect(mocks.api.setWorkspaceGitPullOnMasterForNewThreads).toHaveBeenCalledWith('ws-1', true);
+    });
+
+    await user.click(screen.getByTestId('workspace-new-thread-ws-1'));
+
+    await waitFor(() => {
+      expect(mocks.api.gitPullMasterForNewThread).toHaveBeenCalledWith('/tmp/workspace');
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
+    });
+    expect(await screen.findByText('Skipped git pull: working tree is dirty. Commit or stash changes first.')).toBeInTheDocument();
   });
 
   it('renames a thread through inline edit and persists the title', async () => {
