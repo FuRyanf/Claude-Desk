@@ -256,6 +256,37 @@ describe('Sidebar behavior', () => {
     });
   });
 
+  it('does not overwrite live terminal output with stale snapshot content', async () => {
+    let resolveSnapshot: ((value: string) => void) | null = null;
+    mocks.api.terminalReadOutput.mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveSnapshot = resolve;
+        })
+    );
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /First thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-1' }));
+    });
+
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-1', data: 'LIVE_OUTPUT\n' });
+    });
+
+    act(() => {
+      resolveSnapshot?.('STALE_SNAPSHOT\n');
+    });
+
+    await waitFor(() => {
+      const rendered = screen.getByTestId('terminal-content-mock').textContent ?? '';
+      expect(rendered).toContain('LIVE_OUTPUT');
+      expect(rendered).not.toContain('STALE_SNAPSHOT');
+    });
+  });
+
   it('queues attachments and sends them with the next Enter submit', async () => {
     const user = userEvent.setup();
     mocks.openDialog.mockResolvedValueOnce(['/tmp/screenshot.png', '/tmp/spec.md']);

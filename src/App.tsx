@@ -182,24 +182,6 @@ function buildAttachmentPrompt(paths: string[]): string {
   return parts.join(' ');
 }
 
-function mergeSnapshotWithBufferedOutput(snapshot: string, buffered: string): string {
-  if (!snapshot) {
-    return buffered;
-  }
-  if (!buffered) {
-    return snapshot;
-  }
-
-  const maxOverlap = Math.min(snapshot.length, buffered.length);
-  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-    if (snapshot.endsWith(buffered.slice(0, overlap))) {
-      return `${snapshot}${buffered.slice(overlap)}`;
-    }
-  }
-
-  return `${snapshot}${buffered}`;
-}
-
 function clampTerminalLog(text: string): string {
   if (text.length <= TERMINAL_LOG_BUFFER_CHARS) {
     return text;
@@ -325,7 +307,7 @@ export default function App() {
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
   const pendingSnapshotBySessionRef = useRef<Record<string, true>>({});
-  const bufferedOutputBySessionRef = useRef<Record<string, string>>({});
+  const sawLiveDuringSnapshotBySessionRef = useRef<Record<string, true>>({});
   const sessionMetaBySessionIdRef = useRef<
     Record<
       string,
@@ -689,12 +671,13 @@ export default function App() {
   const hydrateSessionSnapshot = useCallback(
     async (threadId: string, sessionId: string, retries = 12, delayMs = 180) => {
       pendingSnapshotBySessionRef.current[sessionId] = true;
+      delete sawLiveDuringSnapshotBySessionRef.current[sessionId];
       let attempts = 0;
       while (attempts < retries) {
         const liveSessionId = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
         if (!liveSessionId || liveSessionId !== sessionId) {
           delete pendingSnapshotBySessionRef.current[sessionId];
-          delete bufferedOutputBySessionRef.current[sessionId];
+          delete sawLiveDuringSnapshotBySessionRef.current[sessionId];
           return;
         }
 
@@ -724,13 +707,14 @@ export default function App() {
             }
           }
 
-          const buffered = bufferedOutputBySessionRef.current[sessionId] ?? '';
-          delete bufferedOutputBySessionRef.current[sessionId];
-          const merged = mergeSnapshotWithBufferedOutput(settledSnapshot, buffered);
-          setLastTerminalLogByThread((current) => ({
-            ...current,
-            [threadId]: clampTerminalLog(merged)
-          }));
+          const sawLiveDuringSnapshot = Boolean(sawLiveDuringSnapshotBySessionRef.current[sessionId]);
+          delete sawLiveDuringSnapshotBySessionRef.current[sessionId];
+          if (!sawLiveDuringSnapshot) {
+            setLastTerminalLogByThread((current) => ({
+              ...current,
+              [threadId]: clampTerminalLog(settledSnapshot)
+            }));
+          }
           setStartingByThread((current) => removeThreadFlag(current, threadId));
           setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
           delete pendingSnapshotBySessionRef.current[sessionId];
@@ -747,16 +731,12 @@ export default function App() {
         });
       }
 
-      const buffered = bufferedOutputBySessionRef.current[sessionId] ?? '';
-      delete bufferedOutputBySessionRef.current[sessionId];
-      if (buffered.length > 0) {
-        appendTerminalLogChunk(threadId, buffered);
-      }
+      delete sawLiveDuringSnapshotBySessionRef.current[sessionId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
       delete pendingSnapshotBySessionRef.current[sessionId];
     },
-    [appendTerminalLogChunk]
+    []
   );
 
   const bumpSessionStartRequestId = useCallback((threadId: string) => {
@@ -786,11 +766,6 @@ export default function App() {
         setStartingByThread((current) => removeThreadFlag(current, thread.id));
         if (hasCachedTerminalLog(thread.id)) {
           setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
-          const buffered = bufferedOutputBySessionRef.current[existing] ?? '';
-          delete bufferedOutputBySessionRef.current[existing];
-          if (buffered.length > 0) {
-            appendTerminalLogChunk(thread.id, buffered);
-          }
         } else {
           setReadyByThread((current) => removeThreadFlag(current, thread.id));
           if (!pendingSnapshotBySessionRef.current[existing]) {
@@ -895,7 +870,6 @@ export default function App() {
       flushPendingThreadInput,
       hasCachedTerminalLog,
       hydrateSessionSnapshot,
-      appendTerminalLogChunk,
       resetTerminalLog,
       terminalSize.cols,
       terminalSize.rows,
@@ -1093,7 +1067,7 @@ export default function App() {
         finishSessionBinding(existingSessionId);
         delete sessionMetaBySessionIdRef.current[existingSessionId];
         delete pendingSnapshotBySessionRef.current[existingSessionId];
-        delete bufferedOutputBySessionRef.current[existingSessionId];
+        delete sawLiveDuringSnapshotBySessionRef.current[existingSessionId];
       }
 
       try {
@@ -1171,7 +1145,7 @@ export default function App() {
       setThreadRunState(threadId, 'Canceled', null, endedAt);
       delete sessionMetaBySessionIdRef.current[sessionId];
       delete pendingSnapshotBySessionRef.current[sessionId];
-      delete bufferedOutputBySessionRef.current[sessionId];
+      delete sawLiveDuringSnapshotBySessionRef.current[sessionId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
     },
@@ -1441,8 +1415,7 @@ export default function App() {
           setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
         }
         if (pendingSnapshotBySessionRef.current[event.sessionId]) {
-          bufferedOutputBySessionRef.current[event.sessionId] = `${bufferedOutputBySessionRef.current[event.sessionId] ?? ''}${event.data}`;
-          return;
+          sawLiveDuringSnapshotBySessionRef.current[event.sessionId] = true;
         }
         appendTerminalLogChunk(threadId, event.data);
       });
@@ -1465,11 +1438,6 @@ export default function App() {
         setReadyByThread((current) =>
           current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
         );
-        const buffered = bufferedOutputBySessionRef.current[existingSessionId] ?? '';
-        delete bufferedOutputBySessionRef.current[existingSessionId];
-        if (buffered.length > 0) {
-          appendTerminalLogChunk(selectedThread.id, buffered);
-        }
       } else {
         setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
         if (!pendingSnapshotBySessionRef.current[existingSessionId]) {
@@ -1495,7 +1463,6 @@ export default function App() {
     hydrateSessionSnapshot,
     pushToast,
     selectedThread,
-    appendTerminalLogChunk
   ]);
 
   useEffect(() => {
@@ -1506,7 +1473,7 @@ export default function App() {
         const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
         delete sessionMetaBySessionIdRef.current[event.sessionId];
         delete pendingSnapshotBySessionRef.current[event.sessionId];
-        delete bufferedOutputBySessionRef.current[event.sessionId];
+        delete sawLiveDuringSnapshotBySessionRef.current[event.sessionId];
 
         const endedThreadId = finishSessionBinding(event.sessionId);
         if (!endedThreadId) {

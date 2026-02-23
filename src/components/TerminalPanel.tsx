@@ -3,7 +3,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import 'xterm/css/xterm.css';
 import { FitAddon } from 'xterm-addon-fit';
 import { Terminal } from 'xterm';
-import { onTerminalData } from '../lib/api';
 import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
 
 const INPUT_FLUSH_MS = 8;
@@ -18,7 +17,6 @@ interface TerminalPanelProps {
   inputEnabled?: boolean;
   overlayMessage?: string;
   onData?: (data: string) => void;
-  onOutput?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
   onFocusChange?: (focused: boolean) => void;
 }
@@ -30,7 +28,6 @@ export function TerminalPanel({
   inputEnabled = true,
   overlayMessage,
   onData,
-  onOutput,
   onResize,
   onFocusChange
 }: TerminalPanelProps) {
@@ -38,16 +35,14 @@ export function TerminalPanel({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const contentRef = useRef(content);
+  const renderedContentRef = useRef(content);
   const onDataRef = useRef(onData);
-  const onOutputRef = useRef(onOutput);
   const onResizeRef = useRef(onResize);
   const onFocusChangeRef = useRef(onFocusChange);
   const readOnlyRef = useRef(readOnly);
   const inputEnabledRef = useRef(inputEnabled);
   const previousInputEnabledRef = useRef(inputEnabled);
   const sessionRef = useRef<string | null>(sessionId);
-  const hydratedSessionRef = useRef<string | null>(null);
-  const hasLiveDataRef = useRef(false);
   const shouldStickToBottomRef = useRef(true);
   const writeQueueRef = useRef(new TerminalWriteQueue({ maxBatchBytes: OUTPUT_BATCH_BYTES }));
   const inputBufferRef = useRef('');
@@ -116,10 +111,6 @@ export function TerminalPanel({
   useEffect(() => {
     onDataRef.current = onData;
   }, [onData]);
-
-  useEffect(() => {
-    onOutputRef.current = onOutput;
-  }, [onOutput]);
 
   useEffect(() => {
     onResizeRef.current = onResize;
@@ -211,6 +202,7 @@ export function TerminalPanel({
         queueWrite(contentRef.current);
         writeQueueRef.current.flushImmediate();
       }
+      renderedContentRef.current = contentRef.current;
 
       const onDataDisposable = term.onData((data) => {
         if (readOnlyRef.current || !inputEnabledRef.current) {
@@ -261,6 +253,7 @@ export function TerminalPanel({
         onScrollDisposable.dispose();
         host.removeEventListener('focusin', onFocusIn);
         host.removeEventListener('focusout', onFocusOut);
+        flushOutgoingInput();
         fitAddon.dispose();
         writeQueueRef.current.setSink(null);
         writeQueueRef.current.clear();
@@ -326,8 +319,6 @@ export function TerminalPanel({
     }
 
     sessionRef.current = sessionId;
-    hasLiveDataRef.current = false;
-    hydratedSessionRef.current = null;
     shouldStickToBottomRef.current = true;
     clearPendingWrites();
     inputBufferRef.current = '';
@@ -337,71 +328,37 @@ export function TerminalPanel({
     }
 
     resetTerminalContent(contentRef.current);
-    if (contentRef.current.length > 0) {
-      hydratedSessionRef.current = sessionId;
-    }
+    renderedContentRef.current = contentRef.current;
   }, [clearPendingWrites, resetTerminalContent, sessionId]);
 
   useEffect(() => {
-    if (!readOnly && sessionId) {
-      return;
-    }
-
     const term = terminalRef.current;
     if (!term) {
       return;
     }
 
-    resetTerminalContent(content);
-  }, [content, readOnly, resetTerminalContent, sessionId]);
-
-  useEffect(() => {
-    if (fallback || readOnly || !sessionId) {
+    const rendered = renderedContentRef.current;
+    if (content === rendered) {
       return;
     }
 
-    if (content.length === 0 || hasLiveDataRef.current || hydratedSessionRef.current === sessionId) {
-      return;
-    }
-
-    const term = terminalRef.current;
-    if (!term) {
-      return;
-    }
-
-    resetTerminalContent(content);
-    hydratedSessionRef.current = sessionId;
-  }, [content, fallback, readOnly, resetTerminalContent, sessionId]);
-
-  useEffect(() => {
-    if (fallback || readOnly || !sessionId) {
-      return;
-    }
-
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-
-    void onTerminalData((event) => {
-      if (event.sessionId !== sessionId) {
+    if (!readOnly && sessionId && content.length > rendered.length && content.startsWith(rendered)) {
+      const delta = content.slice(rendered.length);
+      if (delta.length === 0) {
+        renderedContentRef.current = content;
         return;
       }
-      hasLiveDataRef.current = true;
-      onOutputRef.current?.(event.data);
-      queueWrite(event.data);
-    }).then((cleanup) => {
-      if (disposed) {
-        cleanup();
-        return;
+      queueWrite(delta);
+      renderedContentRef.current = content;
+      if (shouldStickToBottomRef.current) {
+        scrollToBottomSoon(term);
       }
-      unlisten = cleanup;
-    });
+      return;
+    }
 
-    return () => {
-      disposed = true;
-      flushOutgoingInput();
-      unlisten?.();
-    };
-  }, [fallback, flushOutgoingInput, queueWrite, readOnly, sessionId]);
+    resetTerminalContent(content);
+    renderedContentRef.current = content;
+  }, [content, readOnly, resetTerminalContent, sessionId, queueWrite, scrollToBottomSoon]);
 
   if (fallback) {
     return (
