@@ -136,6 +136,7 @@ pub fn add_workspace(path: &str) -> Result<Workspace> {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "Workspace".to_string()),
         path: canonical,
+        git_pull_on_master_for_new_threads: false,
         created_at: now,
         updated_at: now,
     };
@@ -164,6 +165,23 @@ pub fn remove_workspace(workspace_id: &str) -> Result<bool> {
     }
 
     Ok(true)
+}
+
+pub fn set_workspace_git_pull_on_master_for_new_threads(
+    workspace_id: &str,
+    enabled: bool,
+) -> Result<Workspace> {
+    let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
+    let mut workspaces = load_workspaces()?;
+    let workspace = workspaces
+        .iter_mut()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| anyhow!("Workspace not found"))?;
+    workspace.git_pull_on_master_for_new_threads = enabled;
+    workspace.updated_at = Utc::now();
+    let updated = workspace.clone();
+    save_workspaces(&workspaces)?;
+    Ok(updated)
 }
 
 pub fn thread_workspace_dir(workspace_id: &str) -> Result<PathBuf> {

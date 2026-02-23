@@ -6,6 +6,7 @@ import type {
   GitBranchEntry,
   GitDiffSummary,
   GitInfo,
+  GitPullForNewThreadResult,
   GitWorkspaceStatus,
   RunClaudeRequest,
   RunClaudeResponse,
@@ -34,6 +35,8 @@ export const api = {
   listWorkspaces: () => invoke<Workspace[]>('list_workspaces'),
   addWorkspace: (path: string) => invoke<Workspace>('add_workspace', { path }),
   removeWorkspace: (workspaceId: string) => invoke<boolean>('remove_workspace', { workspaceId }),
+  setWorkspaceGitPullOnMasterForNewThreads: (workspaceId: string, enabled: boolean) =>
+    invoke<Workspace>('set_workspace_git_pull_on_master_for_new_threads', { workspaceId, enabled }),
   getGitInfo: (workspacePath: string) =>
     invoke<GitInfo | null>('get_git_info', { workspacePath }),
   getGitDiffSummary: (workspacePath: string) =>
@@ -46,6 +49,8 @@ export const api = {
     invoke<boolean>('git_checkout_branch', { workspacePath, branchName }),
   gitCreateAndCheckoutBranch: (workspacePath: string, branchName: string) =>
     invoke<boolean>('git_create_and_checkout_branch', { workspacePath, branchName }),
+  gitPullMasterForNewThread: (workspacePath: string) =>
+    invoke<GitPullForNewThreadResult>('git_pull_master_for_new_thread', { workspacePath }),
   listThreads: (workspaceId: string) =>
     invoke<ThreadMetadata[]>('list_threads', { workspaceId }),
   createThread: (workspaceId: string, agentId?: string) =>

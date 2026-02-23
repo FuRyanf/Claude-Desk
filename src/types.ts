@@ -6,6 +6,7 @@ export interface Workspace {
   id: string;
   name: string;
   path: string;
+  gitPullOnMasterForNewThreads: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -55,6 +56,11 @@ export interface GitWorkspaceStatus {
   uncommittedFiles: number;
   insertions: number;
   deletions: number;
+}
+
+export interface GitPullForNewThreadResult {
+  outcome: 'pulled' | 'skipped' | 'failed';
+  message: string;
 }
 
 export interface Settings {

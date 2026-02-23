@@ -1,9 +1,12 @@
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
+use std::{fs, path::PathBuf};
 
 use anyhow::{anyhow, Result};
 
-use crate::models::{GitBranchEntry, GitDiffSummary, GitInfo, GitWorkspaceStatus};
+use crate::models::{
+    GitBranchEntry, GitDiffSummary, GitInfo, GitPullForNewThreadResult, GitWorkspaceStatus,
+};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(8);
 const GIT_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -83,6 +86,41 @@ fn run_git_checked(workspace_path: &str, args: &[&str]) -> Result<String> {
 fn is_git_repo(workspace_path: &str) -> Result<bool> {
     let is_repo = run_git(workspace_path, &["rev-parse", "--is-inside-work-tree"])?;
     Ok(is_repo.trim() == "true")
+}
+
+fn resolve_git_dir(workspace_path: &str) -> Result<Option<PathBuf>> {
+    let git_dir_raw = run_git_checked(workspace_path, &["rev-parse", "--git-dir"])?;
+    if git_dir_raw.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let git_dir = PathBuf::from(git_dir_raw.trim());
+    if git_dir.is_absolute() {
+        return Ok(Some(git_dir));
+    }
+    Ok(Some(PathBuf::from(workspace_path).join(git_dir)))
+}
+
+fn has_repository_operation_in_progress(workspace_path: &str) -> Result<bool> {
+    let Some(git_dir) = resolve_git_dir(workspace_path)? else {
+        return Ok(false);
+    };
+
+    let markers = ["MERGE_HEAD", "REBASE_HEAD", "rebase-merge", "rebase-apply"];
+    Ok(markers.iter().any(|marker| fs::metadata(git_dir.join(marker)).is_ok()))
+}
+
+fn is_workspace_clean(workspace_path: &str) -> Result<bool> {
+    let status = run_git(workspace_path, &["status", "--porcelain"])?;
+    Ok(status.trim().is_empty())
+}
+
+fn has_upstream(workspace_path: &str) -> Result<bool> {
+    let upstream = run_git(
+        workspace_path,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+    )?;
+    Ok(!upstream.trim().is_empty())
 }
 
 pub fn get_git_info(workspace_path: &str) -> Result<Option<GitInfo>> {
@@ -235,6 +273,81 @@ pub fn create_and_checkout_branch(workspace_path: &str, branch_name: &str) -> Re
     run_git_checked(workspace_path, &["checkout", "-b", normalized]).map(|_| ())
 }
 
+pub fn auto_pull_on_master(workspace_path: &str) -> Result<bool> {
+    if !is_git_repo(workspace_path)? {
+        return Ok(false);
+    }
+
+    let branch = run_git(workspace_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if branch != "master" {
+        return Ok(false);
+    }
+
+    let upstream = run_git(
+        workspace_path,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+    )?;
+    if upstream.trim().is_empty() {
+        return Ok(false);
+    }
+
+    run_git_checked(workspace_path, &["pull", "--ff-only"])?;
+    Ok(true)
+}
+
+pub fn git_pull_master_for_new_thread(workspace_path: &str) -> Result<GitPullForNewThreadResult> {
+    if !is_git_repo(workspace_path)? {
+        return Ok(GitPullForNewThreadResult {
+            outcome: "skipped".to_string(),
+            message: "Skipped git pull: this project is not a git repository.".to_string(),
+        });
+    }
+
+    if has_repository_operation_in_progress(workspace_path)? {
+        return Ok(GitPullForNewThreadResult {
+            outcome: "skipped".to_string(),
+            message: "Skipped git pull: repository is in merge/rebase state.".to_string(),
+        });
+    }
+
+    if !is_workspace_clean(workspace_path)? {
+        return Ok(GitPullForNewThreadResult {
+            outcome: "skipped".to_string(),
+            message: "Skipped git pull: working tree is dirty. Commit or stash changes first."
+                .to_string(),
+        });
+    }
+
+    let branch = run_git_checked(workspace_path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if branch != "master" {
+        if let Err(error) = run_git_checked(workspace_path, &["checkout", "master"]) {
+            return Ok(GitPullForNewThreadResult {
+                outcome: "failed".to_string(),
+                message: format!("Git checkout failed: {error}"),
+            });
+        }
+    }
+
+    if !has_upstream(workspace_path)? {
+        return Ok(GitPullForNewThreadResult {
+            outcome: "skipped".to_string(),
+            message: "Skipped git pull: master has no upstream tracking branch.".to_string(),
+        });
+    }
+
+    if let Err(error) = run_git_checked(workspace_path, &["pull", "--ff-only"]) {
+        return Ok(GitPullForNewThreadResult {
+            outcome: "failed".to_string(),
+            message: format!("Git pull failed: {error}"),
+        });
+    }
+
+    Ok(GitPullForNewThreadResult {
+        outcome: "pulled".to_string(),
+        message: "Checked out master and pulled latest changes.".to_string(),
+    })
+}
+
 fn parse_ahead_behind(input: &str) -> (u32, u32) {
     let mut parts = input.split_whitespace();
     let ahead = parts
@@ -309,5 +422,26 @@ mod tests {
         assert!(validate_branch_name("   ").is_err());
         assert!(validate_branch_name("-main").is_err());
         assert!(validate_branch_name("feature/test").is_ok());
+    }
+
+    #[test]
+    fn skips_auto_pull_when_not_on_master() {
+        let temp_repo =
+            std::env::temp_dir().join(format!("claude-desk-git-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&temp_repo).expect("failed to create temp repo");
+
+        git(&temp_repo, &["init"]);
+        git(&temp_repo, &["config", "user.email", "test@example.com"]);
+        git(&temp_repo, &["config", "user.name", "Claude Desk Test"]);
+        fs::write(temp_repo.join("README.md"), "initial\n").expect("failed to write file");
+        git(&temp_repo, &["add", "README.md"]);
+        git(&temp_repo, &["commit", "-m", "initial"]);
+        git(&temp_repo, &["checkout", "-b", "feature/test"]);
+
+        let pulled = auto_pull_on_master(temp_repo.to_string_lossy().as_ref())
+            .expect("auto pull should not fail on non-master branch");
+        assert!(!pulled);
+
+        let _ = fs::remove_dir_all(temp_repo);
     }
 }

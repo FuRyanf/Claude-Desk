@@ -11,9 +11,9 @@ use std::sync::Arc;
 use tauri::{Manager, State};
 
 use crate::models::{
-    ContextPreview, GitBranchEntry, GitDiffSummary, GitInfo, GitWorkspaceStatus, RunClaudeRequest,
-    RunClaudeResponse, Settings, SkillInfo, TerminalStartResponse, ThreadMetadata, TranscriptEntry,
-    Workspace,
+    ContextPreview, GitBranchEntry, GitDiffSummary, GitInfo, GitPullForNewThreadResult,
+    GitWorkspaceStatus, RunClaudeRequest, RunClaudeResponse, Settings, SkillInfo,
+    TerminalStartResponse, ThreadMetadata, TranscriptEntry, Workspace,
 };
 
 struct AppState {
@@ -53,6 +53,15 @@ fn remove_workspace(state: State<'_, AppState>, workspace_id: String) -> Result<
     }
 
     storage::remove_workspace(&workspace_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_workspace_git_pull_on_master_for_new_threads(
+    workspace_id: String,
+    enabled: bool,
+) -> Result<Workspace, String> {
+    storage::set_workspace_git_pull_on_master_for_new_threads(&workspace_id, enabled)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -105,6 +114,18 @@ fn git_create_and_checkout_branch(
     git_tools::create_and_checkout_branch(&workspace_path, &branch_name)
         .map(|_| true)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn git_auto_pull_on_master(workspace_path: String) -> Result<bool, String> {
+    git_tools::auto_pull_on_master(&workspace_path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn git_pull_master_for_new_thread(
+    workspace_path: String,
+) -> Result<GitPullForNewThreadResult, String> {
+    git_tools::git_pull_master_for_new_thread(&workspace_path).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -380,12 +401,15 @@ fn main() {
             list_workspaces,
             add_workspace,
             remove_workspace,
+            set_workspace_git_pull_on_master_for_new_threads,
             get_git_info,
             get_git_diff_summary,
             git_list_branches,
             git_workspace_status,
             git_checkout_branch,
             git_create_and_checkout_branch,
+            git_auto_pull_on_master,
+            git_pull_master_for_new_thread,
             list_threads,
             create_thread,
             set_thread_full_access,

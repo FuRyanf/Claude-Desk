@@ -7,6 +7,8 @@ pub struct Workspace {
     pub id: String,
     pub name: String,
     pub path: String,
+    #[serde(default)]
+    pub git_pull_on_master_for_new_threads: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -117,6 +119,13 @@ pub struct GitWorkspaceStatus {
     pub uncommitted_files: u32,
     pub insertions: u32,
     pub deletions: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPullForNewThreadResult {
+    pub outcome: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
