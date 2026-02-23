@@ -44,10 +44,25 @@ Built app output:
 
 ## Downloads
 
-- A macOS build is produced in GitHub Actions on every push to `main`, every pull request targeting `main`, and every `v*` tag push.
+- A macOS build is produced in GitHub Actions on every push to `master`/`main`, every pull request targeting `master`/`main`, and every `v*` tag push.
 - Open the run in GitHub Actions, then download `Claude-Desk.dmg` and `Claude-Desk.app.zip` from the **Artifacts** section.
 - For `v*` tags, the same DMG and ZIP are also attached automatically to the GitHub Release.
-- Builds are currently unsigned. macOS Gatekeeper may show a warning on first launch. Use Finder `Open` (or `System Settings > Privacy & Security > Open Anyway`) to run the app.
+- If signing secrets are not configured, builds are unsigned. macOS Gatekeeper may show a warning on first launch. Use Finder `Open` (or `System Settings > Privacy & Security > Open Anyway`) to run the app.
+
+## Developer ID Signing (GitHub Actions)
+
+The workflow supports optional macOS Developer ID signing and notarization when these repository secrets are configured:
+
+- `APPLE_CERTIFICATE`: base64-encoded Developer ID Application `.p12`
+- `APPLE_CERTIFICATE_PASSWORD`: password for that `.p12`
+- `APPLE_SIGNING_IDENTITY`: certificate common name (for example `Developer ID Application: Your Name (TEAMID)`)
+- `APPLE_ID`: Apple ID email used for notarization
+- `APPLE_PASSWORD`: app-specific password for that Apple ID
+- `APPLE_TEAM_ID`: Apple Developer Team ID
+- `KEYCHAIN_PASSWORD` (optional): temporary CI keychain password
+
+When these are present, CI imports the certificate into a temporary keychain and Tauri signs/notarizes during `tauri build`.  
+When they are absent, CI still builds unsigned artifacts.
 
 ## Data Storage
 
