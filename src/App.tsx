@@ -36,8 +36,6 @@ import type {
 
 const SELECTED_WORKSPACE_KEY = 'claude-desk:selected-workspace';
 const SIDEBAR_WIDTH_KEY = 'claude-desk:sidebar-width';
-const TERMINAL_DEMO_MODE_KEY = 'claude-desk:terminal-demo-mode';
-const TERMINAL_DEBUG_LOG_KEY = 'claude-desk:terminal-debug-log';
 const SIDEBAR_WIDTH_DEFAULT = 320;
 const SIDEBAR_WIDTH_MIN = 260;
 const SIDEBAR_WIDTH_MAX = 460;
@@ -202,12 +200,6 @@ export default function App() {
   const [terminalFocused, setTerminalFocused] = useState(false);
   const [terminalSize, setTerminalSize] = useState({ cols: 120, rows: 32 });
   const [lastTerminalLogByThread, setLastTerminalLogByThread] = useState<Record<string, string>>({});
-  const [terminalDemoMode, setTerminalDemoMode] = useState(
-    () => import.meta.env.DEV && window.localStorage.getItem(TERMINAL_DEMO_MODE_KEY) === '1'
-  );
-  const [terminalDebugLogging, setTerminalDebugLogging] = useState(
-    () => import.meta.env.DEV && window.localStorage.getItem(TERMINAL_DEBUG_LOG_KEY) === '1'
-  );
 
   const [settings, setSettings] = useState<Settings>({ claudeCliPath: null });
   const [detectedCliPath, setDetectedCliPath] = useState<string | null>(null);
@@ -242,7 +234,6 @@ export default function App() {
   const threadTitleInitializedRef = useRef<Record<string, true>>({});
   const deletedThreadIdsRef = useRef<Record<string, true>>({});
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
-  const terminalDemoModeRef = useRef(terminalDemoMode);
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
   const sessionMetaBySessionIdRef = useRef<
     Record<
@@ -297,10 +288,6 @@ export default function App() {
   useEffect(() => {
     lastTerminalLogByThreadRef.current = lastTerminalLogByThread;
   }, [lastTerminalLogByThread]);
-
-  useEffect(() => {
-    terminalDemoModeRef.current = terminalDemoMode;
-  }, [terminalDemoMode]);
 
   useEffect(() => {
     threadsByWorkspaceRef.current = threadsByWorkspace;
@@ -583,11 +570,9 @@ export default function App() {
       setReadyByThread((current) => removeThreadFlag(current, thread.id));
 
       const startPromise = (async () => {
-        const envVars = terminalDemoModeRef.current ? { CLAUDE_DESK_TERMINAL_DEMO: '1' } : null;
         const response = await api.terminalStartSession({
           workspacePath: workspace.path,
           initialCwd: workspace.path,
-          envVars,
           fullAccessFlag: thread.fullAccess,
           threadId: thread.id
         });
@@ -662,7 +647,6 @@ export default function App() {
       runStore,
       terminalSize.cols,
       terminalSize.rows,
-      terminalDemoMode,
       workspaces
     ]
   );
@@ -1347,39 +1331,6 @@ export default function App() {
     stopThreadSession
   ]);
 
-  const toggleTerminalDemoMode = useCallback(async () => {
-    if (!import.meta.env.DEV) {
-      return;
-    }
-
-    const next = !terminalDemoModeRef.current;
-    terminalDemoModeRef.current = next;
-    setTerminalDemoMode(next);
-    window.localStorage.setItem(TERMINAL_DEMO_MODE_KEY, next ? '1' : '0');
-
-    if (!selectedThread) {
-      return;
-    }
-
-    try {
-      await stopThreadSession(selectedThread.id);
-      await ensureSessionForThread(selectedThread);
-    } catch (error) {
-      pushToast(`Failed to toggle PTY demo mode: ${String(error)}`, 'error');
-    }
-  }, [ensureSessionForThread, pushToast, selectedThread, stopThreadSession]);
-
-  const toggleTerminalDebugLogging = useCallback(() => {
-    if (!import.meta.env.DEV) {
-      return;
-    }
-    setTerminalDebugLogging((current) => {
-      const next = !current;
-      window.localStorage.setItem(TERMINAL_DEBUG_LOG_KEY, next ? '1' : '0');
-      return next;
-    });
-  }, []);
-
   const openWorkspaceInFinder = useCallback((workspacePath: string) => {
     void api.openInFinder(workspacePath);
   }, []);
@@ -1534,7 +1485,6 @@ export default function App() {
               sessionId={selectedSessionId}
               content={selectedTerminalContent}
               readOnly={false}
-              debugEnabled={terminalDebugLogging}
               inputEnabled={Boolean(selectedSessionId) && isSelectedThreadReady && !isSelectedThreadStarting}
               overlayMessage={isSelectedThreadStarting || !selectedSessionId ? 'Starting Claude session...' : undefined}
               onData={(data) => {
@@ -1594,13 +1544,8 @@ export default function App() {
           workspace={selectedWorkspace}
           selectedThread={selectedThread}
           fullAccessUpdating={fullAccessUpdating}
-          devMode={import.meta.env.DEV}
-          terminalDemoMode={terminalDemoMode}
-          terminalDebugLogging={terminalDebugLogging}
           gitInfo={gitInfo}
           onToggleFullAccess={toggleFullAccess}
-          onToggleTerminalDemoMode={toggleTerminalDemoMode}
-          onToggleTerminalDebugLogging={toggleTerminalDebugLogging}
           onLoadBranchSwitcher={onLoadBranchSwitcher}
           onCheckoutBranch={onCheckoutBranch}
           onCreateAndCheckoutBranch={onCreateAndCheckoutBranch}

@@ -9,20 +9,22 @@
 - Scroll up and down through large output.
 - Expected: lines stay distinct, no overlaps, no merged glyph rows, no redraw corruption.
 
-3. PTY demo mode (dev-only)
-- Enable `Demo PTY` in the bottom bar.
-- Open/reopen a thread to start the demo stream.
-- Expected: delayed line streaming, wrapped long lines, cursor-rewrite output, and progress updates render cleanly.
+3. Streaming and cursor movement output
+- Open a thread and run:
+  `for i in $(seq 1 120); do printf "line %03d quick stream output\n" "$i"; sleep 0.02; done`
+- Then run:
+  `for i in $(seq 0 5 100); do printf "\rprogress %3d%%" "$i"; sleep 0.05; done; printf "\n"`
+- Expected: delayed line streaming, wrapped lines, cursor-rewrite output, and progress updates render cleanly.
 
 4. Large burst resilience
-- In demo mode, let burst output complete.
+- Run:
+  `for i in $(seq 1 200); do printf "burst %03d ........................................................................\n" "$i"; done`
 - Expected: UI remains responsive and terminal repaints smoothly without freeze.
 
 5. Resize correctness
 - Resize app window repeatedly while output streams.
 - Expected: terminal re-fits and wraps correctly; no resize loops; no clipped canvas.
 
-6. Diagnostic logging (dev-only)
-- Enable `Term Logs` in the bottom bar.
-- Open browser dev tools console.
-- Expected: periodic logs include PTY event counts/sizes, queue pending/high-water stats, and resize events.
+6. Diagnostics
+- Open browser dev tools console while streaming output.
+- Expected: terminal output remains stable and no console errors appear during burst output and resize events.

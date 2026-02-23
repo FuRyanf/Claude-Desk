@@ -16,7 +16,6 @@ interface TerminalPanelProps {
   readOnly?: boolean;
   inputEnabled?: boolean;
   overlayMessage?: string;
-  debugEnabled?: boolean;
   onData?: (data: string) => void;
   onOutput?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
@@ -29,7 +28,6 @@ export function TerminalPanel({
   readOnly = false,
   inputEnabled = true,
   overlayMessage,
-  debugEnabled: _debugEnabled = false,
   onData,
   onOutput,
   onResize,

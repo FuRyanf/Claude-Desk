@@ -1184,32 +1184,6 @@ body.sidebar-resizing {
   border-color: rgba(141, 160, 188, 0.34);
 }
 
-.dev-toggle-button {
-  min-width: 88px;
-  height: 32px;
-  border-radius: 10px;
-  border: 1px solid rgba(141, 160, 188, 0.34);
-  background: rgba(255, 255, 255, 0.52);
-  color: #475569;
-  font-size: 12px;
-  font-weight: 560;
-  padding: 0 10px;
-  cursor: pointer;
-  transition: border-color var(--motion-fast), background-color var(--motion-fast), color var(--motion-fast), box-shadow var(--motion-fast);
-}
-
-.dev-toggle-button:hover {
-  border-color: rgba(122, 141, 169, 0.44);
-  background: rgba(255, 255, 255, 0.76);
-  color: #1f2937;
-}
-
-.dev-toggle-button.enabled {
-  border-color: rgba(37, 99, 235, 0.45);
-  background: rgba(219, 234, 254, 0.72);
-  color: #1d4ed8;
-}
-
 .full-access-toggle {
   min-width: 144px;
   height: 32px;
