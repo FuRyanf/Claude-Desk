@@ -30,8 +30,6 @@ const EXIT_EVENT: &str = "claude://run-exit";
 const TERMINAL_DATA_EVENT: &str = "terminal:data";
 const TERMINAL_EXIT_EVENT: &str = "terminal:exit";
 const THREAD_UPDATED_EVENT: &str = "thread:updated";
-const TERMINAL_EVENT_FLUSH_INTERVAL_MS: u64 = 12;
-const TERMINAL_EVENT_BUFFER_SIZE: usize = 16 * 1024;
 const SESSION_ID_PARSE_BUFFER_MAX: usize = 24 * 1024;
 const TERMINAL_LOG_SNAPSHOT_MAX_BYTES: u64 = 512 * 1024;
 const TERMINAL_ENV_DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(8);
@@ -854,9 +852,7 @@ pub async fn terminal_start_session(
     std::thread::spawn(move || {
         let mut buffer = [0u8; 4096];
         let mut utf8_carry = Vec::<u8>::new();
-        let mut event_buffer = String::new();
         let mut session_id_parse_buffer = String::new();
-        let mut last_emit = Instant::now();
         loop {
             let read = match reader.read(&mut buffer) {
                 Ok(0) => break,
@@ -885,22 +881,13 @@ pub async fn terminal_start_session(
                         }
                     }
                 }
-
-                event_buffer.push_str(&chunk);
-                if event_buffer.len() >= TERMINAL_EVENT_BUFFER_SIZE
-                    || last_emit.elapsed()
-                        >= Duration::from_millis(TERMINAL_EVENT_FLUSH_INTERVAL_MS)
-                {
-                    let data = std::mem::take(&mut event_buffer);
-                    let _ = data_app.emit(
-                        TERMINAL_DATA_EVENT,
-                        TerminalDataEvent {
-                            session_id: data_session_id.clone(),
-                            data,
-                        },
-                    );
-                    last_emit = Instant::now();
-                }
+                let _ = data_app.emit(
+                    TERMINAL_DATA_EVENT,
+                    TerminalDataEvent {
+                        session_id: data_session_id.clone(),
+                        data: chunk,
+                    },
+                );
             }
         }
 
@@ -921,16 +908,11 @@ pub async fn terminal_start_session(
                     }
                 }
             }
-            event_buffer.push_str(&trailing);
-        }
-
-        if !event_buffer.is_empty() {
-            let data = std::mem::take(&mut event_buffer);
             let _ = data_app.emit(
                 TERMINAL_DATA_EVENT,
                 TerminalDataEvent {
                     session_id: data_session_id.clone(),
-                    data,
+                    data: trailing,
                 },
             );
         }

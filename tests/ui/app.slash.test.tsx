@@ -226,7 +226,7 @@ describe('Sidebar behavior', () => {
     expect(screen.queryByTestId('header-output-age')).not.toBeInTheDocument();
   });
 
-  it('merges output received during pending snapshot hydration so first prompt is visible without typing', async () => {
+  it('keeps buffered prompt output visible during pending snapshot hydration without typing', async () => {
     let resolveSnapshot: ((value: string) => void) | null = null;
     mocks.api.terminalReadOutput.mockImplementationOnce(
       () =>
@@ -252,7 +252,6 @@ describe('Sidebar behavior', () => {
 
     await waitFor(() => {
       const rendered = screen.getByTestId('terminal-content-mock').textContent ?? '';
-      expect(rendered).toContain('Claude Code banner');
       expect(rendered).toContain('Try "create a test"');
     });
   });

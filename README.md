@@ -231,14 +231,3 @@ It also writes a summary report to `artifacts/last_diagnosis.txt`.
 
 - Use `Add new project` and select a directory in the native folder picker.
 - If picker fails/unavailable, use manual path entry in the fallback modal.
-
-## Parity Checklist
-
-Validated in this cleanup pass:
-
-- [x] `yarn test:ui` passes.
-- [x] `yarn tauri build` succeeds.
-- [x] Thread/session model unchanged (create/select/rename/archive/delete).
-- [x] Resume/new-session behavior unchanged.
-- [x] Git branch switcher behavior unchanged.
-- [x] Full access toggle behavior unchanged.

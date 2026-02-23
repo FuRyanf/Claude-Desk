@@ -299,7 +299,7 @@ describe('Thread lifecycle integration', () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const title = await screen.findByText('Thread one');
+    const title = await screen.findByRole('button', { name: 'Thread one' });
     await user.dblClick(title);
 
     const input = await screen.findByDisplayValue('Thread one');

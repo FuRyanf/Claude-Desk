@@ -324,9 +324,9 @@ body.sidebar-resizing {
 }
 
 .workspace-group.selected .workspace-group-container {
-  border-color: rgba(118, 136, 166, 0.44);
-  background: rgba(246, 250, 255, 0.7);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.26);
+  border-color: rgba(92, 145, 230, 0.52);
+  background: rgba(236, 246, 255, 0.82);
+  box-shadow: inset 0 0 0 1px rgba(247, 251, 255, 0.86), 0 0 0 1px rgba(92, 145, 230, 0.14);
 }
 
 .workspace-group-row {
@@ -361,7 +361,7 @@ body.sidebar-resizing {
 }
 
 .workspace-group.selected .workspace-group-button {
-  background: rgba(255, 255, 255, 0.32);
+  background: rgba(252, 255, 255, 0.56);
 }
 
 .workspace-group-leading {
@@ -557,7 +557,7 @@ body.sidebar-resizing {
 
 .thread-button {
   width: 100%;
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
   padding: 8px 10px;
@@ -579,7 +579,9 @@ body.sidebar-resizing {
 }
 
 .thread-button.active {
-  background: rgba(239, 246, 255, 0.52);
+  background: rgba(224, 241, 255, 0.86);
+  border-color: rgba(109, 165, 242, 0.52);
+  box-shadow: inset 2px 0 0 rgba(59, 130, 246, 0.76);
 }
 
 .thread-main-row,
@@ -867,6 +869,13 @@ body.sidebar-resizing {
   gap: var(--space-2);
 }
 
+.workspace-summary.thread-context {
+  border: 1px solid rgba(131, 169, 230, 0.34);
+  border-radius: 10px;
+  background: rgba(241, 248, 255, 0.58);
+  padding: 4px 10px;
+}
+
 .workspace-summary strong {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -874,6 +883,15 @@ body.sidebar-resizing {
   font-size: 16px;
   font-weight: 560;
   letter-spacing: -0.012em;
+}
+
+.workspace-summary-secondary {
+  color: var(--text-secondary);
+  font-size: 15px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .branch-pill {
@@ -1449,12 +1467,12 @@ body.sidebar-resizing {
   flex: 1;
   min-height: 0;
   padding: 0;
-  background: #071024;
+  background: linear-gradient(180deg, #0e182d 0%, #0b1426 55%, #091224 100%);
   border-radius: 13px;
-  border: 1px solid rgba(33, 44, 73, 0.7);
+  border: 1px solid rgba(51, 69, 103, 0.72);
   box-shadow:
-    inset 0 1px 0 rgba(171, 187, 222, 0.06),
-    inset 0 0 0 1px rgba(9, 15, 33, 0.22);
+    inset 0 1px 0 rgba(184, 202, 231, 0.08),
+    inset 0 0 0 1px rgba(11, 21, 42, 0.42);
   position: relative;
   overflow: hidden;
 }
@@ -1463,7 +1481,7 @@ body.sidebar-resizing {
   width: 100%;
   height: 100%;
   min-height: 0;
-  background: #061026;
+  background: #0b1426;
 }
 
 .terminal-host .xterm-viewport {
@@ -1490,10 +1508,10 @@ body.sidebar-resizing {
   width: 100%;
   height: 100%;
   overflow: auto;
-  color: #e5e7eb;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.3;
+  color: #d8e0ef;
+  font-family: "SF Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.34;
 }
 
 .modal-backdrop {
