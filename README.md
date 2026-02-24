@@ -6,6 +6,19 @@ The app does not call Anthropic APIs directly. It launches your local `claude` b
 
 ![Claude Desk UI](assets/claude-desk-ui.png)
 
+## Security Model
+
+Claude Desk is a local wrapper around the existing Claude CLI, not a remote execution service.
+
+- Runs `claude` locally under your current macOS user account and permissions.
+- Does not proxy requests through a Claude Desk backend service.
+- Keeps `Full access` explicit and per-thread (default is off).
+- Stores app data locally under `~/Library/Application Support/ClaudeDesk/`.
+
+Security boundary note: this app is **not** an OS sandbox for Claude. If Claude (or shell commands it runs) can access something in your normal terminal session, the same access level applies here.
+
+For implementation details and tradeoffs, see [Security Notes (Detailed)](#security-notes-detailed).
+
 ## Why This Exists
 
 Using Claude only in Terminal works well for one repo/thread, but gets painful when you juggle many:
@@ -124,6 +137,23 @@ Important files/directories:
 - `threads/<workspaceId>/<threadId>/thread.json`
 - `threads/<workspaceId>/<threadId>/runs/<runId>/output.log`
 - `threads/<workspaceId>/<threadId>/runs/<runId>/metadata.json`
+
+## Security Notes (Detailed)
+
+Current controls:
+
+- Workspace and run paths are normalized and validated before use, with path-segment checks on workspace/thread ids to reduce traversal-style file access bugs.
+- Terminal launch commands are constructed with escaping and UUID session ids, reducing shell argument injection risk around the Claude binary path/session id.
+- `Full access` is only enabled when explicitly set on a thread; default thread creation keeps it off.
+- Diagnostics output applies redaction heuristics for common secret-like environment variable names before writing diagnostics artifacts.
+- Git helpers run with non-interactive prompts disabled and include command timeouts.
+
+Known limitations:
+
+- Claude Desk is not a sandbox and does not reduce the privileges of your local user account.
+- Thread transcripts, run manifests, and terminal logs are local plaintext files; sensitive content may be persisted.
+- If `Full access` is enabled, Claude launches with `--dangerously-skip-permissions`.
+- App-level hardening can be improved further (for example, tightening CSP and narrowing exposed command surface over time).
 
 ## Core Runtime Model
 

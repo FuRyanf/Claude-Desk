@@ -22,6 +22,7 @@ import { ToastRegion, type ToastItem } from './components/ToastRegion';
 import { api, onTerminalData, onTerminalExit, onThreadUpdated } from './lib/api';
 import {
   appendBufferedLive,
+  findSuffixPrefixOverlap,
   mergeSnapshotAndBufferedLive,
   type PendingSnapshotHydration
 } from './lib/terminalHydration';
@@ -48,6 +49,8 @@ const SIDEBAR_WIDTH_MAX = 460;
 const TERMINAL_LOG_BUFFER_CHARS = 280_000;
 const SNAPSHOT_BUFFER_MAX_CHARS = TERMINAL_LOG_BUFFER_CHARS;
 const TERMINAL_LOG_FLUSH_INTERVAL_MS = 16;
+const TERMINAL_DATA_LISTENER_READY_TIMEOUT_MS = 800;
+const SESSION_SNAPSHOT_REFRESH_DELAYS_MS = [320, 1100];
 const THREAD_WORKING_IDLE_TIMEOUT_MS = 1200;
 const MAX_ATTACHMENT_DRAFTS = 24;
 const MAX_ATTACHMENTS_PER_MESSAGE = 12;
@@ -198,6 +201,28 @@ function clampTerminalLog(text: string): string {
   return text.slice(text.length - TERMINAL_LOG_BUFFER_CHARS);
 }
 
+function mergeTerminalLogSnapshot(existing: string, incoming: string): string {
+  if (!incoming) {
+    return existing;
+  }
+  if (!existing || existing === incoming) {
+    return incoming;
+  }
+  if (incoming.startsWith(existing) || incoming.includes(existing)) {
+    return incoming;
+  }
+  if (existing.startsWith(incoming) || existing.includes(incoming)) {
+    return existing;
+  }
+
+  const overlap = findSuffixPrefixOverlap(existing, incoming);
+  if (overlap > 0) {
+    return `${existing}${incoming.slice(overlap)}`;
+  }
+
+  return existing;
+}
+
 function statusFromExit(event: TerminalExitEvent): RunStatus {
   if (event.signal || event.code === 130) {
     return 'Canceled';
@@ -345,6 +370,11 @@ export default function App() {
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
   const pendingSnapshotBySessionRef = useRef<Record<string, PendingSnapshotHydration>>({});
+  const terminalSnapshotRefreshTimersBySessionRef = useRef<Record<string, number[]>>({});
+  const terminalDataSequenceBySessionRef = useRef<Record<string, number>>({});
+  const terminalDataListenerReadyRef = useRef(false);
+  const terminalDataListenerReadyResolverRef = useRef<(() => void) | null>(null);
+  const terminalDataListenerReadyPromiseRef = useRef<Promise<void> | null>(null);
   const latestOutputSequenceByThreadRef = useRef<Record<string, number>>({});
   const seenOutputSequenceByThreadRef = useRef<Record<string, number>>({});
   const outputSequenceCounterRef = useRef(0);
@@ -362,6 +392,12 @@ export default function App() {
       }
     >
   >({});
+
+  if (!terminalDataListenerReadyPromiseRef.current) {
+    terminalDataListenerReadyPromiseRef.current = new Promise<void>((resolve) => {
+      terminalDataListenerReadyResolverRef.current = resolve;
+    });
+  }
 
   const selectedWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId),
@@ -394,6 +430,25 @@ export default function App() {
     }
     return draftAttachmentsByThread[selectedThreadId] ?? [];
   }, [draftAttachmentsByThread, selectedThreadId]);
+
+  const resolveTerminalDataListenerReady = useCallback(() => {
+    if (terminalDataListenerReadyRef.current) {
+      return;
+    }
+    terminalDataListenerReadyRef.current = true;
+    terminalDataListenerReadyResolverRef.current?.();
+    terminalDataListenerReadyResolverRef.current = null;
+  }, []);
+
+  const waitForTerminalDataListenerReady = useCallback(async () => {
+    if (terminalDataListenerReadyRef.current) {
+      return;
+    }
+    if (!terminalDataListenerReadyPromiseRef.current) {
+      return;
+    }
+    await withTimeout(terminalDataListenerReadyPromiseRef.current, TERMINAL_DATA_LISTENER_READY_TIMEOUT_MS);
+  }, []);
 
   selectedWorkspaceIdRef.current = selectedWorkspaceId;
   selectedThreadIdRef.current = selectedThreadId;
@@ -623,6 +678,17 @@ export default function App() {
     workingStopTimerByThreadRef.current = {};
   }, []);
 
+  const clearSessionSnapshotRefreshTimers = useCallback((sessionId: string) => {
+    const handles = terminalSnapshotRefreshTimersBySessionRef.current[sessionId];
+    if (!handles || handles.length === 0) {
+      return;
+    }
+    for (const handle of handles) {
+      window.clearTimeout(handle);
+    }
+    delete terminalSnapshotRefreshTimersBySessionRef.current[sessionId];
+  }, []);
+
   const noteThreadOutput = useCallback((threadId: string) => {
     outputSequenceCounterRef.current += 1;
     latestOutputSequenceByThreadRef.current[threadId] = outputSequenceCounterRef.current;
@@ -696,6 +762,12 @@ export default function App() {
       cancelScheduledTerminalLogFlush();
       clearAllThreadWorkingStopTimers();
       pendingTerminalChunksByThreadRef.current = {};
+      for (const handles of Object.values(terminalSnapshotRefreshTimersBySessionRef.current)) {
+        for (const handle of handles) {
+          window.clearTimeout(handle);
+        }
+      }
+      terminalSnapshotRefreshTimersBySessionRef.current = {};
     };
   }, [cancelScheduledTerminalLogFlush, clearAllThreadWorkingStopTimers]);
 
@@ -878,6 +950,55 @@ export default function App() {
     );
   }, []);
 
+  const scheduleSessionSnapshotRefreshes = useCallback(
+    (threadId: string, sessionId: string) => {
+      clearSessionSnapshotRefreshTimers(sessionId);
+      const handles: number[] = [];
+
+      for (const delayMs of SESSION_SNAPSHOT_REFRESH_DELAYS_MS) {
+        const handle = window.setTimeout(() => {
+          void (async () => {
+            if (activeRunsByThreadRef.current[threadId]?.sessionId !== sessionId) {
+              return;
+            }
+            if (selectedThreadIdRef.current !== threadId) {
+              return;
+            }
+
+            const snapshot = await api.terminalReadOutput(sessionId).catch(() => '');
+            if (!snapshot) {
+              return;
+            }
+
+            updateTerminalLogMap((current) => {
+              const existing = current[threadId] ?? '';
+              const merged = clampTerminalLog(mergeTerminalLogSnapshot(existing, snapshot));
+              if (merged === existing) {
+                return current;
+              }
+              return {
+                ...current,
+                [threadId]: merged
+              };
+            });
+          })().finally(() => {
+            const currentHandles = terminalSnapshotRefreshTimersBySessionRef.current[sessionId] ?? [];
+            const remaining = currentHandles.filter((value) => value !== handle);
+            if (remaining.length === 0) {
+              delete terminalSnapshotRefreshTimersBySessionRef.current[sessionId];
+            } else {
+              terminalSnapshotRefreshTimersBySessionRef.current[sessionId] = remaining;
+            }
+          });
+        }, delayMs);
+        handles.push(handle);
+      }
+
+      terminalSnapshotRefreshTimersBySessionRef.current[sessionId] = handles;
+    },
+    [clearSessionSnapshotRefreshTimers, updateTerminalLogMap]
+  );
+
   const hydrateSessionSnapshot = useCallback(
     async (threadId: string, sessionId: string, retries = 12, delayMs = 180) => {
       pendingSnapshotBySessionRef.current[sessionId] = {
@@ -924,10 +1045,17 @@ export default function App() {
           const mergedSnapshot = clampTerminalLog(mergeSnapshotAndBufferedLive(settledSnapshot, bufferedLive));
           delete pendingSnapshotBySessionRef.current[sessionId];
           delete pendingTerminalChunksByThreadRef.current[threadId];
-          updateTerminalLogMap((current) => ({
-            ...current,
-            [threadId]: mergedSnapshot
-          }));
+          updateTerminalLogMap((current) => {
+            const existing = current[threadId] ?? '';
+            const merged = clampTerminalLog(mergeTerminalLogSnapshot(existing, mergedSnapshot));
+            if (merged === existing) {
+              return current;
+            }
+            return {
+              ...current,
+              [threadId]: merged
+            };
+          });
           setStartingByThread((current) => removeThreadFlag(current, threadId));
           setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
           return;
@@ -951,7 +1079,8 @@ export default function App() {
         delete pendingTerminalChunksByThreadRef.current[threadId];
         updateTerminalLogMap((current) => {
           const existing = current[threadId] ?? '';
-          const merged = clampTerminalLog(mergeSnapshotAndBufferedLive(existing, bufferedLive));
+          const bufferedMerge = mergeSnapshotAndBufferedLive(existing, bufferedLive);
+          const merged = clampTerminalLog(mergeTerminalLogSnapshot(existing, bufferedMerge));
           if (merged === existing) {
             return current;
           }
@@ -1000,6 +1129,9 @@ export default function App() {
             void hydrateSessionSnapshot(thread.id, existing, 8, 150);
           }
         }
+        if (selectedThreadIdRef.current === thread.id) {
+          scheduleSessionSnapshotRefreshes(thread.id, existing);
+        }
         await flushPendingThreadInput(thread.id, existing);
         return existing;
       }
@@ -1021,6 +1153,7 @@ export default function App() {
       setReadyByThread((current) => removeThreadFlag(current, thread.id));
 
       const startPromise = (async () => {
+        await waitForTerminalDataListenerReady();
         const response = await api.terminalStartSession({
           workspacePath: workspace.path,
           initialCwd: workspace.path,
@@ -1076,6 +1209,9 @@ export default function App() {
         void api.terminalResize(sessionId, terminalSize.cols, terminalSize.rows);
         await flushPendingThreadInput(thread.id, sessionId);
         void hydrateSessionSnapshot(thread.id, sessionId, 18, 180);
+        if (selectedThreadIdRef.current === thread.id) {
+          scheduleSessionSnapshotRefreshes(thread.id, sessionId);
+        }
         return sessionId;
       })()
         .catch((error) => {
@@ -1098,9 +1234,11 @@ export default function App() {
       flushPendingThreadInput,
       hasCachedTerminalLog,
       hydrateSessionSnapshot,
+      scheduleSessionSnapshotRefreshes,
       resetTerminalLog,
       terminalSize.cols,
       terminalSize.rows,
+      waitForTerminalDataListenerReady,
       workspaces
     ]
   );
@@ -1452,6 +1590,8 @@ export default function App() {
       stopThreadWorking(threadId);
       delete sessionMetaBySessionIdRef.current[sessionId];
       delete pendingSnapshotBySessionRef.current[sessionId];
+      delete terminalDataSequenceBySessionRef.current[sessionId];
+      clearSessionSnapshotRefreshTimers(sessionId);
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
     },
@@ -1462,7 +1602,8 @@ export default function App() {
       setThreadRunState,
       stopThreadWorking,
       updateTerminalLogMap,
-      clearThreadWorkingStopTimer
+      clearThreadWorkingStopTimer,
+      clearSessionSnapshotRefreshTimers
     ]
   );
 
@@ -1491,10 +1632,12 @@ export default function App() {
       if (previousThreadId && previousThreadId !== threadId) {
         clearThreadUnread(previousThreadId);
       }
+      clearThreadUnread(threadId);
       if (selectedWorkspaceIdRef.current !== workspaceId) {
         setSelectedWorkspace(workspaceId);
       }
       setSelectedThread(threadId);
+      setTerminalFocusRequestId((current) => current + 1);
     },
     [clearThreadUnread, setSelectedThread, setSelectedWorkspace]
   );
@@ -1750,6 +1893,14 @@ export default function App() {
 
   const handleTerminalDataEvent = useCallback(
     (event: TerminalDataEvent) => {
+      if (typeof event.sequence === 'number') {
+        const latestSeen = terminalDataSequenceBySessionRef.current[event.sessionId] ?? 0;
+        if (event.sequence <= latestSeen) {
+          return;
+        }
+        terminalDataSequenceBySessionRef.current[event.sessionId] = event.sequence;
+      }
+
       const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
       const threadId =
         sessionMeta?.threadId ??
@@ -1798,6 +1949,8 @@ export default function App() {
       const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
       delete sessionMetaBySessionIdRef.current[event.sessionId];
       delete pendingSnapshotBySessionRef.current[event.sessionId];
+      delete terminalDataSequenceBySessionRef.current[event.sessionId];
+      clearSessionSnapshotRefreshTimers(event.sessionId);
 
       const endedThreadId = finishSessionBinding(event.sessionId);
       if (!endedThreadId) {
@@ -1861,6 +2014,7 @@ export default function App() {
       stopThreadWorking,
       updateTerminalLogMap,
       clearThreadWorkingStopTimer,
+      clearSessionSnapshotRefreshTimers,
       markThreadUnread
     ]
   );
@@ -1885,6 +2039,7 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     let unlistenData: (() => void) | null = null;
+    terminalDataListenerReadyRef.current = false;
 
     void onTerminalData((event) => {
       terminalDataEventHandlerRef.current(event);
@@ -1892,17 +2047,21 @@ export default function App() {
       .then((off) => {
         if (cancelled) {
           off();
+          resolveTerminalDataListenerReady();
           return;
         }
         unlistenData = off;
+        resolveTerminalDataListenerReady();
       })
-      .catch(() => undefined);
+      .catch(() => {
+        resolveTerminalDataListenerReady();
+      });
 
     return () => {
       cancelled = true;
       unlistenData?.();
     };
-  }, []);
+  }, [resolveTerminalDataListenerReady]);
 
   useEffect(() => {
     let cancelled = false;

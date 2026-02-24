@@ -53,6 +53,7 @@ export function TerminalPanel({
   const inputBufferRef = useRef('');
   const inputFlushTimerRef = useRef<number | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
+  const refreshFrameRef = useRef<number | null>(null);
   const previousFocusRequestRef = useRef(focusRequestId);
 
   const scrollToBottomSoon = useCallback((term: Terminal) => {
@@ -62,6 +63,19 @@ export function TerminalPanel({
         return;
       }
       term.scrollToBottom();
+    });
+  }, []);
+
+  const scheduleTerminalRefresh = useCallback((term: Terminal) => {
+    if (refreshFrameRef.current !== null) {
+      return;
+    }
+    refreshFrameRef.current = window.requestAnimationFrame(() => {
+      refreshFrameRef.current = null;
+      if (terminalRef.current !== term) {
+        return;
+      }
+      term.refresh(0, Math.max(0, term.rows - 1));
     });
   }, []);
 
@@ -144,7 +158,7 @@ export function TerminalPanel({
 
     try {
       const term = new Terminal({
-        cursorBlink: true,
+        cursorBlink: false,
         convertEol: false,
         scrollback: 10_000,
         fontFamily: '"SF Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace',
@@ -185,6 +199,7 @@ export function TerminalPanel({
             if (terminalRef.current === term && shouldStickToBottomRef.current) {
               term.scrollToBottom();
             }
+            scheduleTerminalRefresh(term);
             done();
           });
         }
@@ -196,6 +211,7 @@ export function TerminalPanel({
         if (shouldStickToBottomRef.current) {
           scrollToBottomSoon(term);
         }
+        scheduleTerminalRefresh(term);
       };
       fitAndNotify();
       window.requestAnimationFrame(() => {
@@ -204,6 +220,14 @@ export function TerminalPanel({
         }
         fitAndNotify();
       });
+      if ('fonts' in document) {
+        void (document as Document & { fonts?: { ready: Promise<unknown> } }).fonts?.ready.then(() => {
+          if (terminalRef.current !== term) {
+            return;
+          }
+          fitAndNotify();
+        });
+      }
 
       if (contentRef.current.length > 0) {
         shouldStickToBottomRef.current = true;
@@ -283,6 +307,10 @@ export function TerminalPanel({
           window.cancelAnimationFrame(resizeFrameRef.current);
           resizeFrameRef.current = null;
         }
+        if (refreshFrameRef.current !== null) {
+          window.cancelAnimationFrame(refreshFrameRef.current);
+          refreshFrameRef.current = null;
+        }
       };
     } catch {
       setFallback(true);
@@ -344,7 +372,8 @@ export function TerminalPanel({
 
     resetTerminalContent(contentRef.current);
     renderedContentRef.current = contentRef.current;
-  }, [clearPendingWrites, resetTerminalContent, sessionId]);
+    scheduleTerminalRefresh(term);
+  }, [clearPendingWrites, resetTerminalContent, scheduleTerminalRefresh, sessionId]);
 
   useEffect(() => {
     const term = terminalRef.current;
@@ -378,7 +407,17 @@ export function TerminalPanel({
 
     resetTerminalContent(content);
     renderedContentRef.current = content;
-  }, [content, contentLimitChars, readOnly, resetTerminalContent, sessionId, queueWrite, scrollToBottomSoon]);
+    scheduleTerminalRefresh(term);
+  }, [
+    content,
+    contentLimitChars,
+    readOnly,
+    resetTerminalContent,
+    scheduleTerminalRefresh,
+    sessionId,
+    queueWrite,
+    scrollToBottomSoon
+  ]);
 
   useEffect(() => {
     if (previousFocusRequestRef.current === focusRequestId) {
@@ -392,7 +431,8 @@ export function TerminalPanel({
     term.focus();
     shouldStickToBottomRef.current = true;
     scrollToBottomSoon(term);
-  }, [focusRequestId, scrollToBottomSoon]);
+    scheduleTerminalRefresh(term);
+  }, [focusRequestId, scheduleTerminalRefresh, scrollToBottomSoon]);
 
   if (fallback) {
     return (

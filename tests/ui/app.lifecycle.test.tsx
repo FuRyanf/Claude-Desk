@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -249,6 +249,34 @@ describe('Thread lifecycle integration', () => {
     render(<App />);
 
     await screen.findByRole('button', { name: /Thread one/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-1' })
+      );
+    });
+  });
+
+  it('waits for terminal data subscription before starting a thread session', async () => {
+    let releaseSubscription: (() => void) | null = null;
+    mocks.onTerminalData.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        releaseSubscription = resolve;
+      });
+      return () => undefined;
+    });
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Thread one/i });
+    await new Promise<void>((resolve) => {
+      window.setTimeout(() => resolve(), 120);
+    });
+    expect(mocks.api.terminalStartSession).not.toHaveBeenCalled();
+
+    act(() => {
+      releaseSubscription?.();
+    });
+
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
         expect.objectContaining({ threadId: 'thread-1' })

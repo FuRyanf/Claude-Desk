@@ -31,7 +31,7 @@ const mocks = vi.hoisted(() => {
   };
 
   let threadState = [{ ...baseThread }];
-  let terminalDataHandler: ((event: { sessionId: string; data: string }) => void) | null = null;
+  let terminalDataHandler: ((event: { sessionId: string; data: string; sequence?: number }) => void) | null = null;
 
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
@@ -153,14 +153,14 @@ const mocks = vi.hoisted(() => {
   return {
     api,
     reset,
-    emitTerminalData: (event: { sessionId: string; data: string }) => {
+    emitTerminalData: (event: { sessionId: string; data: string; sequence?: number }) => {
       terminalDataHandler?.(event);
     },
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
-    onTerminalData: vi.fn(async (handler: (event: { sessionId: string; data: string }) => void) => {
+    onTerminalData: vi.fn(async (handler: (event: { sessionId: string; data: string; sequence?: number }) => void) => {
       terminalDataHandler = handler;
       return () => {
         if (terminalDataHandler === handler) {
@@ -302,6 +302,25 @@ describe('Sidebar behavior', () => {
       const rendered = screen.getByTestId('terminal-content-mock').textContent ?? '';
       expect(rendered).toContain('LIVE_OUTPUT');
       expect(rendered).not.toContain('STALE_SNAPSHOT');
+    });
+  });
+
+  it('ignores duplicate terminal data events when sequence ids repeat', async () => {
+    render(<App />);
+
+    await screen.findByRole('button', { name: /First thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-1' }));
+    });
+
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-1', data: 'DUPLICATE_LINE\n', sequence: 7 });
+      mocks.emitTerminalData({ sessionId: 'session-thread-1', data: 'DUPLICATE_LINE\n', sequence: 7 });
+    });
+
+    await waitFor(() => {
+      const rendered = screen.getByTestId('terminal-content-mock').textContent ?? '';
+      expect((rendered.match(/DUPLICATE_LINE/g) ?? []).length).toBe(1);
     });
   });
 

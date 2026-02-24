@@ -109,6 +109,7 @@ export interface TerminalStartResponse {
 export interface TerminalDataEvent {
   sessionId: string;
   data: string;
+  sequence?: number;
 }
 
 export interface TerminalExitEvent {

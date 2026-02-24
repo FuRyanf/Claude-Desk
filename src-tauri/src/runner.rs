@@ -853,6 +853,7 @@ pub async fn terminal_start_session(
         let mut buffer = [0u8; 4096];
         let mut utf8_carry = Vec::<u8>::new();
         let mut session_id_parse_buffer = String::new();
+        let mut chunk_sequence: u64 = 0;
         loop {
             let read = match reader.read(&mut buffer) {
                 Ok(0) => break,
@@ -881,11 +882,13 @@ pub async fn terminal_start_session(
                         }
                     }
                 }
+                chunk_sequence = chunk_sequence.saturating_add(1);
                 let _ = data_app.emit(
                     TERMINAL_DATA_EVENT,
                     TerminalDataEvent {
                         session_id: data_session_id.clone(),
                         data: chunk,
+                        sequence: chunk_sequence,
                     },
                 );
             }
@@ -908,11 +911,13 @@ pub async fn terminal_start_session(
                     }
                 }
             }
+            chunk_sequence = chunk_sequence.saturating_add(1);
             let _ = data_app.emit(
                 TERMINAL_DATA_EVENT,
                 TerminalDataEvent {
                     session_id: data_session_id.clone(),
                     data: trailing,
+                    sequence: chunk_sequence,
                 },
             );
         }

@@ -184,6 +184,7 @@ pub struct TerminalStartResponse {
 pub struct TerminalDataEvent {
     pub session_id: String,
     pub data: String,
+    pub sequence: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
