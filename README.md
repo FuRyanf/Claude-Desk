@@ -26,6 +26,13 @@ Claude Desk solves this by keeping Claude CLI local while adding a desktop contr
 
 ## Quick Start (No Dev Setup)
 
+This path is for end users. You only need:
+
+- macOS
+- Claude CLI installed (`claude` on PATH, or set the path in-app)
+
+You do **not** need Node.js, Yarn, or Rust for this install flow.
+
 Download the latest DMG:
 
 ```bash
@@ -38,12 +45,15 @@ Then install + trust + launch:
 bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/Claude-Desk.dmg"; VOL="$(hdiutil attach "$DMG" -nobrowse | sed -n '\''s|^.*\(/Volumes/.*\)$|\1|p'\'' | head -n 1)"; trap '\''hdiutil detach "$VOL" -quiet >/dev/null 2>&1 || true'\'' EXIT; ditto "$VOL/Claude Desk.app" "/Applications/Claude Desk.app"; xattr -dr com.apple.quarantine "/Applications/Claude Desk.app" || true; open "/Applications/Claude Desk.app"'
 ```
 
-## Requirements
+Prebuilt release note:
 
-- macOS (desktop build target)
+- Current CI release artifacts are built as Apple Silicon (`aarch64`) macOS binaries.
+
+## Development Requirements (Source Build Only)
+
 - Node.js + Yarn
 - Rust toolchain (for Tauri build)
-- Claude Code CLI installed (`claude` on PATH or configured in app settings)
+- Claude CLI installed (`claude` on PATH or configured in app settings)
 
 ## Install
 
