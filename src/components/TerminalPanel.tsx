@@ -102,14 +102,16 @@ export function TerminalPanel({
         return;
       }
 
-      shouldStickToBottomRef.current = true;
+      const shouldFollowOutput = shouldStickToBottomRef.current;
       clearPendingWrites();
       term.reset();
       if (nextContent.length > 0) {
         queueWrite(nextContent);
         writeQueueRef.current.flushImmediate();
       }
-      scrollToBottomSoon(term);
+      if (shouldFollowOutput) {
+        scrollToBottomSoon(term);
+      }
     },
     [clearPendingWrites, queueWrite, scrollToBottomSoon]
   );
@@ -236,6 +238,12 @@ export function TerminalPanel({
         shouldStickToBottomRef.current =
           viewportY >= Math.max(0, bottom - STICKY_SCROLL_TOLERANCE);
       });
+      const onWheel = (event: WheelEvent) => {
+        if (event.deltaY < 0) {
+          shouldStickToBottomRef.current = false;
+        }
+      };
+      host.addEventListener('wheel', onWheel, { passive: true });
 
       const onFocusIn = () => onFocusChangeRef.current?.(true);
       const onFocusOut = () => onFocusChangeRef.current?.(false);
@@ -257,6 +265,7 @@ export function TerminalPanel({
         observer.disconnect();
         onDataDisposable.dispose();
         onScrollDisposable.dispose();
+        host.removeEventListener('wheel', onWheel);
         host.removeEventListener('focusin', onFocusIn);
         host.removeEventListener('focusout', onFocusOut);
         flushOutgoingInput();
