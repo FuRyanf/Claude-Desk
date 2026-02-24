@@ -1,6 +1,6 @@
 # Claude Desk Technology Notes
 
-This file documents the current implementation as of the latest rollback of terminal streaming changes.
+This file documents the current implementation as of v0.1.10.
 
 ## Architecture
 
@@ -83,9 +83,16 @@ Important files:
 
 - branch listing
 - status summaries
-- checkout / create-and-checkout
+- checkout
+- create-and-checkout (backend capability; not currently exposed in the branch switcher UI)
+- optional `git pull` pre-step on `master` for new threads when workspace setting is enabled
 
 Before branch switching, workspace terminal sessions are shut down to prevent process/branch mismatch.
+
+## Keyboard Behavior
+
+- `Cmd+C` follows native macOS copy behavior in the embedded terminal.
+- `Ctrl+C` sends `SIGINT` to the active terminal session.
 
 ## Notes for Future Terminal Work
 

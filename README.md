@@ -47,7 +47,8 @@ bash -lc 'set -euo pipefail; DMG="$HOME/Downloads/Claude-Desk.dmg"; VOL="$(hdiut
 
 Prebuilt release note:
 
-- Current CI release artifacts are built as Apple Silicon (`aarch64`) macOS binaries.
+- Releases publish a macOS DMG and app ZIP via GitHub Actions.
+- If you hit machine-specific compatibility issues, build from source locally (`yarn tauri build`) for your environment.
 
 ## Development Requirements (Source Build Only)
 
@@ -140,6 +141,8 @@ Claude Desk is a three-layer local architecture:
 - Backend (`Tauri` + `Rust`): exposes command handlers for thread persistence, PTY control, git, and settings.
 - PTY layer (`portable_pty` + local shell): runs Claude in an actual pseudo-terminal and streams bytes to the UI.
 
+For deeper implementation details (runtime flow, buffering/hydration, and operational notes), see [`technology.md`](technology.md).
+
 Claude is started through `terminal_start_session`, which launches your login shell as `$SHELL -lic` (fallback `/bin/zsh`) and runs either:
 
 - `claude --session-id <uuid>` for a new thread session
@@ -152,7 +155,7 @@ Session resume is thread-scoped. `thread.json` stores `claudeSessionId`, `lastRe
 
 Threads are persisted independently of live PTY processes (`thread.json` + `runs/<runId>/output.log` + `runs/<runId>/metadata.json`), so thread actions update metadata without coupling to transient runtime state.
 
-Git integration is local CLI based (`git_tools.rs`): branch/status polling, branch switch/create, and workspace-safe session shutdown around checkout operations.
+Git integration is local CLI based (`git_tools.rs`): branch/status polling, branch checkout from the UI, optional per-workspace git pull pre-step for new threads, and workspace-safe session shutdown around checkout operations.
 
 Why it stays fast:
 
