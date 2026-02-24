@@ -1952,7 +1952,7 @@ export default function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
 
-      if (terminalFocused && event.metaKey && key === 'c' && selectedSessionId) {
+      if (terminalFocused && event.ctrlKey && !event.metaKey && !event.altKey && key === 'c' && selectedSessionId) {
         event.preventDefault();
         void api.terminalSendSignal(selectedSessionId, 'SIGINT');
         return;
