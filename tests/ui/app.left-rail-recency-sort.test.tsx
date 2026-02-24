@@ -425,6 +425,31 @@ describe('Left rail recency and sorting semantics', () => {
     expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
   });
 
+  it('does not mark unread from control-only terminal chunks', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Newer thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+    });
+
+    await user.click(screen.getByRole('button', { name: /Older thread/i }));
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
+    });
+
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: '\u001b[?25l\u001b[1G\u001b[K' });
+    });
+
+    await new Promise<void>((resolve) => {
+      window.setTimeout(() => resolve(), 50);
+    });
+
+    expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+  });
+
   it('keeps a single terminal data subscription while run state changes', async () => {
     const user = userEvent.setup();
     render(<App />);

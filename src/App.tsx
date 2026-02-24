@@ -201,6 +201,14 @@ function clampTerminalLog(text: string): string {
   return text.slice(text.length - TERMINAL_LOG_BUFFER_CHARS);
 }
 
+function hasMeaningfulTerminalOutputChunk(chunk: string): boolean {
+  if (!chunk) {
+    return false;
+  }
+  const visibleText = stripAnsi(chunk).replace(/[\r\n\t\b\f\v]/g, '');
+  return visibleText.trim().length > 0;
+}
+
 function mergeTerminalLogSnapshot(existing: string, incoming: string): string {
   if (!incoming) {
     return existing;
@@ -689,9 +697,13 @@ export default function App() {
     delete terminalSnapshotRefreshTimersBySessionRef.current[sessionId];
   }, []);
 
-  const noteThreadOutput = useCallback((threadId: string) => {
+  const noteThreadOutput = useCallback((threadId: string, chunk: string) => {
+    if (!hasMeaningfulTerminalOutputChunk(chunk)) {
+      return false;
+    }
     outputSequenceCounterRef.current += 1;
     latestOutputSequenceByThreadRef.current[threadId] = outputSequenceCounterRef.current;
+    return true;
   }, []);
 
   const markThreadOutputSeen = useCallback((threadId: string) => {
@@ -1909,7 +1921,7 @@ export default function App() {
         return;
       }
 
-      noteThreadOutput(threadId);
+      const hasMeaningfulOutput = noteThreadOutput(threadId, event.data);
       const isSelectedThread = selectedThreadIdRef.current === threadId;
       const pendingHydration = pendingSnapshotBySessionRef.current[event.sessionId];
       const isHydratingSession = pendingHydration?.threadId === threadId;
@@ -1921,7 +1933,7 @@ export default function App() {
         );
         if (workingByThreadRef.current[threadId]) {
           scheduleThreadWorkingStop(threadId);
-        } else if (!isSelectedThread) {
+        } else if (!isSelectedThread && hasMeaningfulOutput) {
           markThreadUnread(threadId);
         } else {
           clearThreadUnread(threadId);
@@ -1936,7 +1948,7 @@ export default function App() {
       }
       if (workingByThreadRef.current[threadId]) {
         scheduleThreadWorkingStop(threadId);
-      } else if (!isSelectedThread) {
+      } else if (!isSelectedThread && hasMeaningfulOutput) {
         markThreadUnread(threadId);
       }
       appendTerminalLogChunk(threadId, event.data);
