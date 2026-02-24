@@ -1,12 +1,24 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceKind {
+    #[default]
+    Local,
+    Rdev,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Workspace {
     pub id: String,
     pub name: String,
     pub path: String,
+    #[serde(default)]
+    pub kind: WorkspaceKind,
+    #[serde(default)]
+    pub rdev_ssh_command: Option<String>,
     #[serde(default)]
     pub git_pull_on_master_for_new_threads: bool,
     pub created_at: DateTime<Utc>,

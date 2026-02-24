@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => {
     id: 'ws-1',
     name: 'Workspace',
     path: '/tmp/workspace',
+    kind: 'local' as const,
+    rdevSshCommand: null,
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -53,19 +55,85 @@ const mocks = vi.hoisted(() => {
   let threadState = baseThreads.map((thread) => ({ ...thread }));
   let workspaceState = { ...workspace };
 
+  const listWorkspacesImpl = async () => [workspaceState];
+  const setWorkspaceGitPullOnMasterForNewThreadsImpl = async (_workspaceId: string, enabled: boolean) => {
+    workspaceState = {
+      ...workspaceState,
+      gitPullOnMasterForNewThreads: enabled,
+      updatedAt: new Date().toISOString()
+    };
+    return workspaceState;
+  };
+  const listThreadsImpl = async () => threadState;
+  const createThreadImpl = async () => {
+    const next = {
+      ...threadState[0],
+      id: `thread-${threadState.length + 1}`,
+      title: 'New thread',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    threadState = [next, ...threadState];
+    return next;
+  };
+  const renameThreadImpl = async (_workspaceId: string, threadId: string, title: string) => {
+    const updated = {
+      ...threadState.find((thread) => thread.id === threadId)!,
+      title,
+      updatedAt: new Date().toISOString()
+    };
+    threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
+    return updated;
+  };
+  const archiveThreadImpl = async (_workspaceId: string, threadId: string) => {
+    const updated = {
+      ...threadState.find((thread) => thread.id === threadId)!,
+      isArchived: true,
+      updatedAt: new Date().toISOString()
+    };
+    threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
+    return updated;
+  };
+  const deleteThreadImpl = async (_workspaceId: string, threadId: string) => {
+    threadState = threadState.filter((thread) => thread.id !== threadId);
+    return true;
+  };
+  const setThreadFullAccessImpl = async (_workspaceId: string, threadId: string, fullAccess: boolean) => {
+    const updated = {
+      ...threadState.find((thread) => thread.id === threadId)!,
+      fullAccess,
+      updatedAt: new Date().toISOString()
+    };
+    threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
+    return updated;
+  };
+  const clearThreadClaudeSessionImpl = async (_workspaceId: string, threadId: string) => {
+    const updated = {
+      ...threadState.find((thread) => thread.id === threadId)!,
+      claudeSessionId: null,
+      updatedAt: new Date().toISOString()
+    };
+    threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
+    return updated;
+  };
+  const terminalStartSessionImpl = async (params: { threadId: string }) => ({
+    sessionId: `session-${params.threadId}`,
+    sessionMode: 'new' as const,
+    resumeSessionId: null,
+    thread: threadState.find((thread) => thread.id === params.threadId) ?? threadState[0]
+  });
+  const terminalReadOutputImpl = async () => '';
+  const gitPullMasterForNewThreadImpl = async () => ({
+    outcome: 'pulled' as const,
+    message: 'Checked out master and pulled latest changes.'
+  });
+
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
-    listWorkspaces: vi.fn(async () => [workspaceState]),
+    listWorkspaces: vi.fn(listWorkspacesImpl),
     addWorkspace: vi.fn(async () => workspaceState),
     removeWorkspace: vi.fn(async () => true),
-    setWorkspaceGitPullOnMasterForNewThreads: vi.fn(async (_workspaceId: string, enabled: boolean) => {
-      workspaceState = {
-        ...workspaceState,
-        gitPullOnMasterForNewThreads: enabled,
-        updatedAt: new Date().toISOString()
-      };
-      return workspaceState;
-    }),
+    setWorkspaceGitPullOnMasterForNewThreads: vi.fn(setWorkspaceGitPullOnMasterForNewThreadsImpl),
     getGitInfo: vi.fn(async () => ({
       branch: 'main',
       shortHash: 'abc123',
@@ -86,62 +154,14 @@ const mocks = vi.hoisted(() => {
     })),
     gitCheckoutBranch: vi.fn(async () => true),
     gitCreateAndCheckoutBranch: vi.fn(async () => true),
-    gitPullMasterForNewThread: vi.fn(async () => ({
-      outcome: 'pulled' as const,
-      message: 'Checked out master and pulled latest changes.'
-    })),
-    listThreads: vi.fn(async () => threadState),
-    createThread: vi.fn(async () => {
-      const next = {
-        ...threadState[0],
-        id: `thread-${threadState.length + 1}`,
-        title: 'New thread',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-      threadState = [next, ...threadState];
-      return next;
-    }),
-    renameThread: vi.fn(async (_workspaceId: string, threadId: string, title: string) => {
-      const updated = {
-        ...threadState.find((thread) => thread.id === threadId)!,
-        title,
-        updatedAt: new Date().toISOString()
-      };
-      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
-      return updated;
-    }),
-    archiveThread: vi.fn(async (_workspaceId: string, threadId: string) => {
-      const updated = {
-        ...threadState.find((thread) => thread.id === threadId)!,
-        isArchived: true,
-        updatedAt: new Date().toISOString()
-      };
-      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
-      return updated;
-    }),
-    deleteThread: vi.fn(async (_workspaceId: string, threadId: string) => {
-      threadState = threadState.filter((thread) => thread.id !== threadId);
-      return true;
-    }),
-    setThreadFullAccess: vi.fn(async (_workspaceId: string, threadId: string, fullAccess: boolean) => {
-      const updated = {
-        ...threadState.find((thread) => thread.id === threadId)!,
-        fullAccess,
-        updatedAt: new Date().toISOString()
-      };
-      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
-      return updated;
-    }),
-    clearThreadClaudeSession: vi.fn(async (_workspaceId: string, threadId: string) => {
-      const updated = {
-        ...threadState.find((thread) => thread.id === threadId)!,
-        claudeSessionId: null,
-        updatedAt: new Date().toISOString()
-      };
-      threadState = threadState.map((thread) => (thread.id === threadId ? updated : thread));
-      return updated;
-    }),
+    gitPullMasterForNewThread: vi.fn(gitPullMasterForNewThreadImpl),
+    listThreads: vi.fn(listThreadsImpl),
+    createThread: vi.fn(createThreadImpl),
+    renameThread: vi.fn(renameThreadImpl),
+    archiveThread: vi.fn(archiveThreadImpl),
+    deleteThread: vi.fn(deleteThreadImpl),
+    setThreadFullAccess: vi.fn(setThreadFullAccessImpl),
+    clearThreadClaudeSession: vi.fn(clearThreadClaudeSessionImpl),
     setThreadSkills: vi.fn(async () => {
       throw new Error('not needed');
     }),
@@ -157,18 +177,13 @@ const mocks = vi.hoisted(() => {
     getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
     saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
     detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
-    terminalStartSession: vi.fn(async (params: { threadId: string }) => ({
-      sessionId: `session-${params.threadId}`,
-      sessionMode: 'new',
-      resumeSessionId: null,
-      thread: threadState.find((thread) => thread.id === params.threadId) ?? threadState[0]
-    })),
+    terminalStartSession: vi.fn(terminalStartSessionImpl),
     terminalWrite: vi.fn(async () => true),
     terminalResize: vi.fn(async () => true),
     terminalKill: vi.fn(async () => true),
     terminalSendSignal: vi.fn(async () => true),
     terminalGetLastLog: vi.fn(async () => ''),
-    terminalReadOutput: vi.fn(async () => ''),
+    terminalReadOutput: vi.fn(terminalReadOutputImpl),
     runClaude: vi.fn(async () => ({ runId: 'run-1' })),
     cancelRun: vi.fn(async () => true),
     generateCommitMessage: vi.fn(async () => 'chore: update'),
@@ -181,6 +196,30 @@ const mocks = vi.hoisted(() => {
     threadState = baseThreads.map((thread) => ({ ...thread }));
     workspaceState = { ...workspace };
     window.localStorage.clear();
+    api.listWorkspaces.mockReset();
+    api.listWorkspaces.mockImplementation(listWorkspacesImpl);
+    api.setWorkspaceGitPullOnMasterForNewThreads.mockReset();
+    api.setWorkspaceGitPullOnMasterForNewThreads.mockImplementation(setWorkspaceGitPullOnMasterForNewThreadsImpl);
+    api.gitPullMasterForNewThread.mockReset();
+    api.gitPullMasterForNewThread.mockImplementation(gitPullMasterForNewThreadImpl);
+    api.listThreads.mockReset();
+    api.listThreads.mockImplementation(listThreadsImpl);
+    api.createThread.mockReset();
+    api.createThread.mockImplementation(createThreadImpl);
+    api.renameThread.mockReset();
+    api.renameThread.mockImplementation(renameThreadImpl);
+    api.archiveThread.mockReset();
+    api.archiveThread.mockImplementation(archiveThreadImpl);
+    api.deleteThread.mockReset();
+    api.deleteThread.mockImplementation(deleteThreadImpl);
+    api.setThreadFullAccess.mockReset();
+    api.setThreadFullAccess.mockImplementation(setThreadFullAccessImpl);
+    api.clearThreadClaudeSession.mockReset();
+    api.clearThreadClaudeSession.mockImplementation(clearThreadClaudeSessionImpl);
+    api.terminalStartSession.mockReset();
+    api.terminalStartSession.mockImplementation(terminalStartSessionImpl);
+    api.terminalReadOutput.mockReset();
+    api.terminalReadOutput.mockImplementation(terminalReadOutputImpl);
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -234,6 +273,54 @@ describe('Thread lifecycle integration', () => {
     });
   });
 
+  it('starts rdev workspace sessions with null initial cwd', async () => {
+    const remoteWorkspace = {
+      id: 'ws-rdev',
+      name: 'offbeat-apple',
+      path: 'rdev-workspace-1',
+      kind: 'rdev' as const,
+      rdevSshCommand: 'rdev ssh comms-ai-open-connect/offbeat-apple',
+      gitPullOnMasterForNewThreads: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    const remoteThread = {
+      id: 'thread-rdev',
+      workspaceId: 'ws-rdev',
+      agentId: 'claude-code',
+      fullAccess: false,
+      enabledSkills: [] as string[],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      title: 'Remote thread',
+      isArchived: false,
+      lastRunStatus: 'Idle' as const,
+      lastRunStartedAt: null,
+      lastRunEndedAt: null,
+      claudeSessionId: null,
+      lastResumeAt: null,
+      lastNewSessionAt: null
+    };
+
+    mocks.api.listWorkspaces.mockResolvedValueOnce([remoteWorkspace]);
+    mocks.api.listThreads.mockImplementation(async (workspaceId: string) =>
+      workspaceId === 'ws-rdev' ? [remoteThread] : []
+    );
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Remote thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspacePath: 'rdev-workspace-1',
+          initialCwd: null,
+          threadId: 'thread-rdev'
+        })
+      );
+    });
+  });
+
   it('still auto-starts after delayed thread metadata hydration', async () => {
     const originalListThreads = mocks.api.listThreads.getMockImplementation();
     mocks.api.listThreads.mockImplementation(async (workspaceId: string) => {
@@ -282,6 +369,37 @@ describe('Thread lifecycle integration', () => {
         expect.objectContaining({ threadId: 'thread-1' })
       );
     });
+  });
+
+  it('auto-recovers the selected thread session after focus when the previous session is gone', async () => {
+    let disconnected = false;
+    mocks.api.terminalReadOutput.mockImplementation(async (sessionId: string) => {
+      if (disconnected && sessionId === 'session-thread-1') {
+        throw new Error('Terminal session not found');
+      }
+      return '';
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-1' })
+      );
+    });
+    const startCallsBefore = mocks.api.terminalStartSession.mock.calls.length;
+
+    disconnected = true;
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession.mock.calls.length).toBeGreaterThan(startCallsBefore);
+    });
+    expect(mocks.api.terminalStartSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ threadId: 'thread-1' })
+    );
   });
 
   it('keeps the previous thread session running and starts the next one when switching threads', async () => {
@@ -483,7 +601,7 @@ describe('Thread lifecycle integration', () => {
     await waitFor(() => {
       expect(mocks.api.renameThread).toHaveBeenCalledWith('ws-1', 'thread-1', 'Renamed inline');
     });
-    expect(await screen.findByText('Renamed inline')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /^Renamed inline$/ })).toBeInTheDocument();
   });
 
   it('deletes a thread and keeps remaining threads interactive', async () => {

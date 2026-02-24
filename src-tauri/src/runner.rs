@@ -20,7 +20,7 @@ use crate::git_tools;
 use crate::models::{
     ContextFilePreview, ContextPreview, RunClaudeRequest, RunClaudeResponse, RunExitEvent,
     RunMetadata, Settings, StreamEvent, TerminalDataEvent, TerminalExitEvent,
-    TerminalStartResponse, ThreadRunStatus, TranscriptEntry,
+    TerminalStartResponse, ThreadRunStatus, TranscriptEntry, WorkspaceKind,
 };
 use crate::skills;
 use crate::storage;
@@ -31,6 +31,7 @@ const TERMINAL_DATA_EVENT: &str = "terminal:data";
 const TERMINAL_EXIT_EVENT: &str = "terminal:exit";
 const THREAD_UPDATED_EVENT: &str = "thread:updated";
 const SESSION_ID_PARSE_BUFFER_MAX: usize = 24 * 1024;
+const POST_CONNECT_PROMPT_BUFFER_MAX: usize = 16 * 1024;
 const TERMINAL_LOG_SNAPSHOT_MAX_BYTES: u64 = 512 * 1024;
 const TERMINAL_ENV_DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(8);
 const COMMIT_MESSAGE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -140,6 +141,70 @@ fn build_claude_shell_command(
         parts.push("--dangerously-skip-permissions".to_string());
     }
     parts.join(" ")
+}
+
+fn build_terminal_shell_command(
+    workspace_kind: WorkspaceKind,
+    rdev_ssh_command: Option<&str>,
+    claude_shell_command: &str,
+) -> Result<(String, Option<String>)> {
+    if workspace_kind != WorkspaceKind::Rdev {
+        return Ok((claude_shell_command.to_string(), None));
+    }
+
+    let remote_command = rdev_ssh_command
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("Missing rdev ssh command for remote workspace"))?;
+
+    if remote_command.contains("{CLAUDE_CMD}") {
+        return Ok((
+            remote_command.replace("{CLAUDE_CMD}", claude_shell_command),
+            None,
+        ));
+    }
+
+    Ok((
+        remote_command.to_string(),
+        Some(claude_shell_command.to_string()),
+    ))
+}
+
+fn trim_prompt_probe_buffer(buffer: &mut String) {
+    if buffer.len() <= POST_CONNECT_PROMPT_BUFFER_MAX {
+        return;
+    }
+    let drain_len = buffer.len() - (POST_CONNECT_PROMPT_BUFFER_MAX / 2);
+    buffer.drain(..drain_len);
+}
+
+fn looks_like_shell_prompt(buffer: &str) -> bool {
+    for line in buffer
+        .replace('\r', "\n")
+        .lines()
+        .rev()
+        .take(4)
+    {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("for shortcuts")
+            || lower.contains("bypass permissions")
+            || lower.contains("claude code")
+        {
+            continue;
+        }
+        if trimmed.ends_with('$')
+            || trimmed.ends_with('#')
+            || trimmed.ends_with('%')
+            || trimmed.ends_with('>')
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_uuid_like(value: &str) -> bool {
@@ -674,10 +739,9 @@ pub async fn terminal_start_session(
     full_access_flag: bool,
     thread_id: String,
 ) -> Result<TerminalStartResponse> {
-    let workspace_id =
-        storage::resolve_workspace_id_by_path(&workspace_path)?.ok_or_else(|| {
-            anyhow!("Workspace not registered. Add workspace before starting terminal.")
-        })?;
+    let workspace = storage::resolve_workspace_by_path(&workspace_path)?
+        .ok_or_else(|| anyhow!("Workspace not registered. Add workspace before starting terminal."))?;
+    let workspace_id = workspace.id.clone();
     let stale_sessions = state
         .terminal_sessions
         .remove_for_thread(&workspace_id, &thread_id)?;
@@ -742,18 +806,30 @@ pub async fn terminal_start_session(
     let cli_path = detect_claude_cli_path(&settings)
         .ok_or_else(|| anyhow!("Claude CLI not found. Configure the CLI path in Settings."))?;
 
-    let cwd = initial_cwd.unwrap_or_else(|| workspace_path.clone());
+    let cwd = if workspace.kind == WorkspaceKind::Rdev {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/"))
+            .to_string_lossy()
+            .to_string()
+    } else {
+        initial_cwd.unwrap_or_else(|| workspace_path.clone())
+    };
     let session_id = Uuid::new_v4().to_string();
     let run_dir = storage::runs_dir(&workspace_id, &thread_id)?.join(&session_id);
     fs::create_dir_all(&run_dir)?;
 
     let shell_path = resolve_login_shell();
-    let shell_command = build_claude_shell_command(
+    let claude_shell_command = build_claude_shell_command(
         &cli_path,
         &launch_session_id,
         session_mode == TerminalSessionMode::Resumed,
         full_access_flag,
     );
+    let (shell_command, post_connect_command) = build_terminal_shell_command(
+        workspace.kind,
+        workspace.rdev_ssh_command.as_deref(),
+        &claude_shell_command,
+    )?;
     let command_manifest = vec![
         shell_path.clone(),
         "-lic".to_string(),
@@ -778,6 +854,12 @@ pub async fn terminal_start_session(
             "shellCommand": shell_command,
             "startedAt": started_at,
             "mode": "interactive-terminal"
+            ,
+            "workspaceKind": match workspace.kind {
+                WorkspaceKind::Local => "local",
+                WorkspaceKind::Rdev => "rdev"
+            },
+            "postConnectCommand": post_connect_command
         }),
     )?;
 
@@ -848,11 +930,14 @@ pub async fn terminal_start_session(
     let data_thread_id = thread_id.clone();
     let data_output_log = output_log.clone();
     let data_app = app.clone();
+    let post_connect_writer = session.writer.clone();
+    let mut pending_post_connect_command = post_connect_command;
     let mut should_capture_session_id = false;
     std::thread::spawn(move || {
         let mut buffer = [0u8; 4096];
         let mut utf8_carry = Vec::<u8>::new();
         let mut session_id_parse_buffer = String::new();
+        let mut post_connect_prompt_probe = String::new();
         let mut chunk_sequence: u64 = 0;
         loop {
             let read = match reader.read(&mut buffer) {
@@ -866,6 +951,18 @@ pub async fn terminal_start_session(
             }
 
             if let Some(chunk) = decode_utf8_chunk(&buffer[..read], &mut utf8_carry) {
+                if let Some(command) = pending_post_connect_command.as_ref() {
+                    post_connect_prompt_probe.push_str(&strip_ansi_sequences(&chunk));
+                    trim_prompt_probe_buffer(&mut post_connect_prompt_probe);
+                    if looks_like_shell_prompt(&post_connect_prompt_probe) {
+                        if let Ok(mut writer) = post_connect_writer.lock() {
+                            let _ = writer.write_all(format!("{command}\r").as_bytes());
+                            let _ = writer.flush();
+                        }
+                        pending_post_connect_command = None;
+                        post_connect_prompt_probe.clear();
+                    }
+                }
                 if should_capture_session_id {
                     if let Some(captured_session_id) =
                         extract_resume_session_id_from_chunk(&mut session_id_parse_buffer, &chunk)
@@ -896,6 +993,17 @@ pub async fn terminal_start_session(
 
         if !utf8_carry.is_empty() {
             let trailing = String::from_utf8_lossy(&utf8_carry).to_string();
+            if let Some(command) = pending_post_connect_command.as_ref() {
+                post_connect_prompt_probe.push_str(&strip_ansi_sequences(&trailing));
+                trim_prompt_probe_buffer(&mut post_connect_prompt_probe);
+                if looks_like_shell_prompt(&post_connect_prompt_probe) {
+                    if let Ok(mut writer) = post_connect_writer.lock() {
+                        let _ = writer.write_all(format!("{command}\r").as_bytes());
+                        let _ = writer.flush();
+                    }
+                    post_connect_prompt_probe.clear();
+                }
+            }
             if should_capture_session_id {
                 if let Some(captured_session_id) =
                     extract_resume_session_id_from_chunk(&mut session_id_parse_buffer, &trailing)

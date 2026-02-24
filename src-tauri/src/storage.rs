@@ -7,7 +7,9 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::models::{Settings, ThreadMetadata, ThreadRunStatus, TranscriptEntry, Workspace};
+use crate::models::{
+    Settings, ThreadMetadata, ThreadRunStatus, TranscriptEntry, Workspace, WorkspaceKind,
+};
 
 const APP_SUPPORT_SUBDIR: &str = "Library/Application Support/ClaudeDesk";
 
@@ -136,6 +138,66 @@ pub fn add_workspace(path: &str) -> Result<Workspace> {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "Workspace".to_string()),
         path: canonical,
+        kind: WorkspaceKind::Local,
+        rdev_ssh_command: None,
+        git_pull_on_master_for_new_threads: false,
+        created_at: now,
+        updated_at: now,
+    };
+
+    workspaces.push(workspace.clone());
+    save_workspaces(&workspaces)?;
+    fs::create_dir_all(thread_workspace_dir(&workspace.id)?)?;
+
+    Ok(workspace)
+}
+
+pub fn add_rdev_workspace(rdev_ssh_command: &str, display_name: Option<&str>) -> Result<Workspace> {
+    let normalized_command = rdev_ssh_command.trim();
+    if normalized_command.is_empty() {
+        return Err(anyhow!("Please enter an rdev ssh command."));
+    }
+
+    if !normalized_command.starts_with("rdev ssh") {
+        return Err(anyhow!(
+            "rdev command must start with `rdev ssh` (example: rdev ssh <mp>/<env>)"
+        ));
+    }
+
+    let mut workspaces = load_workspaces()?;
+    if let Some(existing) = workspaces.iter().find(|workspace| {
+        workspace.kind == WorkspaceKind::Rdev
+            && workspace.rdev_ssh_command.as_deref() == Some(normalized_command)
+    }) {
+        return Ok(existing.clone());
+    }
+
+    let now = Utc::now();
+    let trimmed_display_name = display_name
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let fallback_name = normalized_command
+        .split_whitespace()
+        .skip(2)
+        .find(|segment| !segment.starts_with('-'))
+        .unwrap_or("rdev")
+        .split('/')
+        .next_back()
+        .unwrap_or("rdev")
+        .to_string();
+    let workspace_name = if trimmed_display_name.is_empty() {
+        fallback_name
+    } else {
+        trimmed_display_name
+    };
+
+    let workspace = Workspace {
+        id: Uuid::new_v4().to_string(),
+        name: workspace_name,
+        path: format!("rdev-workspace-{}", Uuid::new_v4()),
+        kind: WorkspaceKind::Rdev,
+        rdev_ssh_command: Some(normalized_command.to_string()),
         git_pull_on_master_for_new_threads: false,
         created_at: now,
         updated_at: now,
@@ -548,6 +610,18 @@ pub fn resolve_workspace_id_by_path(workspace_path: &str) -> Result<Option<Strin
         .map(|workspace| workspace.id.clone()))
 }
 
+pub fn resolve_workspace_by_path(workspace_path: &str) -> Result<Option<Workspace>> {
+    let canonical = fs::canonicalize(workspace_path)
+        .unwrap_or_else(|_| Path::new(workspace_path).to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    let workspaces = load_workspaces()?;
+    Ok(workspaces
+        .iter()
+        .find(|workspace| workspace.path == canonical)
+        .cloned())
+}
+
 pub fn write_json_file<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let raw = serde_json::to_string_pretty(value)?;
     write_file_atomic(path, raw.as_bytes())?;
@@ -583,6 +657,40 @@ mod tests {
         assert_eq!(second_load.len(), 1);
         assert_eq!(first_load[0].id, added.id);
         assert_eq!(first_load[0].path, second_load[0].path);
+
+        std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn add_rdev_workspace_persists_command_and_kind() {
+        let _guard = test_lock().lock().expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "claude-desk-rdev-workspace-test-{}",
+            Uuid::new_v4()
+        ));
+        std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
+
+        let added = add_rdev_workspace(
+            "rdev ssh comms-ai-open-connect/offbeat-apple",
+            Some("offbeat-apple"),
+        )
+        .expect("rdev workspace should be added");
+        assert_eq!(added.kind, WorkspaceKind::Rdev);
+        assert_eq!(
+            added.rdev_ssh_command.as_deref(),
+            Some("rdev ssh comms-ai-open-connect/offbeat-apple")
+        );
+        assert!(
+            added.path.starts_with("rdev-workspace-"),
+            "rdev workspace path should use deterministic non-filesystem marker"
+        );
+
+        let loaded = load_workspaces().expect("workspaces should load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, added.id);
+        assert_eq!(loaded[0].kind, WorkspaceKind::Rdev);
 
         std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);

@@ -51,6 +51,8 @@ const SNAPSHOT_BUFFER_MAX_CHARS = TERMINAL_LOG_BUFFER_CHARS;
 const TERMINAL_LOG_FLUSH_INTERVAL_MS = 16;
 const TERMINAL_DATA_LISTENER_READY_TIMEOUT_MS = 800;
 const SESSION_SNAPSHOT_REFRESH_DELAYS_MS = [320, 1100];
+const AUTO_RECOVER_SESSION_TIMEOUT_MS = 900;
+const AUTO_RECOVER_RETRY_COOLDOWN_MS = 1200;
 const THREAD_WORKING_IDLE_TIMEOUT_MS = 1200;
 const MAX_ATTACHMENT_DRAFTS = 24;
 const MAX_ATTACHMENTS_PER_MESSAGE = 12;
@@ -260,6 +262,16 @@ function looksLikeResumeFailureOutput(output: string): boolean {
   );
 }
 
+function isTerminalSessionUnavailableError(error: unknown): boolean {
+  const message = String(error).toLowerCase();
+  return (
+    message.includes('terminal session not found') ||
+    message.includes('session not found') ||
+    message.includes('no such process') ||
+    message.includes('broken pipe')
+  );
+}
+
 function clampSidebarWidth(width: number): number {
   return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, Math.round(width)));
 }
@@ -343,7 +355,10 @@ export default function App() {
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
 
   const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
+  const [addWorkspaceMode, setAddWorkspaceMode] = useState<'local' | 'rdev'>('local');
   const [addWorkspacePath, setAddWorkspacePath] = useState('');
+  const [addWorkspaceRdevCommand, setAddWorkspaceRdevCommand] = useState('');
+  const [addWorkspaceDisplayName, setAddWorkspaceDisplayName] = useState('');
   const [addWorkspaceError, setAddWorkspaceError] = useState<string | null>(null);
   const [addingWorkspace, setAddingWorkspace] = useState(false);
 
@@ -389,6 +404,8 @@ export default function App() {
   const terminalDataEventHandlerRef = useRef<(event: TerminalDataEvent) => void>(() => undefined);
   const terminalExitEventHandlerRef = useRef<(event: TerminalExitEvent) => void>(() => undefined);
   const threadUpdatedEventHandlerRef = useRef<(thread: ThreadMetadata) => void>(() => undefined);
+  const autoRecoverInFlightRef = useRef(false);
+  const lastAutoRecoverAttemptAtRef = useRef(0);
   const sessionMetaBySessionIdRef = useRef<
     Record<
       string,
@@ -860,7 +877,7 @@ export default function App() {
   );
 
   const refreshGitInfo = useCallback(async () => {
-    if (!selectedWorkspace) {
+    if (!selectedWorkspace || selectedWorkspace.kind === 'rdev') {
       setGitInfo(null);
       return;
     }
@@ -1168,7 +1185,7 @@ export default function App() {
         await waitForTerminalDataListenerReady();
         const response = await api.terminalStartSession({
           workspacePath: workspace.path,
-          initialCwd: workspace.path,
+          initialCwd: workspace.kind === 'rdev' ? null : workspace.path,
           fullAccessFlag: thread.fullAccess,
           threadId: thread.id
         });
@@ -1282,6 +1299,99 @@ export default function App() {
     [addAttachmentPathsForSelectedThread, pushToast, selectedThread]
   );
 
+  const attemptAutoRecoverSelectedThread = useCallback(async () => {
+    const workspaceId = selectedWorkspaceIdRef.current;
+    const threadId = selectedThreadIdRef.current;
+    if (!workspaceId || !threadId) {
+      return;
+    }
+
+    if (autoRecoverInFlightRef.current) {
+      return;
+    }
+    const now = Date.now();
+    if (now - lastAutoRecoverAttemptAtRef.current < AUTO_RECOVER_RETRY_COOLDOWN_MS) {
+      return;
+    }
+    lastAutoRecoverAttemptAtRef.current = now;
+
+    const thread = (threadsByWorkspaceRef.current[workspaceId] ?? []).find((item) => item.id === threadId);
+    if (!thread || deletedThreadIdsRef.current[thread.id] || startingSessionByThreadRef.current[thread.id]) {
+      return;
+    }
+
+    autoRecoverInFlightRef.current = true;
+    let sessionId = activeRunsByThreadRef.current[thread.id]?.sessionId ?? null;
+    try {
+      if (!sessionId) {
+        if (selectedThreadIdRef.current === thread.id) {
+          await ensureSessionForThread(thread);
+        }
+        return;
+      }
+
+      const snapshot = await withTimeout(api.terminalReadOutput(sessionId), AUTO_RECOVER_SESSION_TIMEOUT_MS);
+      if (typeof snapshot === 'string') {
+        if (snapshot.length > 0) {
+          delete pendingTerminalChunksByThreadRef.current[thread.id];
+          updateTerminalLogMap((current) => {
+            const existing = current[thread.id] ?? '';
+            const clamped = clampTerminalLog(snapshot);
+            if (clamped === existing) {
+              return current;
+            }
+            return {
+              ...current,
+              [thread.id]: clamped
+            };
+          });
+        }
+        setStartingByThread((current) => removeThreadFlag(current, thread.id));
+        if (snapshot.length > 0 || hasCachedTerminalLog(thread.id)) {
+          setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
+        }
+        if (!pendingSnapshotBySessionRef.current[sessionId]) {
+          void hydrateSessionSnapshot(thread.id, sessionId, 3, 120);
+        }
+        scheduleSessionSnapshotRefreshes(thread.id, sessionId);
+      }
+      return;
+    } catch (error) {
+      if (!sessionId || !isTerminalSessionUnavailableError(error)) {
+        return;
+      }
+
+      finishSessionBinding(sessionId);
+      delete sessionMetaBySessionIdRef.current[sessionId];
+      delete pendingSnapshotBySessionRef.current[sessionId];
+      delete terminalDataSequenceBySessionRef.current[sessionId];
+      clearSessionSnapshotRefreshTimers(sessionId);
+      setStartingByThread((current) => removeThreadFlag(current, thread.id));
+      setReadyByThread((current) => removeThreadFlag(current, thread.id));
+
+      if (selectedThreadIdRef.current !== thread.id) {
+        return;
+      }
+
+      try {
+        await ensureSessionForThread(thread);
+      } catch (startError) {
+        pushToast(`Failed to recover terminal session: ${String(startError)}`, 'error');
+      }
+    } finally {
+      autoRecoverInFlightRef.current = false;
+    }
+  }, [
+    clearSessionSnapshotRefreshTimers,
+    ensureSessionForThread,
+    finishSessionBinding,
+    hasCachedTerminalLog,
+    hydrateSessionSnapshot,
+    pushToast,
+    scheduleSessionSnapshotRefreshes,
+    updateTerminalLogMap
+  ]);
+
   const pickAttachmentFiles = useCallback(async () => {
     if (!selectedThread) {
       pushToast('Select a thread before adding attachments.', 'error');
@@ -1352,7 +1462,38 @@ export default function App() {
     [refreshThreadsForWorkspace, setSelectedThread, setSelectedWorkspace]
   );
 
-  const openWorkspacePicker = useCallback(async () => {
+  const addRdevWorkspaceByCommand = useCallback(
+    async (rdevSshCommand: string, displayName: string) => {
+      const command = rdevSshCommand.trim();
+      if (!command) {
+        throw new Error('Please enter an rdev ssh command.');
+      }
+
+      const workspace = await api.addRdevWorkspace(command, displayName.trim() || null);
+      setWorkspaces((current) => {
+        if (current.some((item) => item.id === workspace.id)) {
+          return current;
+        }
+        return [...current, workspace];
+      });
+      setSelectedWorkspace(workspace.id);
+      setSelectedThread(undefined);
+      await refreshThreadsForWorkspace(workspace.id);
+      return workspace;
+    },
+    [refreshThreadsForWorkspace, setSelectedThread, setSelectedWorkspace]
+  );
+
+  const openWorkspacePicker = useCallback(() => {
+    setAddWorkspaceMode('local');
+    setAddWorkspacePath('');
+    setAddWorkspaceRdevCommand('');
+    setAddWorkspaceDisplayName('');
+    setAddWorkspaceError(null);
+    setAddWorkspaceOpen(true);
+  }, []);
+
+  const pickWorkspaceDirectory = useCallback(async () => {
     try {
       const selected = await open({
         directory: true,
@@ -1369,24 +1510,26 @@ export default function App() {
         return;
       }
 
-      await addWorkspaceByPath(path);
+      setAddWorkspacePath(path);
     } catch (error) {
       const message = `Add workspace failed: ${String(error)}`;
       pushToast(message, 'error');
       setAddWorkspaceError(message);
       setAddWorkspaceOpen(true);
     }
-  }, [addWorkspaceByPath, pushToast]);
+  }, [pushToast]);
 
   const confirmManualWorkspace = useCallback(
     async (path: string) => {
       setAddingWorkspace(true);
       setAddWorkspaceError(null);
+      setAddWorkspaceMode('local');
       setAddWorkspacePath(path);
       try {
         await addWorkspaceByPath(path);
         setAddWorkspaceOpen(false);
         setAddWorkspacePath('');
+        setAddWorkspaceError(null);
       } catch (error) {
         const message = String(error);
         setAddWorkspaceError(message);
@@ -1398,10 +1541,34 @@ export default function App() {
     [addWorkspaceByPath, pushToast]
   );
 
+  const confirmRdevWorkspace = useCallback(
+    async (rdevSshCommand: string, displayName: string) => {
+      setAddingWorkspace(true);
+      setAddWorkspaceError(null);
+      setAddWorkspaceMode('rdev');
+      setAddWorkspaceRdevCommand(rdevSshCommand);
+      setAddWorkspaceDisplayName(displayName);
+      try {
+        await addRdevWorkspaceByCommand(rdevSshCommand, displayName);
+        setAddWorkspaceOpen(false);
+        setAddWorkspaceRdevCommand('');
+        setAddWorkspaceDisplayName('');
+        setAddWorkspaceError(null);
+      } catch (error) {
+        const message = String(error);
+        setAddWorkspaceError(message);
+        pushToast(message, 'error');
+      } finally {
+        setAddingWorkspace(false);
+      }
+    },
+    [addRdevWorkspaceByCommand, pushToast]
+  );
+
   const onNewThreadInWorkspace = useCallback(
     async (workspaceId: string) => {
       const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
-      if (workspace?.gitPullOnMasterForNewThreads) {
+      if (workspace?.kind !== 'rdev' && workspace?.gitPullOnMasterForNewThreads) {
         try {
           const pullResult = await api.gitPullMasterForNewThread(workspace.path);
           if (pullResult.outcome === 'pulled') {
@@ -1704,7 +1871,7 @@ export default function App() {
     branches: GitBranchEntry[];
     status: GitWorkspaceStatus | null;
   }> => {
-    if (!selectedWorkspace || !gitInfo) {
+    if (!selectedWorkspace || !gitInfo || selectedWorkspace.kind === 'rdev') {
       return { branches: [], status: null };
     }
     const [branches, status] = await Promise.all([
@@ -1716,7 +1883,7 @@ export default function App() {
 
   const onCheckoutBranch = useCallback(
     async (branchName: string) => {
-      if (!selectedWorkspace) {
+      if (!selectedWorkspace || selectedWorkspace.kind === 'rdev') {
         return false;
       }
 
@@ -1902,6 +2069,32 @@ export default function App() {
     pushToast,
     selectedThread,
   ]);
+
+  useEffect(() => {
+    const recover = () => {
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
+      void attemptAutoRecoverSelectedThread();
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') {
+        return;
+      }
+      recover();
+    };
+
+    window.addEventListener('focus', recover);
+    window.addEventListener('online', recover);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      window.removeEventListener('focus', recover);
+      window.removeEventListener('online', recover);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [attemptAutoRecoverSelectedThread]);
 
   const handleTerminalDataEvent = useCallback(
     (event: TerminalDataEvent) => {
@@ -2166,6 +2359,10 @@ export default function App() {
       pushToast('Select a workspace first.', 'error');
       return;
     }
+    if (selectedWorkspace.kind === 'rdev') {
+      pushToast('Diagnostics are only available for local workspaces.', 'info');
+      return;
+    }
 
     try {
       const diagnostics = await api.copyTerminalEnvDiagnostics(selectedWorkspace.path);
@@ -2222,17 +2419,40 @@ export default function App() {
     stopThreadSession
   ]);
 
-  const openWorkspaceInFinder = useCallback((workspacePath: string) => {
-    void api.openInFinder(workspacePath);
-  }, []);
+  const openWorkspaceInFinder = useCallback(
+    (workspace: Workspace) => {
+      if (workspace.kind === 'rdev') {
+        pushToast('rdev workspaces do not map to a local Finder folder.', 'info');
+        return;
+      }
+      void api.openInFinder(workspace.path);
+    },
+    [pushToast]
+  );
 
-  const openWorkspaceInTerminal = useCallback((workspacePath: string) => {
-    void api.openInTerminal(workspacePath);
-  }, []);
+  const openWorkspaceInTerminal = useCallback(
+    (workspace: Workspace) => {
+      if (workspace.kind === 'rdev') {
+        const command = workspace.rdevSshCommand?.trim();
+        if (!command) {
+          pushToast('Missing rdev ssh command for this workspace.', 'error');
+          return;
+        }
+        void api.openTerminalCommand(command);
+        return;
+      }
+      void api.openInTerminal(workspace.path);
+    },
+    [pushToast]
+  );
 
   const onRemoveWorkspace = useCallback(
     async (workspace: Workspace) => {
-      const message = `Remove "${workspace.name}" from Claude Desk?\n\nThis keeps your local folder intact but removes its saved threads in Claude Desk.`;
+      const detail =
+        workspace.kind === 'rdev'
+          ? 'This removes its saved threads in Claude Desk.'
+          : 'This keeps your local folder intact but removes its saved threads in Claude Desk.';
+      const message = `Remove "${workspace.name}" from Claude Desk?\n\n${detail}`;
       const confirmed = await confirm(message, {
         title: 'Claude Desk',
         kind: 'warning',
@@ -2388,12 +2608,12 @@ export default function App() {
           selectedThread={selectedThread}
           onOpenWorkspace={() => {
             if (selectedWorkspace) {
-              void api.openInFinder(selectedWorkspace.path);
+              openWorkspaceInFinder(selectedWorkspace);
             }
           }}
           onOpenTerminal={() => {
             if (selectedWorkspace) {
-              void api.openInTerminal(selectedWorkspace.path);
+              openWorkspaceInTerminal(selectedWorkspace);
             }
           }}
         />
@@ -2518,15 +2738,19 @@ export default function App() {
 
       <AddWorkspaceModal
         open={addWorkspaceOpen}
+        initialMode={addWorkspaceMode}
         initialPath={addWorkspacePath}
+        initialRdevCommand={addWorkspaceRdevCommand}
+        initialDisplayName={addWorkspaceDisplayName}
         error={addWorkspaceError}
         saving={addingWorkspace}
         onClose={() => {
           setAddWorkspaceOpen(false);
           setAddWorkspaceError(null);
         }}
-        onPickDirectory={() => void openWorkspacePicker()}
-        onConfirm={(path) => void confirmManualWorkspace(path)}
+        onPickDirectory={() => void pickWorkspaceDirectory()}
+        onConfirmLocal={(path) => void confirmManualWorkspace(path)}
+        onConfirmRdev={(command, displayName) => void confirmRdevWorkspace(command, displayName)}
       />
 
       {resumeFailureModal ? (

@@ -18,8 +18,8 @@ interface LeftRailProps {
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onRenameThread: (workspaceId: string, threadId: string, title: string) => Promise<void>;
   onDeleteThread: (workspaceId: string, threadId: string) => Promise<void>;
-  onOpenWorkspaceInFinder: (workspacePath: string) => void;
-  onOpenWorkspaceInTerminal: (workspacePath: string) => void;
+  onOpenWorkspaceInFinder: (workspace: Workspace) => void;
+  onOpenWorkspaceInTerminal: (workspace: Workspace) => void;
   onSetWorkspaceGitPullOnMasterForNewThreads: (workspaceId: string, enabled: boolean) => Promise<void>;
   onReorderWorkspaces: (workspaceIds: string[]) => Promise<void>;
   onRemoveWorkspace: (workspace: Workspace) => Promise<void>;
@@ -470,7 +470,8 @@ function LeftRailComponent({
           {workspaces.map((workspace, workspaceIndex) => {
             const isSelectedWorkspace = workspace.id === selectedWorkspaceId;
             const isExpanded = expandedWorkspaceIds[workspace.id] !== false;
-            const gitPullEnabled = Boolean(workspace.gitPullOnMasterForNewThreads);
+            const isRdevWorkspace = workspace.kind === 'rdev';
+            const gitPullEnabled = !isRdevWorkspace && Boolean(workspace.gitPullOnMasterForNewThreads);
             const allThreads = threadsByWorkspace[workspace.id] ?? [];
             const visibleThreads = allThreads.filter((thread) => {
               if (!query) {
@@ -549,6 +550,7 @@ function LeftRailComponent({
                           <FolderIcon />
                         </span>
                         <span className="workspace-group-name">{workspace.name}</span>
+                        {isRdevWorkspace ? <span className="workspace-kind-tag">rdev</span> : null}
                         {gitPullEnabled ? (
                           <span
                             className="workspace-git-pull-label"
@@ -711,34 +713,37 @@ function LeftRailComponent({
           <button
             type="button"
             onClick={() => {
-              onOpenWorkspaceInFinder(workspaceContextMenu.workspace.path);
+              onOpenWorkspaceInFinder(workspaceContextMenu.workspace);
               setWorkspaceContextMenu(null);
             }}
+            disabled={workspaceContextMenu.workspace.kind === 'rdev'}
           >
             Open folder
           </button>
           <button
             type="button"
             onClick={() => {
-              onOpenWorkspaceInTerminal(workspaceContextMenu.workspace.path);
+              onOpenWorkspaceInTerminal(workspaceContextMenu.workspace);
               setWorkspaceContextMenu(null);
             }}
           >
-            Open terminal
+            {workspaceContextMenu.workspace.kind === 'rdev' ? 'Open rdev shell' : 'Open terminal'}
           </button>
-          <button
-            type="button"
-            onClick={async () => {
-              const workspace = workspaceContextMenu.workspace;
-              const enabled = !workspace.gitPullOnMasterForNewThreads;
-              setWorkspaceContextMenu(null);
-              await onSetWorkspaceGitPullOnMasterForNewThreads(workspace.id, enabled);
-            }}
-          >
-            {workspaceContextMenu.workspace.gitPullOnMasterForNewThreads
-              ? 'Disable git pull on master for new threads'
-              : 'Enable git pull on master for new threads'}
-          </button>
+          {workspaceContextMenu.workspace.kind !== 'rdev' ? (
+            <button
+              type="button"
+              onClick={async () => {
+                const workspace = workspaceContextMenu.workspace;
+                const enabled = !workspace.gitPullOnMasterForNewThreads;
+                setWorkspaceContextMenu(null);
+                await onSetWorkspaceGitPullOnMasterForNewThreads(workspace.id, enabled);
+              }}
+            >
+              {workspaceContextMenu.workspace.gitPullOnMasterForNewThreads
+                ? 'Disable git pull on master for new threads'
+                : 'Enable git pull on master for new threads'}
+            </button>
+          ) : null}
           <div className="thread-context-divider" />
           <button
             type="button"

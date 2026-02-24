@@ -430,6 +430,19 @@ body.sidebar-resizing {
   letter-spacing: -0.008em;
 }
 
+.workspace-kind-tag {
+  margin-left: 4px;
+  border: 1px solid rgba(61, 112, 210, 0.28);
+  border-radius: 999px;
+  background: rgba(96, 143, 238, 0.1);
+  color: #3a68bd;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
 .workspace-git-pull-label {
   margin-left: 4px;
   border: 1px solid rgba(194, 90, 0, 0.32);
@@ -1705,6 +1718,22 @@ body.sidebar-resizing {
   display: flex;
   justify-content: flex-start;
   margin-bottom: var(--space-2);
+}
+
+.add-workspace-mode-toggle {
+  display: inline-flex;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+
+.add-workspace-mode-toggle .ghost-button {
+  min-width: 88px;
+}
+
+.add-workspace-mode-toggle .ghost-button.active {
+  border-color: rgba(67, 124, 255, 0.46);
+  background: rgba(67, 124, 255, 0.12);
+  color: #274690;
 }
 
 .primary-button,

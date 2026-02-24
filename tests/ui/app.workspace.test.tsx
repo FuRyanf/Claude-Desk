@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => {
     id: 'ws-added',
     name: 'workspace-added',
     path: '/tmp/workspace-added',
+    kind: 'local' as const,
+    rdevSshCommand: null,
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -15,6 +17,18 @@ const mocks = vi.hoisted(() => {
     id: 'ws-second',
     name: 'workspace-second',
     path: '/tmp/workspace-second',
+    kind: 'local' as const,
+    rdevSshCommand: null,
+    gitPullOnMasterForNewThreads: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspaceRdev = {
+    id: 'ws-rdev',
+    name: 'offbeat-apple',
+    path: 'rdev-workspace-1',
+    kind: 'rdev' as const,
+    rdevSshCommand: 'rdev ssh comms-ai-open-connect/offbeat-apple',
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -28,6 +42,10 @@ const mocks = vi.hoisted(() => {
     addWorkspace: vi.fn(async () => {
       workspaceState = [workspaceOne];
       return workspaceOne;
+    }),
+    addRdevWorkspace: vi.fn(async () => {
+      workspaceState = [workspaceRdev];
+      return workspaceRdev;
     }),
     removeWorkspace: vi.fn(async (workspaceId: string) => {
       const before = workspaceState.length;
@@ -121,6 +139,7 @@ const mocks = vi.hoisted(() => {
     generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
+    openTerminalCommand: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics')
   };
   const openDialog = vi.fn(async () => null);
@@ -145,7 +164,8 @@ const mocks = vi.hoisted(() => {
     },
     sampleWorkspaces: {
       workspaceOne,
-      workspaceTwo
+      workspaceTwo,
+      workspaceRdev
     },
     openDialog,
     confirmDialog,
@@ -207,7 +227,6 @@ describe('Workspace add flow', () => {
 
   it('adds workspace from manual fallback modal and updates UI immediately', async () => {
     const user = userEvent.setup();
-    mocks.openDialog.mockRejectedValueOnce(new Error('picker unavailable'));
     render(<App />);
 
     await user.click(await screen.findByRole('button', { name: 'Add new project' }));
@@ -215,7 +234,7 @@ describe('Workspace add flow', () => {
     const input = await screen.findByLabelText('Manual path');
     await user.clear(input);
     await user.type(input, '/tmp/workspace-added');
-    await user.click(screen.getByRole('button', { name: 'Add Workspace' }));
+    await user.click(screen.getByRole('button', { name: 'Add project' }));
 
     expect(mocks.api.addWorkspace).toHaveBeenCalledWith('/tmp/workspace-added');
     expect(await screen.findByRole('button', { name: /workspace-added/i })).toBeInTheDocument();
@@ -223,7 +242,6 @@ describe('Workspace add flow', () => {
 
   it('removes workspace from the workspace context menu', async () => {
     const user = userEvent.setup();
-    mocks.openDialog.mockRejectedValueOnce(new Error('picker unavailable'));
     mocks.confirmDialog.mockResolvedValueOnce(true);
     render(<App />);
 
@@ -231,7 +249,7 @@ describe('Workspace add flow', () => {
     const input = await screen.findByLabelText('Manual path');
     await user.clear(input);
     await user.type(input, '/tmp/workspace-added');
-    await user.click(screen.getByRole('button', { name: 'Add Workspace' }));
+    await user.click(screen.getByRole('button', { name: 'Add project' }));
     await screen.findByRole('button', { name: /workspace-added/i });
 
     const workspaceRow = await screen.findByRole('button', { name: /workspace-added/i });
@@ -247,7 +265,6 @@ describe('Workspace add flow', () => {
 
   it('does not remove workspace when remove confirmation is canceled', async () => {
     const user = userEvent.setup();
-    mocks.openDialog.mockRejectedValueOnce(new Error('picker unavailable'));
     mocks.confirmDialog.mockResolvedValueOnce(false);
     render(<App />);
 
@@ -255,7 +272,7 @@ describe('Workspace add flow', () => {
     const input = await screen.findByLabelText('Manual path');
     await user.clear(input);
     await user.type(input, '/tmp/workspace-added');
-    await user.click(screen.getByRole('button', { name: 'Add Workspace' }));
+    await user.click(screen.getByRole('button', { name: 'Add project' }));
     await screen.findByRole('button', { name: /workspace-added/i });
 
     const workspaceRow = await screen.findByRole('button', { name: /workspace-added/i });
@@ -313,5 +330,25 @@ describe('Workspace add flow', () => {
     });
     expect(screen.queryByTestId('workspace-move-down-ws-added')).toBeNull();
     expect(screen.getByTestId('workspace-move-up-ws-added')).toBeInTheDocument();
+  });
+
+  it('adds an rdev workspace from the add-project modal', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
+    await user.click(screen.getByRole('tab', { name: 'rdev' }));
+    await user.type(
+      screen.getByLabelText('rdev ssh command'),
+      'rdev ssh comms-ai-open-connect/offbeat-apple'
+    );
+    await user.type(screen.getByLabelText('Display name (optional)'), 'offbeat-apple');
+    await user.click(screen.getByRole('button', { name: 'Add rdev project' }));
+
+    expect(mocks.api.addRdevWorkspace).toHaveBeenCalledWith(
+      'rdev ssh comms-ai-open-connect/offbeat-apple',
+      'offbeat-apple'
+    );
+    expect(await screen.findByRole('button', { name: /offbeat-apple/i })).toBeInTheDocument();
   });
 });

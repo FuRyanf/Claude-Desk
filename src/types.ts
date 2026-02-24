@@ -1,11 +1,14 @@
 export type RunStatus = 'Idle' | 'Running' | 'Succeeded' | 'Failed' | 'Canceled';
 export type ContextPack = 'Minimal' | 'Git Diff' | 'Debug';
 export type TerminalSessionMode = 'resumed' | 'new';
+export type WorkspaceKind = 'local' | 'rdev';
 
 export interface Workspace {
   id: string;
   name: string;
   path: string;
+  kind?: WorkspaceKind;
+  rdevSshCommand?: string | null;
   gitPullOnMasterForNewThreads: boolean;
   createdAt: string;
   updatedAt: string;

@@ -38,6 +38,15 @@ fn add_workspace(path: String) -> Result<Workspace, String> {
 }
 
 #[tauri::command]
+fn add_rdev_workspace(
+    rdev_ssh_command: String,
+    display_name: Option<String>,
+) -> Result<Workspace, String> {
+    storage::add_rdev_workspace(&rdev_ssh_command, display_name.as_deref())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn set_workspace_order(workspace_ids: Vec<String>) -> Result<Vec<Workspace>, String> {
     storage::set_workspace_order(workspace_ids).map_err(|error| error.to_string())
 }
@@ -383,6 +392,30 @@ fn open_in_terminal(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_terminal_command(command: String) -> Result<(), String> {
+    let escaped = command
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', " ");
+    let script = format!(
+        "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
+        escaped
+    );
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .status()
+        .map_err(|error| error.to_string())
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err("Failed to open terminal command".to_string())
+            }
+        })
+}
+
+#[tauri::command]
 fn copy_terminal_env_diagnostics(workspace_path: String) -> Result<String, String> {
     runner::copy_terminal_env_diagnostics(workspace_path).map_err(|error| error.to_string())
 }
@@ -405,6 +438,7 @@ fn main() {
             get_app_storage_root,
             list_workspaces,
             add_workspace,
+            add_rdev_workspace,
             set_workspace_order,
             remove_workspace,
             set_workspace_git_pull_on_master_for_new_threads,
@@ -444,6 +478,7 @@ fn main() {
             generate_commit_message,
             open_in_finder,
             open_in_terminal,
+            open_terminal_command,
             copy_terminal_env_diagnostics
         ])
         .run(tauri::generate_context!())

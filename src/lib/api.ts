@@ -34,6 +34,8 @@ export const api = {
   getAppStorageRoot: () => invoke<string>('get_app_storage_root'),
   listWorkspaces: () => invoke<Workspace[]>('list_workspaces'),
   addWorkspace: (path: string) => invoke<Workspace>('add_workspace', { path }),
+  addRdevWorkspace: (rdevSshCommand: string, displayName?: string | null) =>
+    invoke<Workspace>('add_rdev_workspace', { rdevSshCommand, displayName }),
   removeWorkspace: (workspaceId: string) => invoke<boolean>('remove_workspace', { workspaceId }),
   setWorkspaceOrder: (workspaceIds: string[]) => invoke<Workspace[]>('set_workspace_order', { workspaceIds }),
   setWorkspaceGitPullOnMasterForNewThreads: (workspaceId: string, enabled: boolean) =>
@@ -107,6 +109,7 @@ export const api = {
     invoke<string>('generate_commit_message', { workspacePath, fullAccess }),
   openInFinder: (path: string) => invoke<void>('open_in_finder', { path }),
   openInTerminal: (path: string) => invoke<void>('open_in_terminal', { path }),
+  openTerminalCommand: (command: string) => invoke<void>('open_terminal_command', { command }),
   copyTerminalEnvDiagnostics: (workspacePath: string) =>
     invoke<string>('copy_terminal_env_diagnostics', { workspacePath })
 };
