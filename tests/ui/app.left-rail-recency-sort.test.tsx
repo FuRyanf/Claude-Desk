@@ -273,11 +273,7 @@ describe('Left rail recency and sorting semantics', () => {
       await waitFor(() => {
         expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
       });
-      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
       await user.click(screen.getByRole('button', { name: /Newer thread/i }));
-      await waitFor(() => {
-        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
-      });
       await user.click(screen.getByRole('button', { name: /Older thread/i }));
       expect(screen.getByTestId('thread-recency-thread-newer')).toHaveTextContent('1m');
     } finally {
@@ -400,5 +396,50 @@ describe('Left rail recency and sorting semantics', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
     });
+  });
+
+  it('does not re-mark unread after viewing latest output when no new output arrives', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Newer thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+    });
+
+    await user.click(screen.getByRole('button', { name: 'submit-input' }));
+    expect(screen.getByTestId('thread-running-thread-newer')).toBeInTheDocument();
+
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+    });
+
+    await user.click(screen.getByRole('button', { name: /Older thread/i }));
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
+    }, { timeout: 2500 });
+    expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+  });
+
+  it('keeps a single terminal data subscription while run state changes', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Newer thread/i });
+    const subscriptionCallsAfterMount = mocks.onTerminalData.mock.calls.length;
+
+    await user.click(screen.getByRole('button', { name: 'submit-input' }));
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
+    }, { timeout: 2500 });
+
+    expect(mocks.onTerminalData.mock.calls.length).toBe(subscriptionCallsAfterMount);
   });
 });

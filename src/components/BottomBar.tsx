@@ -21,7 +21,6 @@ interface BottomBarProps {
   onToggleFullAccess: () => Promise<void>;
   onLoadBranchSwitcher: () => Promise<BranchSwitcherSnapshot>;
   onCheckoutBranch: (branchName: string) => Promise<boolean>;
-  onCreateAndCheckoutBranch: (branchName: string) => Promise<boolean>;
 }
 
 function decodeFileUriToPath(uri: string): string {
@@ -120,8 +119,7 @@ export function BottomBar({
   onClearAttachmentPaths,
   onToggleFullAccess,
   onLoadBranchSwitcher,
-  onCheckoutBranch,
-  onCreateAndCheckoutBranch
+  onCheckoutBranch
 }: BottomBarProps) {
   const [branchPopoverOpen, setBranchPopoverOpen] = React.useState(false);
   const [branchSearch, setBranchSearch] = React.useState('');
@@ -289,30 +287,6 @@ export function BottomBar({
     [onCheckoutBranch]
   );
 
-  const runCreateAndCheckout = React.useCallback(async () => {
-    const branchName = window.prompt('Enter new branch name');
-    if (!branchName) {
-      return;
-    }
-    const trimmed = branchName.trim();
-    if (!trimmed) {
-      return;
-    }
-
-    setIsSwitchingBranch(true);
-    try {
-      const changed = await onCreateAndCheckoutBranch(trimmed);
-      if (!changed) {
-        return;
-      }
-      setBranchPopoverOpen(false);
-    } catch {
-      // Toast is emitted by the caller; keep popover open for retries.
-    } finally {
-      setIsSwitchingBranch(false);
-    }
-  }, [onCreateAndCheckoutBranch]);
-
   const onBranchSearchKeyDown = React.useCallback(
     async (event: React.KeyboardEvent<HTMLInputElement>) => {
       if (event.key === 'ArrowDown') {
@@ -475,17 +449,6 @@ export function BottomBar({
                 )}
               </div>
 
-              <div className="branch-popover-footer">
-                <button
-                  type="button"
-                  className="branch-create-button"
-                  onClick={() => void runCreateAndCheckout()}
-                  disabled={isSwitchingBranch}
-                >
-                  <span className="branch-plus">+</span>
-                  <span>Create and checkout new branch...</span>
-                </button>
-              </div>
             </section>
           ) : null}
         </div>

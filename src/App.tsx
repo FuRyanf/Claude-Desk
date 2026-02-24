@@ -33,6 +33,7 @@ import type {
   GitWorkspaceStatus,
   RunStatus,
   Settings,
+  TerminalDataEvent,
   TerminalExitEvent,
   TerminalSessionMode,
   ThreadMetadata,
@@ -344,6 +345,12 @@ export default function App() {
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
   const pendingSnapshotBySessionRef = useRef<Record<string, PendingSnapshotHydration>>({});
+  const latestOutputSequenceByThreadRef = useRef<Record<string, number>>({});
+  const seenOutputSequenceByThreadRef = useRef<Record<string, number>>({});
+  const outputSequenceCounterRef = useRef(0);
+  const terminalDataEventHandlerRef = useRef<(event: TerminalDataEvent) => void>(() => undefined);
+  const terminalExitEventHandlerRef = useRef<(event: TerminalExitEvent) => void>(() => undefined);
+  const threadUpdatedEventHandlerRef = useRef<(thread: ThreadMetadata) => void>(() => undefined);
   const sessionMetaBySessionIdRef = useRef<
     Record<
       string,
@@ -388,22 +395,10 @@ export default function App() {
     return draftAttachmentsByThread[selectedThreadId] ?? [];
   }, [draftAttachmentsByThread, selectedThreadId]);
 
-
-  useEffect(() => {
-    selectedWorkspaceIdRef.current = selectedWorkspaceId;
-  }, [selectedWorkspaceId]);
-
-  useEffect(() => {
-    selectedThreadIdRef.current = selectedThreadId;
-  }, [selectedThreadId]);
-
-  useEffect(() => {
-    activeRunsByThreadRef.current = runStore.activeRunsByThread;
-  }, [runStore.activeRunsByThread]);
-
-  useEffect(() => {
-    workingByThreadRef.current = runStore.workingByThread;
-  }, [runStore.workingByThread]);
+  selectedWorkspaceIdRef.current = selectedWorkspaceId;
+  selectedThreadIdRef.current = selectedThreadId;
+  activeRunsByThreadRef.current = runStore.activeRunsByThread;
+  workingByThreadRef.current = runStore.workingByThread;
 
   const bindSession = useCallback(
     (threadId: string, sessionId: string, startedAt: string) => {
@@ -628,12 +623,31 @@ export default function App() {
     workingStopTimerByThreadRef.current = {};
   }, []);
 
-  const clearThreadUnread = useCallback((threadId: string) => {
-    setUnreadOutputByThread((current) => removeThreadFlag(current, threadId));
+  const noteThreadOutput = useCallback((threadId: string) => {
+    outputSequenceCounterRef.current += 1;
+    latestOutputSequenceByThreadRef.current[threadId] = outputSequenceCounterRef.current;
   }, []);
+
+  const markThreadOutputSeen = useCallback((threadId: string) => {
+    seenOutputSequenceByThreadRef.current[threadId] = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
+  }, []);
+
+  const hasUnseenThreadOutput = useCallback((threadId: string) => {
+    const latest = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
+    const seen = seenOutputSequenceByThreadRef.current[threadId] ?? 0;
+    return latest > seen;
+  }, []);
+
+  const clearThreadUnread = useCallback((threadId: string) => {
+    markThreadOutputSeen(threadId);
+    setUnreadOutputByThread((current) => removeThreadFlag(current, threadId));
+  }, [markThreadOutputSeen]);
 
   const markThreadUnread = useCallback((threadId: string) => {
     setUnreadOutputByThread((current) => {
+      if (!hasUnseenThreadOutput(threadId)) {
+        return current;
+      }
       if (current[threadId]) {
         return current;
       }
@@ -642,7 +656,7 @@ export default function App() {
         [threadId]: true
       };
     });
-  }, []);
+  }, [hasUnseenThreadOutput]);
 
   const scheduleThreadWorkingStop = useCallback(
     (threadId: string) => {
@@ -1371,6 +1385,8 @@ export default function App() {
       delete inputBufferByThreadRef.current[threadId];
       delete threadTitleInitializedRef.current[threadId];
       delete pendingTerminalChunksByThreadRef.current[threadId];
+      delete latestOutputSequenceByThreadRef.current[threadId];
+      delete seenOutputSequenceByThreadRef.current[threadId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
 
@@ -1471,12 +1487,16 @@ export default function App() {
 
   const switchToThread = useCallback(
     async (workspaceId: string, threadId: string) => {
+      const previousThreadId = selectedThreadIdRef.current;
+      if (previousThreadId && previousThreadId !== threadId) {
+        clearThreadUnread(previousThreadId);
+      }
       if (selectedWorkspaceIdRef.current !== workspaceId) {
         setSelectedWorkspace(workspaceId);
       }
       setSelectedThread(threadId);
     },
-    [setSelectedThread, setSelectedWorkspace]
+    [clearThreadUnread, setSelectedThread, setSelectedWorkspace]
   );
 
   const restartThreadSession = useCallback(
@@ -1563,36 +1583,6 @@ export default function App() {
         return true;
       } catch (error) {
         pushToast(`Branch checkout failed: ${String(error)}`, 'error');
-        throw error;
-      }
-    },
-    [pushToast, refreshGitInfo, selectedThread, selectedWorkspace, stopSessionsForBranchSwitch, updateTerminalLogMap]
-  );
-
-  const onCreateAndCheckoutBranch = useCallback(
-    async (branchName: string) => {
-      if (!selectedWorkspace) {
-        return false;
-      }
-
-      await stopSessionsForBranchSwitch();
-
-      try {
-        await api.gitCreateAndCheckoutBranch(selectedWorkspace.path, branchName);
-        await refreshGitInfo();
-        if (selectedThread?.workspaceId === selectedWorkspace.id) {
-          const snapshot = await api.terminalGetLastLog(selectedWorkspace.id, selectedThread.id).catch(() => '');
-          if (snapshot) {
-            delete pendingTerminalChunksByThreadRef.current[selectedThread.id];
-            updateTerminalLogMap((current) => ({
-              ...current,
-              [selectedThread.id]: clampTerminalLog(snapshot)
-            }));
-          }
-        }
-        return true;
-      } catch (error) {
-        pushToast(`Create branch failed: ${String(error)}`, 'error');
         throw error;
       }
     },
@@ -1721,56 +1711,6 @@ export default function App() {
   }, [selectedSessionId, selectedThreadId, selectedWorkspaceId, startingByThread, updateTerminalLogMap]);
 
   useEffect(() => {
-    let unlistenData: (() => void) | null = null;
-
-    const setup = async () => {
-      unlistenData = await onTerminalData((event) => {
-        const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
-        const threadId =
-          sessionMeta?.threadId ??
-          Object.entries(activeRunsByThreadRef.current).find(([, run]) => run.sessionId === event.sessionId)?.[0];
-        if (!threadId) {
-          return;
-        }
-
-        const isSelectedThread = selectedThreadIdRef.current === threadId;
-        const pendingHydration = pendingSnapshotBySessionRef.current[event.sessionId];
-        const isHydratingSession = pendingHydration?.threadId === threadId;
-        if (isHydratingSession) {
-          pendingHydration.bufferedLive = appendBufferedLive(
-            pendingHydration.bufferedLive,
-            event.data,
-            SNAPSHOT_BUFFER_MAX_CHARS
-          );
-          if (workingByThreadRef.current[threadId]) {
-            scheduleThreadWorkingStop(threadId);
-          } else if (!isSelectedThread) {
-            markThreadUnread(threadId);
-          }
-          return;
-        }
-
-        if (isSelectedThread) {
-          setStartingByThread((current) => removeThreadFlag(current, threadId));
-          setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
-          clearThreadUnread(threadId);
-        }
-        if (workingByThreadRef.current[threadId]) {
-          scheduleThreadWorkingStop(threadId);
-        } else if (!isSelectedThread) {
-          markThreadUnread(threadId);
-        }
-        appendTerminalLogChunk(threadId, event.data);
-      });
-    };
-
-    void setup();
-    return () => {
-      unlistenData?.();
-    };
-  }, [appendTerminalLogChunk, clearThreadUnread, markThreadUnread, scheduleThreadWorkingStop]);
-
-  useEffect(() => {
     if (!selectedThread) {
       return;
     }
@@ -1808,107 +1748,205 @@ export default function App() {
     selectedThread,
   ]);
 
+  const handleTerminalDataEvent = useCallback(
+    (event: TerminalDataEvent) => {
+      const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
+      const threadId =
+        sessionMeta?.threadId ??
+        Object.entries(activeRunsByThreadRef.current).find(([, run]) => run.sessionId === event.sessionId)?.[0];
+      if (!threadId) {
+        return;
+      }
+
+      noteThreadOutput(threadId);
+      const isSelectedThread = selectedThreadIdRef.current === threadId;
+      const pendingHydration = pendingSnapshotBySessionRef.current[event.sessionId];
+      const isHydratingSession = pendingHydration?.threadId === threadId;
+      if (isHydratingSession) {
+        pendingHydration.bufferedLive = appendBufferedLive(
+          pendingHydration.bufferedLive,
+          event.data,
+          SNAPSHOT_BUFFER_MAX_CHARS
+        );
+        if (workingByThreadRef.current[threadId]) {
+          scheduleThreadWorkingStop(threadId);
+        } else if (!isSelectedThread) {
+          markThreadUnread(threadId);
+        } else {
+          clearThreadUnread(threadId);
+        }
+        return;
+      }
+
+      if (isSelectedThread) {
+        setStartingByThread((current) => removeThreadFlag(current, threadId));
+        setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
+        clearThreadUnread(threadId);
+      }
+      if (workingByThreadRef.current[threadId]) {
+        scheduleThreadWorkingStop(threadId);
+      } else if (!isSelectedThread) {
+        markThreadUnread(threadId);
+      }
+      appendTerminalLogChunk(threadId, event.data);
+    },
+    [appendTerminalLogChunk, clearThreadUnread, markThreadUnread, noteThreadOutput, scheduleThreadWorkingStop]
+  );
+
+  const handleTerminalExitEvent = useCallback(
+    (event: TerminalExitEvent) => {
+      const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
+      delete sessionMetaBySessionIdRef.current[event.sessionId];
+      delete pendingSnapshotBySessionRef.current[event.sessionId];
+
+      const endedThreadId = finishSessionBinding(event.sessionId);
+      if (!endedThreadId) {
+        return;
+      }
+      const exitStatus = statusFromExit(event);
+      setStartingByThread((current) => removeThreadFlag(current, endedThreadId));
+      setReadyByThread((current) => removeThreadFlag(current, endedThreadId));
+      clearThreadWorkingStopTimer(endedThreadId);
+      stopThreadWorking(endedThreadId);
+
+      const endedAt = new Date().toISOString();
+      setThreadRunState(endedThreadId, exitStatus, null, endedAt);
+      if (exitStatus === 'Succeeded' && selectedThreadIdRef.current !== endedThreadId) {
+        markThreadUnread(endedThreadId);
+      }
+
+      const workspaceId =
+        sessionMeta?.workspaceId ??
+        Object.values(threadsByWorkspaceRef.current)
+          .flat()
+          .find((thread) => thread.id === endedThreadId)?.workspaceId;
+      if (workspaceId) {
+        void refreshThreadsForWorkspace(workspaceId);
+      }
+
+      void api
+        .terminalReadOutput(event.sessionId)
+        .then((snapshot) => {
+          delete pendingTerminalChunksByThreadRef.current[endedThreadId];
+          updateTerminalLogMap((current) => ({
+            ...current,
+            [endedThreadId]: clampTerminalLog(snapshot)
+          }));
+
+          if (sessionMeta?.mode !== 'resumed') {
+            return;
+          }
+
+          const elapsedMs = Date.now() - sessionMeta.startedAtMs;
+          const failedCode = typeof event.code === 'number' && event.code !== 0 && event.code !== 130;
+          const likelyResumeFailure =
+            looksLikeResumeFailureOutput(snapshot) || (failedCode && elapsedMs < 15_000);
+          if (!likelyResumeFailure || !workspaceId) {
+            return;
+          }
+
+          setResumeFailureModal({
+            threadId: endedThreadId,
+            workspaceId,
+            log: snapshot,
+            showLog: false
+          });
+        })
+        .catch(() => undefined);
+    },
+    [
+      finishSessionBinding,
+      refreshThreadsForWorkspace,
+      setThreadRunState,
+      stopThreadWorking,
+      updateTerminalLogMap,
+      clearThreadWorkingStopTimer,
+      markThreadUnread
+    ]
+  );
+
+  const handleThreadUpdatedEvent = useCallback(
+    (thread: ThreadMetadata) => {
+      if (!thread || !thread.id || !thread.workspaceId) {
+        return;
+      }
+      if (deletedThreadIdsRef.current[thread.id]) {
+        return;
+      }
+      applyThreadUpdate(thread);
+    },
+    [applyThreadUpdate]
+  );
+
+  terminalDataEventHandlerRef.current = handleTerminalDataEvent;
+  terminalExitEventHandlerRef.current = handleTerminalExitEvent;
+  threadUpdatedEventHandlerRef.current = handleThreadUpdatedEvent;
+
   useEffect(() => {
+    let cancelled = false;
+    let unlistenData: (() => void) | null = null;
+
+    void onTerminalData((event) => {
+      terminalDataEventHandlerRef.current(event);
+    })
+      .then((off) => {
+        if (cancelled) {
+          off();
+          return;
+        }
+        unlistenData = off;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      unlistenData?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     let unlistenExit: (() => void) | null = null;
 
-    const setup = async () => {
-      unlistenExit = await onTerminalExit((event: TerminalExitEvent) => {
-        const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
-        delete sessionMetaBySessionIdRef.current[event.sessionId];
-        delete pendingSnapshotBySessionRef.current[event.sessionId];
-
-        const endedThreadId = finishSessionBinding(event.sessionId);
-        if (!endedThreadId) {
+    void onTerminalExit((event: TerminalExitEvent) => {
+      terminalExitEventHandlerRef.current(event);
+    })
+      .then((off) => {
+        if (cancelled) {
+          off();
           return;
         }
-        const exitStatus = statusFromExit(event);
-        setStartingByThread((current) => removeThreadFlag(current, endedThreadId));
-        setReadyByThread((current) => removeThreadFlag(current, endedThreadId));
-        clearThreadWorkingStopTimer(endedThreadId);
-        stopThreadWorking(endedThreadId);
+        unlistenExit = off;
+      })
+      .catch(() => undefined);
 
-        const endedAt = new Date().toISOString();
-        setThreadRunState(endedThreadId, exitStatus, null, endedAt);
-        if (exitStatus === 'Succeeded' && selectedThreadIdRef.current !== endedThreadId) {
-          markThreadUnread(endedThreadId);
-        }
-
-        const workspaceId =
-          sessionMeta?.workspaceId ??
-          Object.values(threadsByWorkspace)
-            .flat()
-            .find((thread) => thread.id === endedThreadId)?.workspaceId;
-        if (workspaceId) {
-          void refreshThreadsForWorkspace(workspaceId);
-        }
-
-        void api
-          .terminalReadOutput(event.sessionId)
-          .then((snapshot) => {
-            delete pendingTerminalChunksByThreadRef.current[endedThreadId];
-            updateTerminalLogMap((current) => ({
-              ...current,
-              [endedThreadId]: clampTerminalLog(snapshot)
-            }));
-
-            if (sessionMeta?.mode !== 'resumed') {
-              return;
-            }
-
-            const elapsedMs = Date.now() - sessionMeta.startedAtMs;
-            const failedCode = typeof event.code === 'number' && event.code !== 0 && event.code !== 130;
-            const likelyResumeFailure =
-              looksLikeResumeFailureOutput(snapshot) || (failedCode && elapsedMs < 15_000);
-            if (!likelyResumeFailure || !workspaceId) {
-              return;
-            }
-
-            setResumeFailureModal({
-              threadId: endedThreadId,
-              workspaceId,
-              log: snapshot,
-              showLog: false
-            });
-          })
-          .catch(() => undefined);
-      });
-    };
-
-    void setup();
     return () => {
+      cancelled = true;
       unlistenExit?.();
     };
-  }, [
-    finishSessionBinding,
-    refreshThreadsForWorkspace,
-    setThreadRunState,
-    stopThreadWorking,
-    threadsByWorkspace,
-    updateTerminalLogMap,
-    clearThreadWorkingStopTimer,
-    markThreadUnread
-  ]);
+  }, []);
 
   useEffect(() => {
+    let cancelled = false;
     let unlistenThreadUpdate: (() => void) | null = null;
 
-    const setup = async () => {
-      unlistenThreadUpdate = await onThreadUpdated((thread) => {
-        if (!thread || !thread.id || !thread.workspaceId) {
+    void onThreadUpdated((thread) => {
+      threadUpdatedEventHandlerRef.current(thread);
+    })
+      .then((off) => {
+        if (cancelled) {
+          off();
           return;
         }
-        if (deletedThreadIdsRef.current[thread.id]) {
-          return;
-        }
-        applyThreadUpdate(thread);
-      });
-    };
+        unlistenThreadUpdate = off;
+      })
+      .catch(() => undefined);
 
-    void setup();
     return () => {
+      cancelled = true;
       unlistenThreadUpdate?.();
     };
-  }, [applyThreadUpdate]);
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2054,6 +2092,8 @@ export default function App() {
       window.localStorage.removeItem(threadSelectionKey(workspace.id));
       for (const threadId of threadIds) {
         delete pendingTerminalChunksByThreadRef.current[threadId];
+        delete latestOutputSequenceByThreadRef.current[threadId];
+        delete seenOutputSequenceByThreadRef.current[threadId];
       }
       updateTerminalLogMap((current) => {
         let changed = false;
@@ -2293,7 +2333,6 @@ export default function App() {
           onToggleFullAccess={toggleFullAccess}
           onLoadBranchSwitcher={onLoadBranchSwitcher}
           onCheckoutBranch={onCheckoutBranch}
-          onCreateAndCheckoutBranch={onCreateAndCheckoutBranch}
         />
       </main>
 

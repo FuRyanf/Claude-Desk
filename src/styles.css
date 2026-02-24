@@ -1154,34 +1154,6 @@ body.sidebar-resizing {
   color: #dc2626;
 }
 
-.branch-popover-footer {
-  border-top: 1px solid rgba(144, 162, 191, 0.22);
-  padding: var(--space-2);
-}
-
-.branch-create-button {
-  width: 100%;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  text-align: left;
-  padding: 8px 10px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 16px;
-}
-
-.branch-create-button:hover {
-  background: rgba(236, 243, 255, 0.64);
-}
-
-.branch-plus {
-  font-size: 20px;
-  line-height: 1;
-}
-
 .session-mode-pill {
   border: 1px solid #bfdbfe;
   background: #eff6ff;
