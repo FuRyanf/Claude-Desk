@@ -374,7 +374,7 @@ export function BottomBar({
   return (
     <footer className="bottom-bar" data-testid="bottom-bar">
       <div className="bottom-bar-left">
-        <span className="bottom-bar-label">{workspace?.kind === 'rdev' ? 'Remote' : 'Local'}</span>
+        <span className="bottom-bar-label">{workspace && workspace.kind !== 'local' ? 'Remote' : 'Local'}</span>
         <div className="branch-switcher" ref={popoverRef}>
           <button
             type="button"

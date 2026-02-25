@@ -10,6 +10,7 @@ const INPUT_FLUSH_MS = 8;
 const INPUT_CHUNK_SIZE = 4 * 1024;
 const OUTPUT_BATCH_BYTES = 48 * 1024;
 const STICKY_SCROLL_TOLERANCE = 0;
+const AUTO_SCROLL_GUARD_MS = 140;
 
 interface TerminalPanelProps {
   sessionId?: string | null;
@@ -49,6 +50,10 @@ export function TerminalPanel({
   const previousInputEnabledRef = useRef(inputEnabled);
   const sessionRef = useRef<string | null>(sessionId);
   const shouldStickToBottomRef = useRef(true);
+  const manualScrollLockRef = useRef(false);
+  const lastViewportYRef = useRef(0);
+  const autoScrollGuardUntilRef = useRef(0);
+  const autoScrollRequestIdRef = useRef(0);
   const writeQueueRef = useRef(new TerminalWriteQueue({ maxBatchBytes: OUTPUT_BATCH_BYTES }));
   const inputBufferRef = useRef('');
   const inputFlushTimerRef = useRef<number | null>(null);
@@ -57,11 +62,23 @@ export function TerminalPanel({
   const previousFocusRequestRef = useRef(focusRequestId);
 
   const scrollToBottomSoon = useCallback((term: Terminal) => {
+    if (!shouldStickToBottomRef.current || manualScrollLockRef.current) {
+      return;
+    }
+    const requestId = ++autoScrollRequestIdRef.current;
+    autoScrollGuardUntilRef.current = performance.now() + AUTO_SCROLL_GUARD_MS;
     term.scrollToBottom();
     window.requestAnimationFrame(() => {
       if (terminalRef.current !== term) {
         return;
       }
+      if (requestId !== autoScrollRequestIdRef.current) {
+        return;
+      }
+      if (!shouldStickToBottomRef.current || manualScrollLockRef.current) {
+        return;
+      }
+      autoScrollGuardUntilRef.current = performance.now() + AUTO_SCROLL_GUARD_MS;
       term.scrollToBottom();
     });
   }, []);
@@ -116,7 +133,7 @@ export function TerminalPanel({
         return;
       }
 
-      const shouldFollowOutput = shouldStickToBottomRef.current;
+      const shouldFollowOutput = shouldStickToBottomRef.current && !manualScrollLockRef.current;
       clearPendingWrites();
       term.reset();
       if (nextContent.length > 0) {
@@ -196,7 +213,8 @@ export function TerminalPanel({
       writeQueueRef.current.setSink({
         write: (chunk, done) => {
           term.write(chunk, () => {
-            if (terminalRef.current === term && shouldStickToBottomRef.current) {
+            if (terminalRef.current === term && shouldStickToBottomRef.current && !manualScrollLockRef.current) {
+              autoScrollGuardUntilRef.current = performance.now() + AUTO_SCROLL_GUARD_MS;
               term.scrollToBottom();
             }
             scheduleTerminalRefresh(term);
@@ -230,6 +248,7 @@ export function TerminalPanel({
       }
 
       if (contentRef.current.length > 0) {
+        manualScrollLockRef.current = false;
         shouldStickToBottomRef.current = true;
         queueWrite(contentRef.current);
         writeQueueRef.current.flushImmediate();
@@ -259,12 +278,35 @@ export function TerminalPanel({
 
       const onScrollDisposable = term.onScroll((viewportY) => {
         const bottom = term.buffer.active.baseY;
-        shouldStickToBottomRef.current =
-          viewportY >= Math.max(0, bottom - STICKY_SCROLL_TOLERANCE);
+        const atBottom = viewportY >= Math.max(0, bottom - STICKY_SCROLL_TOLERANCE);
+        const previousViewportY = lastViewportYRef.current;
+        lastViewportYRef.current = viewportY;
+        const guardActive = performance.now() <= autoScrollGuardUntilRef.current;
+
+        // Any user-driven upward scroll should disable follow until they explicitly return to bottom.
+        if (!guardActive && viewportY < previousViewportY) {
+          manualScrollLockRef.current = true;
+          shouldStickToBottomRef.current = false;
+          return;
+        }
+
+        if (manualScrollLockRef.current) {
+          if (atBottom) {
+            manualScrollLockRef.current = false;
+            shouldStickToBottomRef.current = true;
+          } else {
+            shouldStickToBottomRef.current = false;
+          }
+          return;
+        }
+
+        shouldStickToBottomRef.current = atBottom;
       });
       const onWheel = (event: WheelEvent) => {
-        if (event.deltaY !== 0) {
+        if (event.deltaY < 0) {
+          autoScrollRequestIdRef.current += 1;
           shouldStickToBottomRef.current = false;
+          manualScrollLockRef.current = true;
         }
       };
       host.addEventListener('wheel', onWheel, { passive: true });
@@ -298,6 +340,10 @@ export function TerminalPanel({
         writeQueueRef.current.clear();
         term.dispose();
         terminalRef.current = null;
+        manualScrollLockRef.current = false;
+        lastViewportYRef.current = 0;
+        autoScrollGuardUntilRef.current = 0;
+        autoScrollRequestIdRef.current = 0;
         inputBufferRef.current = '';
         if (inputFlushTimerRef.current !== null) {
           window.clearTimeout(inputFlushTimerRef.current);
@@ -337,7 +383,7 @@ export function TerminalPanel({
     term.options.disableStdin = readOnly || !inputEnabled;
 
     const wasEnabled = previousInputEnabledRef.current;
-    if (!wasEnabled && inputEnabled && !readOnly) {
+    if (!wasEnabled && inputEnabled && !readOnly && !manualScrollLockRef.current) {
       shouldStickToBottomRef.current = true;
       scrollToBottomSoon(term);
       window.setTimeout(() => {
@@ -362,6 +408,10 @@ export function TerminalPanel({
     }
 
     sessionRef.current = sessionId;
+    manualScrollLockRef.current = false;
+    lastViewportYRef.current = 0;
+    autoScrollGuardUntilRef.current = 0;
+    autoScrollRequestIdRef.current = 0;
     shouldStickToBottomRef.current = true;
     clearPendingWrites();
     inputBufferRef.current = '';
@@ -429,6 +479,7 @@ export function TerminalPanel({
       return;
     }
     term.focus();
+    manualScrollLockRef.current = false;
     shouldStickToBottomRef.current = true;
     scrollToBottomSoon(term);
     scheduleTerminalRefresh(term);

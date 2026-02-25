@@ -7,6 +7,7 @@ pub enum WorkspaceKind {
     #[default]
     Local,
     Rdev,
+    Ssh,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +20,8 @@ pub struct Workspace {
     pub kind: WorkspaceKind,
     #[serde(default)]
     pub rdev_ssh_command: Option<String>,
+    #[serde(default)]
+    pub ssh_command: Option<String>,
     #[serde(default)]
     pub git_pull_on_master_for_new_threads: bool,
     pub created_at: DateTime<Utc>,

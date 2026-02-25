@@ -153,6 +153,10 @@ function isDefaultThreadTitle(title: string): boolean {
   return title.trim().toLowerCase() === 'new thread';
 }
 
+function isRemoteWorkspaceKind(kind: Workspace['kind']): boolean {
+  return kind === 'rdev' || kind === 'ssh';
+}
+
 function normalizeTerminalInputChunk(data: string): string {
   return data;
 }
@@ -555,9 +559,10 @@ export default function App() {
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
 
   const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
-  const [addWorkspaceMode, setAddWorkspaceMode] = useState<'local' | 'rdev'>('local');
+  const [addWorkspaceMode, setAddWorkspaceMode] = useState<'local' | 'rdev' | 'ssh'>('local');
   const [addWorkspacePath, setAddWorkspacePath] = useState('');
   const [addWorkspaceRdevCommand, setAddWorkspaceRdevCommand] = useState('');
+  const [addWorkspaceSshCommand, setAddWorkspaceSshCommand] = useState('');
   const [addWorkspaceDisplayName, setAddWorkspaceDisplayName] = useState('');
   const [addWorkspaceError, setAddWorkspaceError] = useState<string | null>(null);
   const [addingWorkspace, setAddingWorkspace] = useState(false);
@@ -1099,7 +1104,7 @@ export default function App() {
   );
 
   const refreshGitInfo = useCallback(async () => {
-    if (!selectedWorkspace || selectedWorkspace.kind === 'rdev') {
+    if (!selectedWorkspace || selectedWorkspace.kind !== 'local') {
       setGitInfo(null);
       return;
     }
@@ -1430,7 +1435,7 @@ export default function App() {
         await waitForTerminalDataListenerReady();
         const response = await api.terminalStartSession({
           workspacePath: workspace.path,
-          initialCwd: workspace.kind === 'rdev' ? null : workspace.path,
+          initialCwd: workspace.kind === 'local' ? workspace.path : null,
           fullAccessFlag: thread.fullAccess,
           threadId: thread.id
         });
@@ -1551,7 +1556,7 @@ export default function App() {
       return;
     }
     const workspace = workspaces.find((item) => item.id === workspaceId);
-    if (!workspace || workspace.kind !== 'rdev') {
+    if (!workspace || !isRemoteWorkspaceKind(workspace.kind)) {
       return;
     }
 
@@ -1734,10 +1739,33 @@ export default function App() {
     [refreshThreadsForWorkspace, setSelectedThread, setSelectedWorkspace]
   );
 
+  const addSshWorkspaceByCommand = useCallback(
+    async (sshCommand: string, displayName: string) => {
+      const command = sshCommand.trim();
+      if (!command) {
+        throw new Error('Please enter an ssh command.');
+      }
+
+      const workspace = await api.addSshWorkspace(command, displayName.trim() || null);
+      setWorkspaces((current) => {
+        if (current.some((item) => item.id === workspace.id)) {
+          return current;
+        }
+        return [...current, workspace];
+      });
+      setSelectedWorkspace(workspace.id);
+      setSelectedThread(undefined);
+      await refreshThreadsForWorkspace(workspace.id);
+      return workspace;
+    },
+    [refreshThreadsForWorkspace, setSelectedThread, setSelectedWorkspace]
+  );
+
   const openWorkspacePicker = useCallback(() => {
     setAddWorkspaceMode('local');
     setAddWorkspacePath('');
     setAddWorkspaceRdevCommand('');
+    setAddWorkspaceSshCommand('');
     setAddWorkspaceDisplayName('');
     setAddWorkspaceError(null);
     setAddWorkspaceOpen(true);
@@ -1775,10 +1803,12 @@ export default function App() {
       setAddWorkspaceError(null);
       setAddWorkspaceMode('local');
       setAddWorkspacePath(path);
+      setAddWorkspaceSshCommand('');
       try {
         await addWorkspaceByPath(path);
         setAddWorkspaceOpen(false);
         setAddWorkspacePath('');
+        setAddWorkspaceSshCommand('');
         setAddWorkspaceError(null);
       } catch (error) {
         const message = String(error);
@@ -1797,11 +1827,13 @@ export default function App() {
       setAddWorkspaceError(null);
       setAddWorkspaceMode('rdev');
       setAddWorkspaceRdevCommand(rdevSshCommand);
+      setAddWorkspaceSshCommand('');
       setAddWorkspaceDisplayName(displayName);
       try {
         await addRdevWorkspaceByCommand(rdevSshCommand, displayName);
         setAddWorkspaceOpen(false);
         setAddWorkspaceRdevCommand('');
+        setAddWorkspaceSshCommand('');
         setAddWorkspaceDisplayName('');
         setAddWorkspaceError(null);
       } catch (error) {
@@ -1815,10 +1847,36 @@ export default function App() {
     [addRdevWorkspaceByCommand, pushToast]
   );
 
+  const confirmSshWorkspace = useCallback(
+    async (sshCommand: string, displayName: string) => {
+      setAddingWorkspace(true);
+      setAddWorkspaceError(null);
+      setAddWorkspaceMode('ssh');
+      setAddWorkspaceRdevCommand('');
+      setAddWorkspaceSshCommand(sshCommand);
+      setAddWorkspaceDisplayName(displayName);
+      try {
+        await addSshWorkspaceByCommand(sshCommand, displayName);
+        setAddWorkspaceOpen(false);
+        setAddWorkspaceRdevCommand('');
+        setAddWorkspaceSshCommand('');
+        setAddWorkspaceDisplayName('');
+        setAddWorkspaceError(null);
+      } catch (error) {
+        const message = String(error);
+        setAddWorkspaceError(message);
+        pushToast(message, 'error');
+      } finally {
+        setAddingWorkspace(false);
+      }
+    },
+    [addSshWorkspaceByCommand, pushToast]
+  );
+
   const onNewThreadInWorkspace = useCallback(
     async (workspaceId: string) => {
       const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
-      if (workspace?.kind !== 'rdev' && workspace?.gitPullOnMasterForNewThreads) {
+      if (workspace?.kind === 'local' && workspace.gitPullOnMasterForNewThreads) {
         try {
           const pullResult = await api.gitPullMasterForNewThread(workspace.path);
           if (pullResult.outcome === 'pulled') {
@@ -2122,7 +2180,7 @@ export default function App() {
     branches: GitBranchEntry[];
     status: GitWorkspaceStatus | null;
   }> => {
-    if (!selectedWorkspace || !gitInfo || selectedWorkspace.kind === 'rdev') {
+    if (!selectedWorkspace || !gitInfo || selectedWorkspace.kind !== 'local') {
       return { branches: [], status: null };
     }
     const [branches, status] = await Promise.all([
@@ -2134,7 +2192,7 @@ export default function App() {
 
   const onCheckoutBranch = useCallback(
     async (branchName: string) => {
-      if (!selectedWorkspace || selectedWorkspace.kind === 'rdev') {
+      if (!selectedWorkspace || selectedWorkspace.kind !== 'local') {
         return false;
       }
 
@@ -2322,7 +2380,7 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    if (!selectedWorkspace || selectedWorkspace.kind !== 'rdev') {
+    if (!selectedWorkspace || !isRemoteWorkspaceKind(selectedWorkspace.kind)) {
       return;
     }
 
@@ -2636,7 +2694,7 @@ export default function App() {
       pushToast('Select a workspace first.', 'error');
       return;
     }
-    if (selectedWorkspace.kind === 'rdev') {
+    if (selectedWorkspace.kind !== 'local') {
       pushToast('Diagnostics are only available for local workspaces.', 'info');
       return;
     }
@@ -2718,7 +2776,7 @@ export default function App() {
     try {
       const updatedThread = await setThreadFullAccess(selectedThread.workspaceId, selectedThread.id, nextValue);
       const workspace = workspaces.find((item) => item.id === updatedThread.workspaceId);
-      if (workspace?.kind === 'rdev') {
+      if (workspace && isRemoteWorkspaceKind(workspace.kind)) {
         const switchedInPlace = await restartRdevClaudeInPlace(updatedThread);
         if (switchedInPlace) {
           if (selectedWorkspaceIdRef.current !== updatedThread.workspaceId) {
@@ -2728,7 +2786,7 @@ export default function App() {
           pushToast(`Full access ${nextValue ? 'enabled' : 'disabled'} in-place.`, 'info');
           return;
         }
-        pushToast('Could not switch in-place for rdev; reconnecting session.', 'info');
+        pushToast('Could not switch in-place for remote workspace; reconnecting session.', 'info');
       }
       await stopThreadSession(updatedThread.id);
       if (selectedWorkspaceIdRef.current !== updatedThread.workspaceId) {
@@ -2756,8 +2814,8 @@ export default function App() {
 
   const openWorkspaceInFinder = useCallback(
     (workspace: Workspace) => {
-      if (workspace.kind === 'rdev') {
-        pushToast('rdev workspaces do not map to a local Finder folder.', 'info');
+      if (isRemoteWorkspaceKind(workspace.kind)) {
+        pushToast('Remote workspaces do not map to a local Finder folder.', 'info');
         return;
       }
       void api.openInFinder(workspace.path);
@@ -2767,10 +2825,11 @@ export default function App() {
 
   const openWorkspaceInTerminal = useCallback(
     (workspace: Workspace) => {
-      if (workspace.kind === 'rdev') {
-        const command = workspace.rdevSshCommand?.trim();
+      if (isRemoteWorkspaceKind(workspace.kind)) {
+        const command =
+          workspace.kind === 'rdev' ? workspace.rdevSshCommand?.trim() : workspace.sshCommand?.trim();
         if (!command) {
-          pushToast('Missing rdev ssh command for this workspace.', 'error');
+          pushToast('Missing remote shell command for this workspace.', 'error');
           return;
         }
         void api.openTerminalCommand(command);
@@ -2784,7 +2843,7 @@ export default function App() {
   const onRemoveWorkspace = useCallback(
     async (workspace: Workspace) => {
       const detail =
-        workspace.kind === 'rdev'
+        isRemoteWorkspaceKind(workspace.kind)
           ? 'This removes its saved threads in Claude Desk.'
           : 'This keeps your local folder intact but removes its saved threads in Claude Desk.';
       const message = `Remove "${workspace.name}" from Claude Desk?\n\n${detail}`;
@@ -3082,16 +3141,19 @@ export default function App() {
         initialMode={addWorkspaceMode}
         initialPath={addWorkspacePath}
         initialRdevCommand={addWorkspaceRdevCommand}
+        initialSshCommand={addWorkspaceSshCommand}
         initialDisplayName={addWorkspaceDisplayName}
         error={addWorkspaceError}
         saving={addingWorkspace}
         onClose={() => {
           setAddWorkspaceOpen(false);
           setAddWorkspaceError(null);
+          setAddWorkspaceSshCommand('');
         }}
         onPickDirectory={() => void pickWorkspaceDirectory()}
         onConfirmLocal={(path) => void confirmManualWorkspace(path)}
         onConfirmRdev={(command, displayName) => void confirmRdevWorkspace(command, displayName)}
+        onConfirmSsh={(command, displayName) => void confirmSshWorkspace(command, displayName)}
       />
 
       {resumeFailureModal ? (

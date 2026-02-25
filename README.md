@@ -31,7 +31,7 @@ Using Claude only in Terminal works well for one repo/thread, but gets painful w
 Claude Desk solves this by keeping Claude CLI local while adding a desktop control plane:
 
 - Workspace + thread management in one left rail.
-- Local and rdev remote workspaces in one UI (`rdev ssh ...` + thread-scoped session resume).
+- Local and remote workspaces in one UI (direct `ssh ...` or `rdev ssh ...`, both with thread-scoped session resume).
 - One-click start/resume for thread-scoped Claude sessions.
 - Embedded PTY terminal behavior (ANSI, keyboard, streaming) with local log persistence.
 - Attachment workflow for prompts: click `+` or drag files/images into the bottom bar, then send with your next Enter submit.
@@ -272,11 +272,11 @@ It also writes a summary report to `artifacts/last_diagnosis.txt`.
 - Toggling `Full access` restarts the current thread session so the new mode takes effect immediately.
 - For rdev workspaces, Claude Desk attempts an in-place toggle first (exit/resume in the same SSH session) and falls back to reconnect only if the shell handoff fails.
 
-### rdev workspaces
+### Remote workspaces (rdev + ssh)
 
-- Add an rdev project with an `rdev ssh <mp>/<env>` command.
+- Add a remote project with either an `rdev ssh <mp>/<env>` command or a direct `ssh <host>` command.
 - Claude Desk opens SSH, then launches/resumes `claude` inside the remote shell for each thread.
-- rdev uses the remote machine's `claude` binary and environment; verify that command works directly in your terminal if startup fails.
+- Remote sessions use the remote machine's `claude` binary and environment; verify that command works directly in your terminal if startup fails.
 
 ### Workspace add or picker issues
 

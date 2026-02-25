@@ -43,6 +43,10 @@ const THREAD_CONTEXT_MENU_HEIGHT = 116;
 const WORKSPACE_CONTEXT_MENU_HEIGHT = 214;
 const CONTEXT_MENU_MARGIN = 8;
 
+function isRemoteWorkspaceKind(kind: Workspace['kind']): boolean {
+  return kind === 'rdev' || kind === 'ssh';
+}
+
 function clampMenuCoordinate(x: number, y: number, width: number, height: number) {
   const maxX = Math.max(CONTEXT_MENU_MARGIN, window.innerWidth - width - CONTEXT_MENU_MARGIN);
   const maxY = Math.max(CONTEXT_MENU_MARGIN, window.innerHeight - height - CONTEXT_MENU_MARGIN);
@@ -486,8 +490,8 @@ function LeftRailComponent({
           {workspaces.map((workspace, workspaceIndex) => {
             const isSelectedWorkspace = workspace.id === selectedWorkspaceId;
             const isExpanded = expandedWorkspaceIds[workspace.id] !== false;
-            const isRdevWorkspace = workspace.kind === 'rdev';
-            const gitPullEnabled = !isRdevWorkspace && Boolean(workspace.gitPullOnMasterForNewThreads);
+            const isRemoteWorkspace = isRemoteWorkspaceKind(workspace.kind);
+            const gitPullEnabled = workspace.kind === 'local' && Boolean(workspace.gitPullOnMasterForNewThreads);
             const allThreads = threadsByWorkspace[workspace.id] ?? [];
             const visibleThreads = allThreads.filter((thread) => {
               if (!query) {
@@ -566,7 +570,7 @@ function LeftRailComponent({
                           <FolderIcon />
                         </span>
                         <span className="workspace-group-name">{workspace.name}</span>
-                        {isRdevWorkspace ? <span className="workspace-kind-tag">rdev</span> : null}
+                        {isRemoteWorkspace ? <span className="workspace-kind-tag">{workspace.kind}</span> : null}
                         {gitPullEnabled ? (
                           <span
                             className="workspace-git-pull-label"
@@ -732,7 +736,7 @@ function LeftRailComponent({
               onOpenWorkspaceInFinder(workspaceContextMenu.workspace);
               setWorkspaceContextMenu(null);
             }}
-            disabled={workspaceContextMenu.workspace.kind === 'rdev'}
+            disabled={isRemoteWorkspaceKind(workspaceContextMenu.workspace.kind)}
           >
             Open folder
           </button>
@@ -743,9 +747,9 @@ function LeftRailComponent({
               setWorkspaceContextMenu(null);
             }}
           >
-            {workspaceContextMenu.workspace.kind === 'rdev' ? 'Open rdev shell' : 'Open terminal'}
+            {isRemoteWorkspaceKind(workspaceContextMenu.workspace.kind) ? 'Open remote shell' : 'Open terminal'}
           </button>
-          {workspaceContextMenu.workspace.kind !== 'rdev' ? (
+          {workspaceContextMenu.workspace.kind === 'local' ? (
             <button
               type="button"
               onClick={async () => {

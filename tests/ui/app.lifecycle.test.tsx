@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => {
     path: '/tmp/workspace',
     kind: 'local' as const,
     rdevSshCommand: null,
+    sshCommand: null,
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -135,6 +136,8 @@ const mocks = vi.hoisted(() => {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
     listWorkspaces: vi.fn(listWorkspacesImpl),
     addWorkspace: vi.fn(async () => workspaceState),
+    addRdevWorkspace: vi.fn(async () => workspaceState),
+    addSshWorkspace: vi.fn(async () => workspaceState),
     removeWorkspace: vi.fn(async () => true),
     setWorkspaceGitPullOnMasterForNewThreads: vi.fn(setWorkspaceGitPullOnMasterForNewThreadsImpl),
     getGitInfo: vi.fn(async () => ({
@@ -296,6 +299,7 @@ describe('Thread lifecycle integration', () => {
       path: 'rdev-workspace-1',
       kind: 'rdev' as const,
       rdevSshCommand: 'rdev ssh comms-ai-open-connect/offbeat-apple',
+      sshCommand: null,
       gitPullOnMasterForNewThreads: false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -332,6 +336,55 @@ describe('Thread lifecycle integration', () => {
           workspacePath: 'rdev-workspace-1',
           initialCwd: null,
           threadId: 'thread-rdev'
+        })
+      );
+    });
+  });
+
+  it('starts ssh workspace sessions with null initial cwd', async () => {
+    const remoteWorkspace = {
+      id: 'ws-ssh',
+      name: 'bloody-faraday',
+      path: 'ssh-workspace-1',
+      kind: 'ssh' as const,
+      rdevSshCommand: null,
+      sshCommand: 'ssh rfu@bloody-faraday',
+      gitPullOnMasterForNewThreads: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    const remoteThread = {
+      id: 'thread-ssh',
+      workspaceId: 'ws-ssh',
+      agentId: 'claude-code',
+      fullAccess: false,
+      enabledSkills: [] as string[],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      title: 'SSH thread',
+      isArchived: false,
+      lastRunStatus: 'Idle' as const,
+      lastRunStartedAt: null,
+      lastRunEndedAt: null,
+      claudeSessionId: null,
+      lastResumeAt: null,
+      lastNewSessionAt: null
+    };
+
+    mocks.api.listWorkspaces.mockResolvedValueOnce([remoteWorkspace]);
+    mocks.api.listThreads.mockImplementation(async (workspaceId: string) =>
+      workspaceId === 'ws-ssh' ? [remoteThread] : []
+    );
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /SSH thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspacePath: 'ssh-workspace-1',
+          initialCwd: null,
+          threadId: 'thread-ssh'
         })
       );
     });
@@ -394,6 +447,7 @@ describe('Thread lifecycle integration', () => {
       path: 'rdev-workspace-recover',
       kind: 'rdev' as const,
       rdevSshCommand: 'rdev ssh comms-ai-open-connect/offbeat-apple',
+      sshCommand: null,
       gitPullOnMasterForNewThreads: false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()

@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => {
     path: '/tmp/workspace-added',
     kind: 'local' as const,
     rdevSshCommand: null,
+    sshCommand: null,
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -19,6 +20,7 @@ const mocks = vi.hoisted(() => {
     path: '/tmp/workspace-second',
     kind: 'local' as const,
     rdevSshCommand: null,
+    sshCommand: null,
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -29,12 +31,25 @@ const mocks = vi.hoisted(() => {
     path: 'rdev-workspace-1',
     kind: 'rdev' as const,
     rdevSshCommand: 'rdev ssh comms-ai-open-connect/offbeat-apple',
+    sshCommand: null,
+    gitPullOnMasterForNewThreads: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const workspaceSsh = {
+    id: 'ws-ssh',
+    name: 'bloody-faraday',
+    path: 'ssh-workspace-1',
+    kind: 'ssh' as const,
+    rdevSshCommand: null,
+    sshCommand: 'ssh rfu@bloody-faraday',
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
 
-  let workspaceState = [] as Array<typeof workspaceOne>;
+  type WorkspaceFixture = typeof workspaceOne | typeof workspaceRdev | typeof workspaceSsh;
+  let workspaceState: WorkspaceFixture[] = [];
 
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
@@ -47,6 +62,10 @@ const mocks = vi.hoisted(() => {
       workspaceState = [workspaceRdev];
       return workspaceRdev;
     }),
+    addSshWorkspace: vi.fn(async () => {
+      workspaceState = [workspaceSsh];
+      return workspaceSsh;
+    }),
     removeWorkspace: vi.fn(async (workspaceId: string) => {
       const before = workspaceState.length;
       workspaceState = workspaceState.filter((workspace) => workspace.id !== workspaceId);
@@ -56,7 +75,7 @@ const mocks = vi.hoisted(() => {
       const byId = new Map(workspaceState.map((workspace) => [workspace.id, workspace]));
       const reordered = workspaceIds
         .map((workspaceId) => byId.get(workspaceId))
-        .filter((workspace): workspace is typeof workspaceOne => Boolean(workspace));
+        .filter((workspace): workspace is WorkspaceFixture => Boolean(workspace));
       workspaceState = [...reordered, ...workspaceState.filter((workspace) => !workspaceIds.includes(workspace.id))];
       return workspaceState;
     }),
@@ -165,7 +184,8 @@ const mocks = vi.hoisted(() => {
     sampleWorkspaces: {
       workspaceOne,
       workspaceTwo,
-      workspaceRdev
+      workspaceRdev,
+      workspaceSsh
     },
     openDialog,
     confirmDialog,
@@ -350,5 +370,19 @@ describe('Workspace add flow', () => {
       'offbeat-apple'
     );
     expect(await screen.findByRole('button', { name: /offbeat-apple/i })).toBeInTheDocument();
+  });
+
+  it('adds an ssh workspace from the add-project modal', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
+    await user.click(screen.getByRole('tab', { name: 'ssh' }));
+    await user.type(screen.getByLabelText('ssh command'), 'ssh rfu@bloody-faraday');
+    await user.type(screen.getByLabelText('Display name (optional)'), 'bloody-faraday');
+    await user.click(screen.getByRole('button', { name: 'Add ssh project' }));
+
+    expect(mocks.api.addSshWorkspace).toHaveBeenCalledWith('ssh rfu@bloody-faraday', 'bloody-faraday');
+    expect(await screen.findByRole('button', { name: /bloody-faraday/i })).toBeInTheDocument();
   });
 });

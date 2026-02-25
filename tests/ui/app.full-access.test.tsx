@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => {
     name: 'Workspace',
     path: '/tmp/workspace',
     kind: 'local' as const,
+    rdevSshCommand: null,
+    sshCommand: null,
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -36,6 +38,8 @@ const mocks = vi.hoisted(() => {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
     listWorkspaces: vi.fn(async () => [workspace]),
     addWorkspace: vi.fn(async () => workspace),
+    addRdevWorkspace: vi.fn(async () => workspace),
+    addSshWorkspace: vi.fn(async () => workspace),
     removeWorkspace: vi.fn(async () => true),
     setWorkspaceGitPullOnMasterForNewThreads: vi.fn(async () => workspace),
     getGitInfo: vi.fn(async () => ({
@@ -170,7 +174,7 @@ const mocks = vi.hoisted(() => {
   return {
     api,
     reset,
-    setWorkspaceKind: (kind: 'local' | 'rdev') => {
+    setWorkspaceKind: (kind: 'local' | 'rdev' | 'ssh') => {
       workspace = { ...workspace, kind };
     },
     openDialog: vi.fn(async () => null),

@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
 
-type AddWorkspaceMode = 'local' | 'rdev';
+type AddWorkspaceMode = 'local' | 'rdev' | 'ssh';
 
 interface AddWorkspaceModalProps {
   open: boolean;
   initialPath?: string;
   initialRdevCommand?: string;
+  initialSshCommand?: string;
   initialDisplayName?: string;
   initialMode?: AddWorkspaceMode;
   error?: string | null;
@@ -13,6 +14,7 @@ interface AddWorkspaceModalProps {
   onClose: () => void;
   onConfirmLocal: (path: string) => void;
   onConfirmRdev: (rdevSshCommand: string, displayName: string) => void;
+  onConfirmSsh: (sshCommand: string, displayName: string) => void;
   onPickDirectory: () => void;
 }
 
@@ -20,6 +22,7 @@ export function AddWorkspaceModal({
   open,
   initialPath = '',
   initialRdevCommand = '',
+  initialSshCommand = '',
   initialDisplayName = '',
   initialMode = 'local',
   error,
@@ -27,11 +30,13 @@ export function AddWorkspaceModal({
   onClose,
   onConfirmLocal,
   onConfirmRdev,
+  onConfirmSsh,
   onPickDirectory
 }: AddWorkspaceModalProps) {
   const [mode, setMode] = useState<AddWorkspaceMode>(initialMode);
   const [path, setPath] = useState(initialPath);
   const [rdevCommand, setRdevCommand] = useState(initialRdevCommand);
+  const [sshCommand, setSshCommand] = useState(initialSshCommand);
   const [displayName, setDisplayName] = useState(initialDisplayName);
 
   useEffect(() => {
@@ -39,9 +44,10 @@ export function AddWorkspaceModal({
       setMode(initialMode);
       setPath(initialPath);
       setRdevCommand(initialRdevCommand);
+      setSshCommand(initialSshCommand);
       setDisplayName(initialDisplayName);
     }
-  }, [initialDisplayName, initialMode, initialPath, initialRdevCommand, open]);
+  }, [initialDisplayName, initialMode, initialPath, initialRdevCommand, initialSshCommand, open]);
 
   if (!open) {
     return null;
@@ -73,6 +79,16 @@ export function AddWorkspaceModal({
           >
             rdev
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'ssh'}
+            className={mode === 'ssh' ? 'ghost-button active' : 'ghost-button'}
+            onClick={() => setMode('ssh')}
+            disabled={saving}
+          >
+            ssh
+          </button>
         </div>
 
         {mode === 'local' ? (
@@ -100,7 +116,7 @@ export function AddWorkspaceModal({
               autoFocus
             />
           </>
-        ) : (
+        ) : mode === 'rdev' ? (
           <>
             <p>Paste an rdev ssh command. Authentication will happen in the terminal session when needed.</p>
             <label htmlFor="workspace-rdev-command">rdev ssh command</label>
@@ -128,6 +144,34 @@ export function AddWorkspaceModal({
               onChange={(event) => setDisplayName(event.target.value)}
             />
           </>
+        ) : (
+          <>
+            <p>Paste an ssh command. Authentication will happen in the terminal session when needed.</p>
+            <label htmlFor="workspace-ssh-command">ssh command</label>
+            <input
+              id="workspace-ssh-command"
+              type="text"
+              placeholder="ssh user@host"
+              value={sshCommand}
+              onChange={(event) => setSshCommand(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  onConfirmSsh(sshCommand.trim(), displayName.trim());
+                }
+              }}
+              autoFocus
+            />
+
+            <label htmlFor="workspace-ssh-name">Display name (optional)</label>
+            <input
+              id="workspace-ssh-name"
+              type="text"
+              placeholder="remote-host"
+              value={displayName}
+              onChange={(event) => setDisplayName(event.target.value)}
+            />
+          </>
         )}
 
         {error ? <p className="modal-error">{error}</p> : null}
@@ -144,11 +188,18 @@ export function AddWorkspaceModal({
                 onConfirmLocal(path.trim());
                 return;
               }
-              onConfirmRdev(rdevCommand.trim(), displayName.trim());
+              if (mode === 'rdev') {
+                onConfirmRdev(rdevCommand.trim(), displayName.trim());
+                return;
+              }
+              onConfirmSsh(sshCommand.trim(), displayName.trim());
             }}
-            disabled={saving || (mode === 'local' ? !path.trim() : !rdevCommand.trim())}
+            disabled={
+              saving ||
+              (mode === 'local' ? !path.trim() : mode === 'rdev' ? !rdevCommand.trim() : !sshCommand.trim())
+            }
           >
-            {saving ? 'Adding...' : mode === 'local' ? 'Add project' : 'Add rdev project'}
+            {saving ? 'Adding...' : mode === 'local' ? 'Add project' : mode === 'rdev' ? 'Add rdev project' : 'Add ssh project'}
           </button>
         </footer>
       </section>

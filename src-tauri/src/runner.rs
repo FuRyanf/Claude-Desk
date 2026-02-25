@@ -156,17 +156,28 @@ fn build_claude_shell_command(
 fn build_terminal_shell_command(
     workspace_kind: WorkspaceKind,
     rdev_ssh_command: Option<&str>,
+    ssh_command: Option<&str>,
     claude_shell_command: &str,
 ) -> Result<(String, Option<String>)> {
-    if workspace_kind != WorkspaceKind::Rdev {
+    if workspace_kind == WorkspaceKind::Local {
         return Ok((claude_shell_command.to_string(), None));
     }
 
-    let remote_command = rdev_ssh_command
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("Missing rdev ssh command for remote workspace"))?;
-    let remote_command = ensure_rdev_non_tmux(remote_command);
+    let remote_command = match workspace_kind {
+        WorkspaceKind::Rdev => {
+            let command = rdev_ssh_command
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("Missing rdev ssh command for remote workspace"))?;
+            ensure_rdev_non_tmux(command)
+        }
+        WorkspaceKind::Ssh => ssh_command
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("Missing ssh command for remote workspace"))?
+            .to_string(),
+        WorkspaceKind::Local => unreachable!(),
+    };
     let exec_claude_command = format!("exec {claude_shell_command}");
 
     if remote_command.contains("{CLAUDE_CMD}") {
@@ -183,7 +194,7 @@ fn resolve_claude_command_for_workspace(
     workspace_kind: WorkspaceKind,
     settings: &Settings,
 ) -> Result<String> {
-    if workspace_kind == WorkspaceKind::Rdev {
+    if workspace_kind == WorkspaceKind::Rdev || workspace_kind == WorkspaceKind::Ssh {
         return Ok("claude".to_string());
     }
 
@@ -874,13 +885,13 @@ pub async fn terminal_start_session(
     let settings = storage::load_settings()?;
     let claude_command = resolve_claude_command_for_workspace(workspace.kind, &settings)?;
 
-    let cwd = if workspace.kind == WorkspaceKind::Rdev {
+    let cwd = if workspace.kind == WorkspaceKind::Local {
+        initial_cwd.unwrap_or_else(|| workspace_path.clone())
+    } else {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("/"))
             .to_string_lossy()
             .to_string()
-    } else {
-        initial_cwd.unwrap_or_else(|| workspace_path.clone())
     };
     let session_id = Uuid::new_v4().to_string();
     let run_dir = storage::runs_dir(&workspace_id, &thread_id)?.join(&session_id);
@@ -896,6 +907,7 @@ pub async fn terminal_start_session(
     let (shell_command, post_connect_command) = build_terminal_shell_command(
         workspace.kind,
         workspace.rdev_ssh_command.as_deref(),
+        workspace.ssh_command.as_deref(),
         &claude_shell_command,
     )?;
     let command_manifest = vec![
@@ -925,7 +937,8 @@ pub async fn terminal_start_session(
             ,
             "workspaceKind": match workspace.kind {
                 WorkspaceKind::Local => "local",
-                WorkspaceKind::Rdev => "rdev"
+                WorkspaceKind::Rdev => "rdev",
+                WorkspaceKind::Ssh => "ssh"
             },
             "postConnectCommand": post_connect_command
         }),
@@ -1734,6 +1747,14 @@ mod tests {
     }
 
     #[test]
+    fn resolve_claude_command_for_ssh_uses_remote_binary() {
+        let settings = Settings::default();
+        let command =
+            resolve_claude_command_for_workspace(WorkspaceKind::Ssh, &settings).expect("ssh command should resolve");
+        assert_eq!(command, "claude");
+    }
+
+    #[test]
     fn resolve_claude_command_for_local_uses_detected_path() {
         let tmp_dir =
             std::env::temp_dir().join(format!("claude-desk-cli-detect-test-{}", Uuid::new_v4()));
@@ -1762,6 +1783,7 @@ mod tests {
         let (shell_command, post_connect_command) = build_terminal_shell_command(
             WorkspaceKind::Rdev,
             Some("rdev ssh comms-ai-open-connect/offbeat-apple"),
+            None,
             &claude_command,
         )
         .expect("rdev command should build");
@@ -1790,6 +1812,7 @@ mod tests {
         let (shell_command, post_connect_command) = build_terminal_shell_command(
             WorkspaceKind::Rdev,
             Some("rdev ssh comms-ai-open-connect/offbeat-apple --tmux"),
+            None,
             &claude_command,
         )
         .expect("rdev command should build");
@@ -1817,6 +1840,7 @@ mod tests {
         let (shell_command, post_connect_command) = build_terminal_shell_command(
             WorkspaceKind::Rdev,
             Some("rdev ssh comms-ai-open-connect/offbeat-apple {CLAUDE_CMD}"),
+            None,
             &claude_command,
         )
         .expect("placeholder command should build");
@@ -1826,6 +1850,32 @@ mod tests {
             "rdev ssh comms-ai-open-connect/offbeat-apple --non-tmux exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 NO_COLOR= '/usr/local/bin/claude' --session-id '123e4567-e89b-12d3-a456-426614174000'"
         );
         assert_eq!(post_connect_command, None);
+    }
+
+    #[test]
+    fn build_terminal_shell_command_for_ssh_dispatches_post_connect_handoff() {
+        let claude_command = build_claude_shell_command(
+            "/usr/local/bin/claude",
+            "123e4567-e89b-12d3-a456-426614174000",
+            false,
+            false,
+        );
+        let (shell_command, post_connect_command) = build_terminal_shell_command(
+            WorkspaceKind::Ssh,
+            None,
+            Some("ssh rfu@bloody-faraday"),
+            &claude_command,
+        )
+        .expect("ssh command should build");
+
+        assert_eq!(shell_command, "ssh rfu@bloody-faraday");
+        assert_eq!(
+            post_connect_command,
+            Some(
+                "exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 NO_COLOR= '/usr/local/bin/claude' --session-id '123e4567-e89b-12d3-a456-426614174000'"
+                    .to_string()
+            )
+        );
     }
 
     #[test]

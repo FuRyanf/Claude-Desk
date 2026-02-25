@@ -140,6 +140,7 @@ pub fn add_workspace(path: &str) -> Result<Workspace> {
         path: canonical,
         kind: WorkspaceKind::Local,
         rdev_ssh_command: None,
+        ssh_command: None,
         git_pull_on_master_for_new_threads: false,
         created_at: now,
         updated_at: now,
@@ -195,6 +196,64 @@ pub fn add_rdev_workspace(rdev_ssh_command: &str, display_name: Option<&str>) ->
         path: format!("rdev-workspace-{}", Uuid::new_v4()),
         kind: WorkspaceKind::Rdev,
         rdev_ssh_command: Some(normalized_command.to_string()),
+        ssh_command: None,
+        git_pull_on_master_for_new_threads: false,
+        created_at: now,
+        updated_at: now,
+    };
+
+    workspaces.push(workspace.clone());
+    save_workspaces(&workspaces)?;
+    fs::create_dir_all(thread_workspace_dir(&workspace.id)?)?;
+
+    Ok(workspace)
+}
+
+pub fn add_ssh_workspace(ssh_command: &str, display_name: Option<&str>) -> Result<Workspace> {
+    let normalized_command = ssh_command.trim();
+    if normalized_command.is_empty() {
+        return Err(anyhow!("Please enter an ssh command."));
+    }
+
+    let first_token = normalized_command.split_whitespace().next().unwrap_or_default();
+    if first_token != "ssh" {
+        return Err(anyhow!(
+            "SSH command must start with `ssh` (example: ssh user@host)"
+        ));
+    }
+
+    let mut workspaces = load_workspaces()?;
+    if let Some(existing) = workspaces.iter().find(|workspace| {
+        workspace.kind == WorkspaceKind::Ssh
+            && workspace.ssh_command.as_deref() == Some(normalized_command)
+    }) {
+        return Ok(existing.clone());
+    }
+
+    let now = Utc::now();
+    let trimmed_display_name = display_name.unwrap_or_default().trim().to_string();
+    let fallback_name = normalized_command
+        .split_whitespace()
+        .skip(1)
+        .find(|segment| !segment.starts_with('-'))
+        .unwrap_or("ssh")
+        .split('@')
+        .next_back()
+        .unwrap_or("ssh")
+        .to_string();
+    let workspace_name = if trimmed_display_name.is_empty() {
+        fallback_name
+    } else {
+        trimmed_display_name
+    };
+
+    let workspace = Workspace {
+        id: Uuid::new_v4().to_string(),
+        name: workspace_name,
+        path: format!("ssh-workspace-{}", Uuid::new_v4()),
+        kind: WorkspaceKind::Ssh,
+        rdev_ssh_command: None,
+        ssh_command: Some(normalized_command.to_string()),
         git_pull_on_master_for_new_threads: false,
         created_at: now,
         updated_at: now,
@@ -694,6 +753,35 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, added.id);
         assert_eq!(loaded[0].kind, WorkspaceKind::Rdev);
+
+        std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn add_ssh_workspace_persists_command_and_kind() {
+        let _guard = test_lock().lock().expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "claude-desk-ssh-workspace-test-{}",
+            Uuid::new_v4()
+        ));
+        std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
+
+        let added =
+            add_ssh_workspace("ssh rfu@bloody-faraday", Some("bloody-faraday"))
+                .expect("ssh workspace should be added");
+        assert_eq!(added.kind, WorkspaceKind::Ssh);
+        assert_eq!(added.ssh_command.as_deref(), Some("ssh rfu@bloody-faraday"));
+        assert!(
+            added.path.starts_with("ssh-workspace-"),
+            "ssh workspace path should use deterministic non-filesystem marker"
+        );
+
+        let loaded = load_workspaces().expect("workspaces should load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, added.id);
+        assert_eq!(loaded[0].kind, WorkspaceKind::Ssh);
 
         std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);
