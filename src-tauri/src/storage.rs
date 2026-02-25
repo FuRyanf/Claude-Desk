@@ -173,10 +173,7 @@ pub fn add_rdev_workspace(rdev_ssh_command: &str, display_name: Option<&str>) ->
     }
 
     let now = Utc::now();
-    let trimmed_display_name = display_name
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let trimmed_display_name = display_name.unwrap_or_default().trim().to_string();
     let fallback_name = normalized_command
         .split_whitespace()
         .skip(2)
@@ -255,7 +252,10 @@ pub fn set_workspace_order(workspace_ids: Vec<String>) -> Result<Vec<Workspace>>
     let mut requested_ids = Vec::new();
     for workspace_id in workspace_ids {
         let normalized = validate_storage_segment(&workspace_id, "workspace id")?.to_string();
-        if requested_ids.iter().any(|existing: &String| existing == &normalized) {
+        if requested_ids
+            .iter()
+            .any(|existing: &String| existing == &normalized)
+        {
             continue;
         }
         requested_ids.push(normalized);
@@ -267,7 +267,10 @@ pub fn set_workspace_order(workspace_ids: Vec<String>) -> Result<Vec<Workspace>>
 
     let mut ordered = Vec::with_capacity(workspaces.len());
     for workspace_id in requested_ids {
-        if let Some(index) = workspaces.iter().position(|workspace| workspace.id == workspace_id) {
+        if let Some(index) = workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+        {
             ordered.push(workspaces.remove(index));
         }
     }
@@ -713,7 +716,8 @@ mod tests {
             .expect("workspace should be added");
         let thread = create_thread(&workspace.id, Some("claude-code".to_string()))
             .expect("thread should be created");
-        let thread_storage_dir = thread_dir(&workspace.id, &thread.id).expect("thread dir should resolve");
+        let thread_storage_dir =
+            thread_dir(&workspace.id, &thread.id).expect("thread dir should resolve");
         assert!(
             thread_storage_dir.exists(),
             "thread storage should exist before workspace removal"

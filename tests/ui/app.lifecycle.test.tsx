@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -15,6 +15,9 @@ const mocks = vi.hoisted(() => {
   };
 
   const now = Date.now();
+  let terminalDataHandler: ((
+    event: { sessionId: string; threadId?: string; data: string; sequence?: number }
+  ) => void) | null = null;
   const baseThreads = [
     {
       id: 'thread-1',
@@ -220,6 +223,7 @@ const mocks = vi.hoisted(() => {
     api.terminalStartSession.mockImplementation(terminalStartSessionImpl);
     api.terminalReadOutput.mockReset();
     api.terminalReadOutput.mockImplementation(terminalReadOutputImpl);
+    terminalDataHandler = null;
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -234,7 +238,19 @@ const mocks = vi.hoisted(() => {
     confirmDialog: vi.fn(async () => true),
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
-    onTerminalData: vi.fn(async () => () => undefined),
+    emitTerminalData: (event: { sessionId: string; threadId?: string; data: string; sequence?: number }) => {
+      terminalDataHandler?.(event);
+    },
+    onTerminalData: vi.fn(
+      async (handler: (event: { sessionId: string; threadId?: string; data: string; sequence?: number }) => void) => {
+        terminalDataHandler = handler;
+        return () => {
+          if (terminalDataHandler === handler) {
+            terminalDataHandler = null;
+          }
+        };
+      }
+    ),
     onTerminalExit: vi.fn(async () => () => undefined),
     onThreadUpdated: vi.fn(async () => () => undefined)
   };
@@ -371,7 +387,79 @@ describe('Thread lifecycle integration', () => {
     });
   });
 
-  it('auto-recovers the selected thread session after focus when the previous session is gone', async () => {
+  it('auto-recovers the selected rdev thread session after focus when the previous session is gone', async () => {
+    const remoteWorkspace = {
+      id: 'ws-rdev-recover',
+      name: 'offbeat-apple',
+      path: 'rdev-workspace-recover',
+      kind: 'rdev' as const,
+      rdevSshCommand: 'rdev ssh comms-ai-open-connect/offbeat-apple',
+      gitPullOnMasterForNewThreads: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    const remoteThread = {
+      id: 'thread-rdev-recover',
+      workspaceId: 'ws-rdev-recover',
+      agentId: 'claude-code',
+      fullAccess: false,
+      enabledSkills: [] as string[],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      title: 'Remote recover thread',
+      isArchived: false,
+      lastRunStatus: 'Idle' as const,
+      lastRunStartedAt: null,
+      lastRunEndedAt: null,
+      claudeSessionId: null,
+      lastResumeAt: null,
+      lastNewSessionAt: null
+    };
+    mocks.api.listWorkspaces.mockResolvedValueOnce([remoteWorkspace]);
+    mocks.api.listThreads.mockImplementation(async (workspaceId: string) =>
+      workspaceId === remoteWorkspace.id ? [remoteThread] : []
+    );
+    mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => ({
+      sessionId: `session-${params.threadId}`,
+      sessionMode: 'new',
+      resumeSessionId: null,
+      thread: {
+        ...remoteThread,
+        id: params.threadId
+      }
+    }));
+
+    let disconnected = false;
+    mocks.api.terminalReadOutput.mockImplementation(async (sessionId: string) => {
+      if (disconnected && sessionId === 'session-thread-rdev-recover') {
+        throw new Error('Terminal session not found');
+      }
+      return '';
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-rdev-recover' })
+      );
+    });
+    const startCallsBefore = mocks.api.terminalStartSession.mock.calls.length;
+
+    disconnected = true;
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession.mock.calls.length).toBeGreaterThan(startCallsBefore);
+    });
+    expect(mocks.api.terminalStartSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ threadId: 'thread-rdev-recover' })
+    );
+  });
+
+  it('does not auto-recover local workspace sessions on focus', async () => {
     let disconnected = false;
     mocks.api.terminalReadOutput.mockImplementation(async (sessionId: string) => {
       if (disconnected && sessionId === 'session-thread-1') {
@@ -394,12 +482,10 @@ describe('Thread lifecycle integration', () => {
       window.dispatchEvent(new Event('focus'));
     });
 
-    await waitFor(() => {
-      expect(mocks.api.terminalStartSession.mock.calls.length).toBeGreaterThan(startCallsBefore);
+    await new Promise<void>((resolve) => {
+      window.setTimeout(() => resolve(), 180);
     });
-    expect(mocks.api.terminalStartSession).toHaveBeenLastCalledWith(
-      expect.objectContaining({ threadId: 'thread-1' })
-    );
+    expect(mocks.api.terminalStartSession.mock.calls.length).toBe(startCallsBefore);
   });
 
   it('keeps the previous thread session running and starts the next one when switching threads', async () => {
@@ -602,6 +688,51 @@ describe('Thread lifecycle integration', () => {
       expect(mocks.api.renameThread).toHaveBeenCalledWith('ws-1', 'thread-1', 'Renamed inline');
     });
     expect(await screen.findByRole('button', { name: /^Renamed inline$/ })).toBeInTheDocument();
+  });
+
+  it('keeps inline rename active for navigation/modifier keys and only exits on Enter/Escape/blur', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    const title = await screen.findByRole('button', { name: 'Thread one' });
+    await user.dblClick(title);
+
+    let input = await screen.findByDisplayValue('Thread one');
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+
+    fireEvent.keyDown(input, { key: 'ArrowLeft' });
+    fireEvent.keyDown(input, { key: 'Meta' });
+    fireEvent.keyDown(input, { key: 'Control' });
+    fireEvent.keyDown(input, { key: 'Alt' });
+    fireEvent.keyDown(input, { key: 'Shift' });
+
+    expect(screen.getByDisplayValue('Thread one')).toBeInTheDocument();
+    expect(mocks.api.renameThread).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: 'Escape' });
+    await waitFor(() => {
+      expect(screen.queryByDisplayValue('Thread one')).not.toBeInTheDocument();
+    });
+    expect(mocks.api.renameThread).not.toHaveBeenCalled();
+
+    await user.dblClick(await screen.findByRole('button', { name: 'Thread one' }));
+    input = await screen.findByDisplayValue('Thread one');
+    await user.clear(input);
+    await user.type(input, 'Renamed by blur');
+    fireEvent.blur(input);
+    await waitFor(() => {
+      expect(mocks.api.renameThread).toHaveBeenCalledWith('ws-1', 'thread-1', 'Renamed by blur');
+    });
+
+    await user.dblClick(await screen.findByRole('button', { name: 'Renamed by blur' }));
+    input = await screen.findByDisplayValue('Renamed by blur');
+    await user.clear(input);
+    await user.type(input, 'Renamed by enter');
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => {
+      expect(mocks.api.renameThread).toHaveBeenCalledWith('ws-1', 'thread-1', 'Renamed by enter');
+    });
   });
 
   it('deletes a thread and keeps remaining threads interactive', async () => {

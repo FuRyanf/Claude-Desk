@@ -20,6 +20,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { TerminalPanel } from './components/TerminalPanel';
 import { ToastRegion, type ToastItem } from './components/ToastRegion';
 import { api, onTerminalData, onTerminalExit, onThreadUpdated } from './lib/api';
+import { clampTerminalLog as clampTerminalLogText } from './lib/terminalLogClamp';
 import {
   appendBufferedLive,
   findSuffixPrefixOverlap,
@@ -51,13 +52,15 @@ const SNAPSHOT_BUFFER_MAX_CHARS = TERMINAL_LOG_BUFFER_CHARS;
 const TERMINAL_LOG_FLUSH_INTERVAL_MS = 16;
 const TERMINAL_DATA_LISTENER_READY_TIMEOUT_MS = 800;
 const SESSION_SNAPSHOT_REFRESH_DELAYS_MS = [320, 1100];
+const CLAUDE_IN_PLACE_RESTART_DELAY_MS = 120;
+const RDEV_SHELL_PROMPT_POLL_INTERVAL_MS = 120;
+const RDEV_SHELL_PROMPT_MAX_POLLS = 12;
 const AUTO_RECOVER_SESSION_TIMEOUT_MS = 900;
 const AUTO_RECOVER_RETRY_COOLDOWN_MS = 1200;
 const THREAD_WORKING_IDLE_TIMEOUT_MS = 1200;
 const MAX_ATTACHMENT_DRAFTS = 24;
 const MAX_ATTACHMENTS_PER_MESSAGE = 12;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
-const TERMINAL_INPUT_ESCAPE_REGEX = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|O.)/g;
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
 
 interface PendingSessionStart {
@@ -82,6 +85,66 @@ function todayId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
 }
 
+function isUuidLike(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+function buildClaudeInPlaceRestartCommand(sessionId: string, fullAccess: boolean): string {
+  const parts = [
+    'exec',
+    'env',
+    'TERM=xterm-256color',
+    'COLORTERM=truecolor',
+    'CLICOLOR=1',
+    'CLICOLOR_FORCE=1',
+    'FORCE_COLOR=1',
+    'NO_COLOR=',
+    'claude',
+    '--resume',
+    `'${sessionId}'`
+  ];
+  if (fullAccess) {
+    parts.push('--dangerously-skip-permissions');
+  }
+  return parts.join(' ');
+}
+
+function hasShellPromptInSnapshot(snapshot: string): boolean {
+  if (!snapshot) {
+    return false;
+  }
+
+  const lines = snapshot
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .slice(-12)
+    .map((line) =>
+      stripAnsi(line)
+        .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+        .trimEnd()
+    )
+    .filter((line) => line.length > 0);
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    const lower = line.toLowerCase();
+    if (
+      lower.includes('claude code') ||
+      lower.includes('for shortcuts') ||
+      lower.includes('bypass permissions') ||
+      lower.includes('starting ssh connection') ||
+      lower.includes('uploading gh auth token')
+    ) {
+      continue;
+    }
+    if (/[#$%>]$/.test(line)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function stripAnsi(text: string): string {
   return text.replace(ANSI_REGEX, '');
 }
@@ -91,16 +154,135 @@ function isDefaultThreadTitle(title: string): boolean {
 }
 
 function normalizeTerminalInputChunk(data: string): string {
-  return data.replace(TERMINAL_INPUT_ESCAPE_REGEX, '');
+  return data;
+}
+
+interface StripControlSequencesResult {
+  text: string;
+  carry: string;
+}
+
+function consumeCsiSequence(input: string, startIndex: number): number | null {
+  let index = startIndex;
+  while (index < input.length) {
+    const code = input.charCodeAt(index);
+    if (code >= 0x40 && code <= 0x7e) {
+      return index + 1;
+    }
+    index += 1;
+  }
+  return null;
+}
+
+function consumeStringControlSequence(input: string, startIndex: number): number | null {
+  let index = startIndex;
+  while (index < input.length) {
+    const code = input.charCodeAt(index);
+    if (code === 0x07 || code === 0x9c) {
+      return index + 1;
+    }
+    if (code === 0x1b) {
+      if (index + 1 >= input.length) {
+        return null;
+      }
+      if (input.charCodeAt(index + 1) === 0x5c) {
+        return index + 2;
+      }
+    }
+    index += 1;
+  }
+  return null;
+}
+
+function consumeEscapeSequence(input: string, startIndex: number): number | null {
+  const escIndex = startIndex;
+  if (escIndex + 1 >= input.length) {
+    return null;
+  }
+
+  const code = input.charCodeAt(escIndex + 1);
+  if (code === 0x5b) {
+    return consumeCsiSequence(input, escIndex + 2);
+  }
+
+  // OSC, DCS, SOS, PM, APC
+  if (code === 0x5d || code === 0x50 || code === 0x58 || code === 0x5e || code === 0x5f) {
+    return consumeStringControlSequence(input, escIndex + 2);
+  }
+
+  // ESC Fe / ESC Fs / ESC Fp forms.
+  if (code >= 0x20 && code <= 0x2f) {
+    let index = escIndex + 2;
+    while (index < input.length) {
+      const current = input.charCodeAt(index);
+      if (current >= 0x30 && current <= 0x7e) {
+        return index + 1;
+      }
+      index += 1;
+    }
+    return null;
+  }
+
+  return escIndex + 2;
+}
+
+function stripTerminalControlSequences(chunk: string, previousCarry: string): StripControlSequencesResult {
+  const source = `${previousCarry}${chunk}`;
+  if (!source) {
+    return { text: '', carry: '' };
+  }
+
+  let output = '';
+  let index = 0;
+
+  while (index < source.length) {
+    const code = source.charCodeAt(index);
+
+    if (code === 0x1b) {
+      const next = consumeEscapeSequence(source, index);
+      if (next === null) {
+        return { text: output, carry: source.slice(index) };
+      }
+      index = next;
+      continue;
+    }
+
+    // C1 CSI
+    if (code === 0x9b) {
+      const next = consumeCsiSequence(source, index + 1);
+      if (next === null) {
+        return { text: output, carry: source.slice(index) };
+      }
+      index = next;
+      continue;
+    }
+
+    // C1 DCS / SOS / OSC / PM / APC
+    if (code === 0x90 || code === 0x98 || code === 0x9d || code === 0x9e || code === 0x9f) {
+      const next = consumeStringControlSequence(source, index + 1);
+      if (next === null) {
+        return { text: output, carry: source.slice(index) };
+      }
+      index = next;
+      continue;
+    }
+
+    output += source[index];
+    index += 1;
+  }
+
+  return { text: output, carry: '' };
 }
 
 function extractSubmittedInputLines(
   previousBuffer: string,
+  previousControlCarry: string,
   chunk: string
-): { nextBuffer: string; submittedLines: string[] } {
-  const normalized = normalizeTerminalInputChunk(chunk);
+): { nextBuffer: string; nextControlCarry: string; submittedLines: string[] } {
+  const normalizedChunk = normalizeTerminalInputChunk(chunk);
+  const { text: normalized, carry } = stripTerminalControlSequences(normalizedChunk, previousControlCarry);
   if (!normalized) {
-    return { nextBuffer: previousBuffer, submittedLines: [] };
+    return { nextBuffer: previousBuffer, nextControlCarry: carry, submittedLines: [] };
   }
 
   let buffer = previousBuffer;
@@ -127,7 +309,7 @@ function extractSubmittedInputLines(
     }
   }
 
-  return { nextBuffer: buffer, submittedLines };
+  return { nextBuffer: buffer, nextControlCarry: carry, submittedLines };
 }
 
 function normalizeAttachmentPaths(raw: string[]): string[] {
@@ -197,10 +379,17 @@ function buildAttachmentPrompt(paths: string[]): string {
 }
 
 function clampTerminalLog(text: string): string {
-  if (text.length <= TERMINAL_LOG_BUFFER_CHARS) {
-    return text;
+  return clampTerminalLogText(text, TERMINAL_LOG_BUFFER_CHARS);
+}
+
+function shouldIgnoreGlobalTerminalShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
   }
-  return text.slice(text.length - TERMINAL_LOG_BUFFER_CHARS);
+  if (target.classList.contains('thread-rename-input')) {
+    return true;
+  }
+  return target.closest('.thread-rename-input') !== null;
 }
 
 function hasMeaningfulTerminalOutputChunk(chunk: string): boolean {
@@ -209,6 +398,17 @@ function hasMeaningfulTerminalOutputChunk(chunk: string): boolean {
   }
   const visibleText = stripAnsi(chunk).replace(/[\r\n\t\b\f\v]/g, '');
   return visibleText.trim().length > 0;
+}
+
+function normalizeMeaningfulOutputText(chunk: string): string {
+  if (!chunk) {
+    return '';
+  }
+  const visibleText = stripAnsi(chunk)
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return visibleText;
 }
 
 function mergeTerminalLogSnapshot(existing: string, incoming: string): string {
@@ -388,18 +588,22 @@ export default function App() {
   const terminalLogFlushUsesAnimationFrameRef = useRef(false);
   const draftAttachmentsByThreadRef = useRef<Record<string, string[]>>({});
   const inputBufferByThreadRef = useRef<Record<string, string>>({});
+  const inputControlCarryByThreadRef = useRef<Record<string, string>>({});
+  const outputControlCarryByThreadRef = useRef<Record<string, string>>({});
   const threadTitleInitializedRef = useRef<Record<string, true>>({});
   const deletedThreadIdsRef = useRef<Record<string, true>>({});
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
   const pendingSnapshotBySessionRef = useRef<Record<string, PendingSnapshotHydration>>({});
   const terminalSnapshotRefreshTimersBySessionRef = useRef<Record<string, number[]>>({});
+  const liveDataSeenBySessionRef = useRef<Record<string, true>>({});
   const terminalDataSequenceBySessionRef = useRef<Record<string, number>>({});
   const terminalDataListenerReadyRef = useRef(false);
   const terminalDataListenerReadyResolverRef = useRef<(() => void) | null>(null);
   const terminalDataListenerReadyPromiseRef = useRef<Promise<void> | null>(null);
   const latestOutputSequenceByThreadRef = useRef<Record<string, number>>({});
   const seenOutputSequenceByThreadRef = useRef<Record<string, number>>({});
+  const lastMeaningfulOutputByThreadRef = useRef<Record<string, string>>({});
   const outputSequenceCounterRef = useRef(0);
   const terminalDataEventHandlerRef = useRef<(event: TerminalDataEvent) => void>(() => undefined);
   const terminalExitEventHandlerRef = useRef<(event: TerminalExitEvent) => void>(() => undefined);
@@ -491,6 +695,9 @@ export default function App() {
         }
       };
       runStore.bindSession(threadId, sessionId, startedAt);
+      delete lastMeaningfulOutputByThreadRef.current[threadId];
+      delete outputControlCarryByThreadRef.current[threadId];
+      delete liveDataSeenBySessionRef.current[sessionId];
     },
     [runStore]
   );
@@ -715,9 +922,22 @@ export default function App() {
   }, []);
 
   const noteThreadOutput = useCallback((threadId: string, chunk: string) => {
-    if (!hasMeaningfulTerminalOutputChunk(chunk)) {
+    const previousCarry = outputControlCarryByThreadRef.current[threadId] ?? '';
+    const stripped = stripTerminalControlSequences(chunk, previousCarry);
+    outputControlCarryByThreadRef.current[threadId] = stripped.carry;
+    const normalized = normalizeMeaningfulOutputText(stripped.text);
+    if (!normalized) {
       return false;
     }
+
+    // Terminal UIs often repaint identical content using cursor movement; don't
+    // treat duplicate redraw chunks as fresh unread output.
+    const looksLikeRedrawChunk = chunk.includes('\r') || chunk.includes('\u001b') || chunk.includes('\u009b');
+    if (looksLikeRedrawChunk && lastMeaningfulOutputByThreadRef.current[threadId] === normalized) {
+      return false;
+    }
+
+    lastMeaningfulOutputByThreadRef.current[threadId] = normalized;
     outputSequenceCounterRef.current += 1;
     latestOutputSequenceByThreadRef.current[threadId] = outputSequenceCounterRef.current;
     return true;
@@ -791,12 +1011,14 @@ export default function App() {
       cancelScheduledTerminalLogFlush();
       clearAllThreadWorkingStopTimers();
       pendingTerminalChunksByThreadRef.current = {};
+      outputControlCarryByThreadRef.current = {};
       for (const handles of Object.values(terminalSnapshotRefreshTimersBySessionRef.current)) {
         for (const handle of handles) {
           window.clearTimeout(handle);
         }
       }
       terminalSnapshotRefreshTimersBySessionRef.current = {};
+      liveDataSeenBySessionRef.current = {};
     };
   }, [cancelScheduledTerminalLogFlush, clearAllThreadWorkingStopTimers]);
 
@@ -993,6 +1215,9 @@ export default function App() {
             if (selectedThreadIdRef.current !== threadId) {
               return;
             }
+            if (liveDataSeenBySessionRef.current[sessionId]) {
+              return;
+            }
 
             const snapshot = await api.terminalReadOutput(sessionId).catch(() => '');
             if (!snapshot) {
@@ -1034,8 +1259,12 @@ export default function App() {
         threadId,
         bufferedLive: ''
       };
+      const isHydrationPending = () => pendingSnapshotBySessionRef.current[sessionId]?.threadId === threadId;
       let attempts = 0;
       while (attempts < retries) {
+        if (!isHydrationPending()) {
+          return;
+        }
         const liveSessionId = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
         if (!liveSessionId || liveSessionId !== sessionId) {
           delete pendingSnapshotBySessionRef.current[sessionId];
@@ -1043,10 +1272,16 @@ export default function App() {
         }
 
         const snapshot = await api.terminalReadOutput(sessionId).catch(() => '');
+        if (!isHydrationPending()) {
+          return;
+        }
         if (snapshot && snapshot.length > 0) {
           let settledSnapshot = snapshot;
           let stableReads = 0;
           for (let settleAttempt = 0; settleAttempt < 6; settleAttempt += 1) {
+            if (!isHydrationPending()) {
+              return;
+            }
             const stillLiveSessionId = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
             if (!stillLiveSessionId || stillLiveSessionId !== sessionId) {
               break;
@@ -1054,7 +1289,13 @@ export default function App() {
             await new Promise<void>((resolve) => {
               window.setTimeout(() => resolve(), 90);
             });
+            if (!isHydrationPending()) {
+              return;
+            }
             const candidate = await api.terminalReadOutput(sessionId).catch(() => '');
+            if (!isHydrationPending()) {
+              return;
+            }
             if (candidate && candidate.length > 0 && candidate !== settledSnapshot) {
               if (candidate.length >= settledSnapshot.length || candidate.includes(settledSnapshot)) {
                 settledSnapshot = candidate;
@@ -1069,8 +1310,10 @@ export default function App() {
           }
 
           const pendingHydration = pendingSnapshotBySessionRef.current[sessionId];
-          const bufferedLive =
-            pendingHydration?.threadId === threadId ? pendingHydration.bufferedLive : '';
+          if (!pendingHydration || pendingHydration.threadId !== threadId) {
+            return;
+          }
+          const bufferedLive = pendingHydration.bufferedLive;
           const mergedSnapshot = clampTerminalLog(mergeSnapshotAndBufferedLive(settledSnapshot, bufferedLive));
           delete pendingSnapshotBySessionRef.current[sessionId];
           delete pendingTerminalChunksByThreadRef.current[threadId];
@@ -1101,8 +1344,10 @@ export default function App() {
       }
 
       const pendingHydration = pendingSnapshotBySessionRef.current[sessionId];
-      const bufferedLive =
-        pendingHydration?.threadId === threadId ? pendingHydration.bufferedLive : '';
+      if (!pendingHydration || pendingHydration.threadId !== threadId) {
+        return;
+      }
+      const bufferedLive = pendingHydration.bufferedLive;
       delete pendingSnapshotBySessionRef.current[sessionId];
       if (bufferedLive.length > 0) {
         delete pendingTerminalChunksByThreadRef.current[threadId];
@@ -1305,6 +1550,10 @@ export default function App() {
     if (!workspaceId || !threadId) {
       return;
     }
+    const workspace = workspaces.find((item) => item.id === workspaceId);
+    if (!workspace || workspace.kind !== 'rdev') {
+      return;
+    }
 
     if (autoRecoverInFlightRef.current) {
       return;
@@ -1330,9 +1579,10 @@ export default function App() {
         return;
       }
 
+      const hasCachedLog = hasCachedTerminalLog(thread.id);
       const snapshot = await withTimeout(api.terminalReadOutput(sessionId), AUTO_RECOVER_SESSION_TIMEOUT_MS);
       if (typeof snapshot === 'string') {
-        if (snapshot.length > 0) {
+        if (snapshot.length > 0 && !hasCachedLog) {
           delete pendingTerminalChunksByThreadRef.current[thread.id];
           updateTerminalLogMap((current) => {
             const existing = current[thread.id] ?? '';
@@ -1347,13 +1597,12 @@ export default function App() {
           });
         }
         setStartingByThread((current) => removeThreadFlag(current, thread.id));
-        if (snapshot.length > 0 || hasCachedTerminalLog(thread.id)) {
+        if (snapshot.length > 0 || hasCachedLog) {
           setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
         }
-        if (!pendingSnapshotBySessionRef.current[sessionId]) {
+        if (!pendingSnapshotBySessionRef.current[sessionId] && (!hasCachedLog || snapshot.length === 0)) {
           void hydrateSessionSnapshot(thread.id, sessionId, 3, 120);
         }
-        scheduleSessionSnapshotRefreshes(thread.id, sessionId);
       }
       return;
     } catch (error) {
@@ -1365,6 +1614,7 @@ export default function App() {
       delete sessionMetaBySessionIdRef.current[sessionId];
       delete pendingSnapshotBySessionRef.current[sessionId];
       delete terminalDataSequenceBySessionRef.current[sessionId];
+      delete liveDataSeenBySessionRef.current[sessionId];
       clearSessionSnapshotRefreshTimers(sessionId);
       setStartingByThread((current) => removeThreadFlag(current, thread.id));
       setReadyByThread((current) => removeThreadFlag(current, thread.id));
@@ -1388,8 +1638,8 @@ export default function App() {
     hasCachedTerminalLog,
     hydrateSessionSnapshot,
     pushToast,
-    scheduleSessionSnapshotRefreshes,
-    updateTerminalLogMap
+    updateTerminalLogMap,
+    workspaces
   ]);
 
   const pickAttachmentFiles = useCallback(async () => {
@@ -1702,6 +1952,7 @@ export default function App() {
       delete inputBufferByThreadRef.current[threadId];
       delete threadTitleInitializedRef.current[threadId];
       delete pendingTerminalChunksByThreadRef.current[threadId];
+      delete outputControlCarryByThreadRef.current[threadId];
       delete latestOutputSequenceByThreadRef.current[threadId];
       delete seenOutputSequenceByThreadRef.current[threadId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
@@ -2071,6 +2322,10 @@ export default function App() {
   ]);
 
   useEffect(() => {
+    if (!selectedWorkspace || selectedWorkspace.kind !== 'rdev') {
+      return;
+    }
+
     const recover = () => {
       if (document.visibilityState === 'hidden') {
         return;
@@ -2094,7 +2349,7 @@ export default function App() {
       window.removeEventListener('online', recover);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [attemptAutoRecoverSelectedThread]);
+  }, [attemptAutoRecoverSelectedThread, selectedWorkspace]);
 
   const handleTerminalDataEvent = useCallback(
     (event: TerminalDataEvent) => {
@@ -2105,9 +2360,14 @@ export default function App() {
         }
         terminalDataSequenceBySessionRef.current[event.sessionId] = event.sequence;
       }
+      if (!liveDataSeenBySessionRef.current[event.sessionId]) {
+        liveDataSeenBySessionRef.current[event.sessionId] = true;
+        clearSessionSnapshotRefreshTimers(event.sessionId);
+      }
 
       const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
       const threadId =
+        event.threadId ??
         sessionMeta?.threadId ??
         Object.entries(activeRunsByThreadRef.current).find(([, run]) => run.sessionId === event.sessionId)?.[0];
       if (!threadId) {
@@ -2117,13 +2377,18 @@ export default function App() {
       const hasMeaningfulOutput = noteThreadOutput(threadId, event.data);
       const isSelectedThread = selectedThreadIdRef.current === threadId;
       const pendingHydration = pendingSnapshotBySessionRef.current[event.sessionId];
-      const isHydratingSession = pendingHydration?.threadId === threadId;
-      if (isHydratingSession) {
+      if (pendingHydration && pendingHydration.threadId === threadId) {
         pendingHydration.bufferedLive = appendBufferedLive(
           pendingHydration.bufferedLive,
           event.data,
           SNAPSHOT_BUFFER_MAX_CHARS
         );
+        appendTerminalLogChunk(threadId, event.data);
+        if (isSelectedThread) {
+          setStartingByThread((current) => removeThreadFlag(current, threadId));
+          setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
+          clearThreadUnread(threadId);
+        }
         if (workingByThreadRef.current[threadId]) {
           scheduleThreadWorkingStop(threadId);
         } else if (!isSelectedThread && hasMeaningfulOutput) {
@@ -2146,7 +2411,14 @@ export default function App() {
       }
       appendTerminalLogChunk(threadId, event.data);
     },
-    [appendTerminalLogChunk, clearThreadUnread, markThreadUnread, noteThreadOutput, scheduleThreadWorkingStop]
+    [
+      appendTerminalLogChunk,
+      clearSessionSnapshotRefreshTimers,
+      clearThreadUnread,
+      markThreadUnread,
+      noteThreadOutput,
+      scheduleThreadWorkingStop
+    ]
   );
 
   const handleTerminalExitEvent = useCallback(
@@ -2155,6 +2427,7 @@ export default function App() {
       delete sessionMetaBySessionIdRef.current[event.sessionId];
       delete pendingSnapshotBySessionRef.current[event.sessionId];
       delete terminalDataSequenceBySessionRef.current[event.sessionId];
+      delete liveDataSeenBySessionRef.current[event.sessionId];
       clearSessionSnapshotRefreshTimers(event.sessionId);
 
       const endedThreadId = finishSessionBinding(event.sessionId);
@@ -2314,6 +2587,10 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (shouldIgnoreGlobalTerminalShortcutTarget(event.target)) {
+        return;
+      }
+
       const key = event.key.toLowerCase();
 
       if (terminalFocused && event.ctrlKey && !event.metaKey && !event.altKey && key === 'c' && selectedSessionId) {
@@ -2381,6 +2658,49 @@ export default function App() {
     setSettingsOpen(true);
   }, []);
 
+  const waitForRdevShellPrompt = useCallback(async (sessionId: string) => {
+    for (let attempt = 0; attempt < RDEV_SHELL_PROMPT_MAX_POLLS; attempt += 1) {
+      await new Promise<void>((resolve) => {
+        window.setTimeout(() => resolve(), RDEV_SHELL_PROMPT_POLL_INTERVAL_MS);
+      });
+      const snapshot = await api.terminalReadOutput(sessionId).catch(() => '');
+      if (hasShellPromptInSnapshot(snapshot)) {
+        return true;
+      }
+    }
+    return false;
+  }, []);
+
+  const restartRdevClaudeInPlace = useCallback(
+    async (thread: ThreadMetadata) => {
+      const sessionId =
+        activeRunsByThreadRef.current[thread.id]?.sessionId ?? runStore.sessionForThread(thread.id) ?? null;
+      const resumeSessionId = thread.claudeSessionId?.trim() ?? '';
+      if (!sessionId || !isUuidLike(resumeSessionId)) {
+        return false;
+      }
+
+      const command = buildClaudeInPlaceRestartCommand(resumeSessionId, thread.fullAccess);
+
+      await api.terminalSendSignal(sessionId, 'SIGINT').catch(() => undefined);
+      let ready = await waitForRdevShellPrompt(sessionId);
+      if (!ready) {
+        await api.terminalWrite(sessionId, '/exit\r').catch(() => false);
+        await new Promise<void>((resolve) => {
+          window.setTimeout(() => resolve(), CLAUDE_IN_PLACE_RESTART_DELAY_MS);
+        });
+        ready = await waitForRdevShellPrompt(sessionId);
+      }
+      if (!ready) {
+        return false;
+      }
+
+      const wrote = await api.terminalWrite(sessionId, `${command}\r`).catch(() => false);
+      return wrote;
+    },
+    [runStore, waitForRdevShellPrompt]
+  );
+
   const selectThread = useCallback(
     (workspaceId: string, threadId: string) => {
       void switchToThread(workspaceId, threadId);
@@ -2397,6 +2717,19 @@ export default function App() {
     setFullAccessUpdating(true);
     try {
       const updatedThread = await setThreadFullAccess(selectedThread.workspaceId, selectedThread.id, nextValue);
+      const workspace = workspaces.find((item) => item.id === updatedThread.workspaceId);
+      if (workspace?.kind === 'rdev') {
+        const switchedInPlace = await restartRdevClaudeInPlace(updatedThread);
+        if (switchedInPlace) {
+          if (selectedWorkspaceIdRef.current !== updatedThread.workspaceId) {
+            setSelectedWorkspace(updatedThread.workspaceId);
+          }
+          setSelectedThread(updatedThread.id);
+          pushToast(`Full access ${nextValue ? 'enabled' : 'disabled'} in-place.`, 'info');
+          return;
+        }
+        pushToast('Could not switch in-place for rdev; reconnecting session.', 'info');
+      }
       await stopThreadSession(updatedThread.id);
       if (selectedWorkspaceIdRef.current !== updatedThread.workspaceId) {
         setSelectedWorkspace(updatedThread.workspaceId);
@@ -2416,7 +2749,9 @@ export default function App() {
     setSelectedThread,
     setSelectedWorkspace,
     setThreadFullAccess,
-    stopThreadSession
+    stopThreadSession,
+    workspaces,
+    restartRdevClaudeInPlace
   ]);
 
   const openWorkspaceInFinder = useCallback(
@@ -2483,6 +2818,7 @@ export default function App() {
       window.localStorage.removeItem(threadSelectionKey(workspace.id));
       for (const threadId of threadIds) {
         delete pendingTerminalChunksByThreadRef.current[threadId];
+        delete outputControlCarryByThreadRef.current[threadId];
         delete latestOutputSequenceByThreadRef.current[threadId];
         delete seenOutputSequenceByThreadRef.current[threadId];
       }
@@ -2589,7 +2925,9 @@ export default function App() {
         onRemoveWorkspace={onRemoveWorkspace}
         threadLastUserInputAt={threadLastUserInputAt}
         isThreadWorking={runStore.isThreadWorking}
-        hasUnreadThreadOutput={(threadId) => Boolean(unreadOutputByThread[threadId])}
+        hasUnreadThreadOutput={(threadId) =>
+          Boolean(unreadOutputByThread[threadId]) && hasUnseenThreadOutput(threadId)
+        }
         getSearchTextForThread={getSearchTextForThread}
       />
       <div
@@ -2642,11 +2980,14 @@ export default function App() {
                   return;
                 }
 
-                const { nextBuffer, submittedLines } = extractSubmittedInputLines(
+                const parsed = extractSubmittedInputLines(
                   inputBufferByThreadRef.current[selectedThread.id] ?? '',
+                  inputControlCarryByThreadRef.current[selectedThread.id] ?? '',
                   data
                 );
-                inputBufferByThreadRef.current[selectedThread.id] = nextBuffer;
+                inputBufferByThreadRef.current[selectedThread.id] = parsed.nextBuffer;
+                inputControlCarryByThreadRef.current[selectedThread.id] = parsed.nextControlCarry;
+                const submittedLines = parsed.submittedLines;
 
                 if (
                   submittedLines.length > 0 &&

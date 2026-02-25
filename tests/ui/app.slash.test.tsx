@@ -196,6 +196,15 @@ vi.mock('../../src/components/TerminalPanel', () => ({
       </button>
       <button
         type="button"
+        onClick={() => {
+          props.onData?.('\u001b[');
+          props.onData?.('31m   Escaped title line\r');
+        }}
+      >
+        send-split-escape-prompt
+      </button>
+      <button
+        type="button"
         onClick={() =>
           props.onData?.(
             '   This title is intentionally very long and should be trimmed to fifty characters max\r'
@@ -244,14 +253,15 @@ describe('Sidebar behavior', () => {
     expect(screen.queryByTestId('header-output-age')).not.toBeInTheDocument();
   });
 
-  it('keeps buffered prompt output visible during pending snapshot hydration without typing', async () => {
-    let resolveSnapshot: ((value: string) => void) | null = null;
-    mocks.api.terminalReadOutput.mockImplementationOnce(
-      () =>
-        new Promise<string>((resolve) => {
-          resolveSnapshot = resolve;
-        })
-    );
+  it('keeps snapshot backlog and buffered prompt output during pending hydration without typing', async () => {
+    let releaseSnapshotReads: (() => void) | null = null;
+    const snapshotReady = new Promise<void>((resolve) => {
+      releaseSnapshotReads = resolve;
+    });
+    mocks.api.terminalReadOutput.mockImplementation(async () => {
+      await snapshotReady;
+      return 'Claude Code banner\n';
+    });
 
     render(<App />);
 
@@ -265,11 +275,12 @@ describe('Sidebar behavior', () => {
     });
 
     act(() => {
-      resolveSnapshot?.('Claude Code banner\n');
+      releaseSnapshotReads?.();
     });
 
     await waitFor(() => {
       const rendered = screen.getByTestId('terminal-content-mock').textContent ?? '';
+      expect(rendered).toContain('Claude Code banner');
       expect(rendered).toContain('Try "create a test"');
     });
   });
@@ -387,6 +398,25 @@ describe('Sidebar behavior', () => {
     });
   });
 
+  it('handles split terminal control sequences when deriving the first thread title', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /First thread/i });
+    fireEvent.click(screen.getByTestId('workspace-new-thread-ws-1'));
+
+    await waitFor(() => {
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code');
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-2' }));
+    });
+
+    await user.click(screen.getByRole('button', { name: 'send-split-escape-prompt' }));
+
+    await waitFor(() => {
+      expect(mocks.api.renameThread).toHaveBeenCalledWith('ws-1', 'thread-2', 'Escaped title line');
+    });
+  });
+
   it('does not rerender the sidebar on terminal keystrokes', async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -395,6 +425,9 @@ describe('Sidebar behavior', () => {
 
     act(() => {
       mocks.emitTerminalData({ sessionId: 'session-thread-1', data: 'ready\n' });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('terminal-content-mock').textContent ?? '').toContain('ready');
     });
 
     const sidebar = await screen.findByTestId('sidebar');

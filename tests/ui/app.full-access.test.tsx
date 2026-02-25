@@ -3,14 +3,16 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => {
-  const workspace = {
+  const baseWorkspace = {
     id: 'ws-1',
     name: 'Workspace',
     path: '/tmp/workspace',
+    kind: 'local' as const,
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
+  let workspace = { ...baseWorkspace };
 
   const baseThread = {
     id: 'thread-1',
@@ -24,7 +26,8 @@ const mocks = vi.hoisted(() => {
     isArchived: false,
     lastRunStatus: 'Idle' as const,
     lastRunStartedAt: null,
-    lastRunEndedAt: null
+    lastRunEndedAt: null,
+    claudeSessionId: '123e4567-e89b-12d3-a456-426614174000'
   };
 
   let threadState = [{ ...baseThread }];
@@ -155,6 +158,7 @@ const mocks = vi.hoisted(() => {
   };
 
   const reset = () => {
+    workspace = { ...baseWorkspace };
     threadState = [{ ...baseThread }];
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
@@ -166,6 +170,9 @@ const mocks = vi.hoisted(() => {
   return {
     api,
     reset,
+    setWorkspaceKind: (kind: 'local' | 'rdev') => {
+      workspace = { ...workspace, kind };
+    },
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
     onRunStream: vi.fn(async () => () => undefined),
@@ -248,6 +255,34 @@ describe('Terminal launch flags', () => {
       );
     });
     expect(mocks.api.terminalKill).toHaveBeenCalledWith('session-1');
+    expect(screen.getByTestId('full-access-toggle')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('toggles full access in-place for rdev without reconnecting', async () => {
+    mocks.setWorkspaceKind('rdev');
+    mocks.api.terminalReadOutput.mockResolvedValue('[rfu@bloody-faraday li-productivity-agents]$ ');
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByTestId('full-access-toggle'));
+
+    await waitFor(() => {
+      expect(mocks.api.setThreadFullAccess).toHaveBeenCalledWith('ws-1', 'thread-1', false);
+      expect(mocks.api.terminalSendSignal).toHaveBeenCalledWith('session-1', 'SIGINT');
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith(
+        'session-1',
+        "exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 NO_COLOR= claude --resume '123e4567-e89b-12d3-a456-426614174000'\r"
+      );
+    });
+
+    expect(mocks.api.terminalKill).not.toHaveBeenCalled();
+    expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId('full-access-toggle')).toHaveAttribute('aria-pressed', 'false');
   });
 });

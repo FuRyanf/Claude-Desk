@@ -200,6 +200,13 @@ const ThreadRow = React.memo(function ThreadRow({
   onOpenThreadContextMenu,
   onDeleteThread
 }: ThreadRowProps) {
+  const skipBlurCommitRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!isEditing) {
+      skipBlurCommitRef.current = false;
+    }
+  }, [isEditing]);
+
   return (
     <li
       key={thread.id}
@@ -229,16 +236,25 @@ const ThreadRow = React.memo(function ThreadRow({
                 onChange={(event) => onEditingValueChange(event.target.value)}
                 onClick={(event) => event.stopPropagation()}
                 onKeyDown={async (event) => {
+                  event.stopPropagation();
                   if (event.key === 'Escape') {
                     event.preventDefault();
+                    skipBlurCommitRef.current = true;
                     onCancelRename();
+                    return;
                   }
                   if (event.key === 'Enter') {
                     event.preventDefault();
+                    skipBlurCommitRef.current = true;
                     await onCommitRename(thread);
+                    return;
                   }
                 }}
                 onBlur={async () => {
+                  if (skipBlurCommitRef.current) {
+                    skipBlurCommitRef.current = false;
+                    return;
+                  }
                   await onCommitRename(thread);
                 }}
               />

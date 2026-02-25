@@ -111,6 +111,7 @@ export interface TerminalStartResponse {
 
 export interface TerminalDataEvent {
   sessionId: string;
+  threadId?: string;
   data: string;
   sequence?: number;
 }

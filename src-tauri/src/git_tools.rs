@@ -117,7 +117,9 @@ fn has_repository_operation_in_progress(workspace_path: &str) -> Result<bool> {
     };
 
     let markers = ["MERGE_HEAD", "REBASE_HEAD", "rebase-merge", "rebase-apply"];
-    Ok(markers.iter().any(|marker| fs::metadata(git_dir.join(marker)).is_ok()))
+    Ok(markers
+        .iter()
+        .any(|marker| fs::metadata(git_dir.join(marker)).is_ok()))
 }
 
 fn has_tracked_workspace_changes(workspace_path: &str) -> Result<bool> {
@@ -129,7 +131,12 @@ fn has_tracked_workspace_changes(workspace_path: &str) -> Result<bool> {
 fn has_upstream(workspace_path: &str) -> Result<bool> {
     let upstream = run_git(
         workspace_path,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
     )?;
     Ok(!upstream.trim().is_empty())
 }
@@ -304,7 +311,12 @@ pub fn auto_pull_on_master(workspace_path: &str) -> Result<bool> {
 
     let upstream = run_git(
         workspace_path,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
     )?;
     if upstream.trim().is_empty() {
         return Ok(false);
@@ -456,9 +468,11 @@ mod tests {
         git(&temp_repo, &["add", "README.md"]);
         git(&temp_repo, &["commit", "-m", "initial"]);
 
-        fs::write(temp_repo.join("UNTRACKED.md"), "scratch\n").expect("failed to write untracked file");
-        let only_untracked_dirty = has_tracked_workspace_changes(temp_repo.to_string_lossy().as_ref())
-            .expect("tracked change check should succeed");
+        fs::write(temp_repo.join("UNTRACKED.md"), "scratch\n")
+            .expect("failed to write untracked file");
+        let only_untracked_dirty =
+            has_tracked_workspace_changes(temp_repo.to_string_lossy().as_ref())
+                .expect("tracked change check should succeed");
         assert!(!only_untracked_dirty);
 
         fs::write(temp_repo.join("README.md"), "changed\n").expect("failed to modify tracked file");

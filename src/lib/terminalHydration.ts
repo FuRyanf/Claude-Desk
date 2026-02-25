@@ -65,7 +65,7 @@ export function mergeSnapshotAndBufferedLive(snapshot: string, bufferedLive: str
   }
   const overlap = findSuffixPrefixOverlap(snapshot, bufferedLive);
   if (overlap === 0) {
-    return bufferedLive;
+    return `${snapshot}${bufferedLive}`;
   }
   return `${snapshot}${bufferedLive.slice(overlap)}`;
 }

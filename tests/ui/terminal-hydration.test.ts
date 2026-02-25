@@ -19,8 +19,8 @@ describe('terminal hydration merge', () => {
     expect(mergeSnapshotAndBufferedLive('abcdef', 'defghi')).toBe('abcdefghi');
   });
 
-  it('prefers buffered output when there is no overlap', () => {
-    expect(mergeSnapshotAndBufferedLive('abc', 'xyz')).toBe('xyz');
+  it('preserves snapshot backlog when there is no overlap', () => {
+    expect(mergeSnapshotAndBufferedLive('abc', 'xyz')).toBe('abcxyz');
   });
 
   it('handles repeated pattern overlaps deterministically', () => {

@@ -9,7 +9,7 @@ import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
 const INPUT_FLUSH_MS = 8;
 const INPUT_CHUNK_SIZE = 4 * 1024;
 const OUTPUT_BATCH_BYTES = 48 * 1024;
-const STICKY_SCROLL_TOLERANCE = 2;
+const STICKY_SCROLL_TOLERANCE = 0;
 
 interface TerminalPanelProps {
   sessionId?: string | null;
@@ -263,7 +263,7 @@ export function TerminalPanel({
           viewportY >= Math.max(0, bottom - STICKY_SCROLL_TOLERANCE);
       });
       const onWheel = (event: WheelEvent) => {
-        if (event.deltaY < 0) {
+        if (event.deltaY !== 0) {
           shouldStickToBottomRef.current = false;
         }
       };

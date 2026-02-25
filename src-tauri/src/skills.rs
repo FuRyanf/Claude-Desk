@@ -85,11 +85,11 @@ fn parse_skill_markdown(raw: &str) -> (String, String, Vec<String>) {
         description = paragraph_lines.join(" ");
     }
 
-    if let Some((start_idx, _)) = lines
-        .iter()
-        .enumerate()
-        .find(|(_, line)| line.trim_start().to_lowercase().starts_with("## entry points"))
-    {
+    if let Some((start_idx, _)) = lines.iter().enumerate().find(|(_, line)| {
+        line.trim_start()
+            .to_lowercase()
+            .starts_with("## entry points")
+    }) {
         for line in lines.iter().skip(start_idx + 1) {
             let trimmed = line.trim();
             if trimmed.starts_with("## ") {
@@ -104,7 +104,10 @@ fn parse_skill_markdown(raw: &str) -> (String, String, Vec<String>) {
     (name, description, entry_points)
 }
 
-pub fn resolve_enabled_skills_context(workspace_path: &str, enabled_ids: &[String]) -> Result<Vec<(String, String)>> {
+pub fn resolve_enabled_skills_context(
+    workspace_path: &str,
+    enabled_ids: &[String],
+) -> Result<Vec<(String, String)>> {
     let skills_dir = Path::new(workspace_path).join("skills");
     if !skills_dir.exists() {
         return Ok(Vec::new());
@@ -130,7 +133,8 @@ mod tests {
 
     #[test]
     fn discovers_skill_markdown_from_workspace_fixture() {
-        let workspace = std::env::temp_dir().join(format!("claude-desk-skills-test-{}", uuid::Uuid::new_v4()));
+        let workspace =
+            std::env::temp_dir().join(format!("claude-desk-skills-test-{}", uuid::Uuid::new_v4()));
         let skill_dir = workspace.join("skills").join("refactor");
         fs::create_dir_all(&skill_dir).expect("failed to create fixture skill directory");
         fs::write(
@@ -139,11 +143,15 @@ mod tests {
         )
         .expect("failed to write fixture SKILL.md");
 
-        let discovered = list_skills(workspace.to_string_lossy().as_ref()).expect("skill listing should succeed");
+        let discovered = list_skills(workspace.to_string_lossy().as_ref())
+            .expect("skill listing should succeed");
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].id, "refactor");
         assert_eq!(discovered[0].name, "Refactor Skill");
-        assert!(discovered[0].entry_points.iter().any(|entry| entry.contains("/skill refactor")));
+        assert!(discovered[0]
+            .entry_points
+            .iter()
+            .any(|entry| entry.contains("/skill refactor")));
 
         let _ = fs::remove_dir_all(workspace);
     }

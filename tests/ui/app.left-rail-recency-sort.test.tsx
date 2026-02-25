@@ -450,6 +450,75 @@ describe('Left rail recency and sorting semantics', () => {
     expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
   });
 
+  it('does not mark unread from split OSC title chunks', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Newer thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+    });
+
+    await user.click(screen.getByRole('button', { name: /Older thread/i }));
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
+    });
+
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: '\u001b]10;rgb:d8d8/e0e0/efef' });
+    });
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: '\u0007' });
+    });
+
+    await new Promise<void>((resolve) => {
+      window.setTimeout(() => resolve(), 50);
+    });
+
+    expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+  });
+
+  it('does not re-mark unread from duplicate redraw chunks after unread is cleared', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Newer thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+    });
+
+    await user.click(screen.getByRole('button', { name: 'submit-input' }));
+    await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+    });
+
+    await waitFor(
+      () => {
+        expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      },
+      { timeout: 2500 }
+    );
+
+    await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+    await waitFor(() => {
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: '\u001b[1G\u001b[Kassistant output\r' });
+    });
+    await new Promise<void>((resolve) => {
+      window.setTimeout(() => resolve(), 80);
+    });
+
+    expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+  });
+
   it('keeps a single terminal data subscription while run state changes', async () => {
     const user = userEvent.setup();
     render(<App />);

@@ -32,6 +32,7 @@ const TERMINAL_EXIT_EVENT: &str = "terminal:exit";
 const THREAD_UPDATED_EVENT: &str = "thread:updated";
 const SESSION_ID_PARSE_BUFFER_MAX: usize = 24 * 1024;
 const POST_CONNECT_PROMPT_BUFFER_MAX: usize = 16 * 1024;
+const POST_CONNECT_COMMAND_AFTER_SSH_START_TIMEOUT: Duration = Duration::from_secs(6);
 const TERMINAL_LOG_SNAPSHOT_MAX_BYTES: u64 = 512 * 1024;
 const TERMINAL_ENV_DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(8);
 const COMMIT_MESSAGE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -130,7 +131,16 @@ fn build_claude_shell_command(
     resume_existing_session: bool,
     full_access_flag: bool,
 ) -> String {
-    let mut parts = vec![shell_escape_arg(cli_path)];
+    let mut parts = vec![
+        "env".to_string(),
+        "TERM=xterm-256color".to_string(),
+        "COLORTERM=truecolor".to_string(),
+        "CLICOLOR=1".to_string(),
+        "CLICOLOR_FORCE=1".to_string(),
+        "FORCE_COLOR=1".to_string(),
+        "NO_COLOR=".to_string(),
+        shell_escape_arg(cli_path),
+    ];
     if resume_existing_session {
         parts.push("--resume".to_string());
     } else {
@@ -156,18 +166,43 @@ fn build_terminal_shell_command(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow!("Missing rdev ssh command for remote workspace"))?;
+    let remote_command = ensure_rdev_non_tmux(remote_command);
+    let exec_claude_command = format!("exec {claude_shell_command}");
 
     if remote_command.contains("{CLAUDE_CMD}") {
         return Ok((
-            remote_command.replace("{CLAUDE_CMD}", claude_shell_command),
+            remote_command.replace("{CLAUDE_CMD}", &exec_claude_command),
             None,
         ));
     }
 
-    Ok((
-        remote_command.to_string(),
-        Some(claude_shell_command.to_string()),
-    ))
+    Ok((remote_command, Some(exec_claude_command)))
+}
+
+fn resolve_claude_command_for_workspace(
+    workspace_kind: WorkspaceKind,
+    settings: &Settings,
+) -> Result<String> {
+    if workspace_kind == WorkspaceKind::Rdev {
+        return Ok("claude".to_string());
+    }
+
+    detect_claude_cli_path(settings)
+        .ok_or_else(|| anyhow!("Claude CLI not found. Configure the CLI path in Settings."))
+}
+
+fn ensure_rdev_non_tmux(remote_command: &str) -> String {
+    let trimmed = remote_command.trim();
+    let has_explicit_tmux_mode = trimmed
+        .split_whitespace()
+        .any(|token| matches!(token, "--tmux" | "--non-tmux" | "-d"));
+    if has_explicit_tmux_mode {
+        trimmed.to_string()
+    } else if trimmed.contains("{CLAUDE_CMD}") {
+        trimmed.replacen("{CLAUDE_CMD}", "--non-tmux {CLAUDE_CMD}", 1)
+    } else {
+        format!("{trimmed} --non-tmux")
+    }
 }
 
 fn trim_prompt_probe_buffer(buffer: &mut String) {
@@ -179,23 +214,23 @@ fn trim_prompt_probe_buffer(buffer: &mut String) {
 }
 
 fn looks_like_shell_prompt(buffer: &str) -> bool {
-    for line in buffer
-        .replace('\r', "\n")
-        .lines()
-        .rev()
-        .take(4)
-    {
+    for line in buffer.replace('\r', "\n").lines().rev().take(8) {
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
             continue;
         }
+
         let lower = trimmed.to_ascii_lowercase();
         if lower.contains("for shortcuts")
             || lower.contains("bypass permissions")
             || lower.contains("claude code")
+            || lower.contains("starting ssh connection")
+            || lower.contains("uploading gh auth token")
+            || lower.contains("now ready to use")
         {
             continue;
         }
+
         if trimmed.ends_with('$')
             || trimmed.ends_with('#')
             || trimmed.ends_with('%')
@@ -205,6 +240,16 @@ fn looks_like_shell_prompt(buffer: &str) -> bool {
         }
     }
     false
+}
+
+fn should_dispatch_post_connect_command(
+    prompt_probe: &str,
+    saw_ssh_connection_start: bool,
+    elapsed_since_connect_start: Duration,
+) -> bool {
+    looks_like_shell_prompt(prompt_probe)
+        || (saw_ssh_connection_start
+            && elapsed_since_connect_start >= POST_CONNECT_COMMAND_AFTER_SSH_START_TIMEOUT)
 }
 
 fn is_uuid_like(value: &str) -> bool {
@@ -249,6 +294,29 @@ fn strip_ansi_sequences(input: &str) -> String {
                 if ('@'..='~').contains(&ctrl) {
                     break;
                 }
+            }
+        } else if next == ']' {
+            // OSC: ESC ] ... BEL or ESC ] ... ESC \
+            let _ = chars.next();
+            let mut saw_escape = false;
+            while let Some(ctrl) = chars.next() {
+                if ctrl == '\u{7}' {
+                    break;
+                }
+                if saw_escape && ctrl == '\\' {
+                    break;
+                }
+                saw_escape = ctrl == '\u{1b}';
+            }
+        } else if matches!(next, 'P' | '_' | '^') {
+            // DCS/APC/PM: ESC P ... ESC \ (and variants).
+            let _ = chars.next();
+            let mut saw_escape = false;
+            while let Some(ctrl) = chars.next() {
+                if saw_escape && ctrl == '\\' {
+                    break;
+                }
+                saw_escape = ctrl == '\u{1b}';
             }
         } else {
             let _ = chars.next();
@@ -739,8 +807,9 @@ pub async fn terminal_start_session(
     full_access_flag: bool,
     thread_id: String,
 ) -> Result<TerminalStartResponse> {
-    let workspace = storage::resolve_workspace_by_path(&workspace_path)?
-        .ok_or_else(|| anyhow!("Workspace not registered. Add workspace before starting terminal."))?;
+    let workspace = storage::resolve_workspace_by_path(&workspace_path)?.ok_or_else(|| {
+        anyhow!("Workspace not registered. Add workspace before starting terminal.")
+    })?;
     let workspace_id = workspace.id.clone();
     let stale_sessions = state
         .terminal_sessions
@@ -803,8 +872,7 @@ pub async fn terminal_start_session(
     storage::write_thread_metadata(&thread)?;
 
     let settings = storage::load_settings()?;
-    let cli_path = detect_claude_cli_path(&settings)
-        .ok_or_else(|| anyhow!("Claude CLI not found. Configure the CLI path in Settings."))?;
+    let claude_command = resolve_claude_command_for_workspace(workspace.kind, &settings)?;
 
     let cwd = if workspace.kind == WorkspaceKind::Rdev {
         dirs::home_dir()
@@ -820,7 +888,7 @@ pub async fn terminal_start_session(
 
     let shell_path = resolve_login_shell();
     let claude_shell_command = build_claude_shell_command(
-        &cli_path,
+        &claude_command,
         &launch_session_id,
         session_mode == TerminalSessionMode::Resumed,
         full_access_flag,
@@ -931,13 +999,15 @@ pub async fn terminal_start_session(
     let data_output_log = output_log.clone();
     let data_app = app.clone();
     let post_connect_writer = session.writer.clone();
+    let post_connect_started_at = Instant::now();
     let mut pending_post_connect_command = post_connect_command;
+    let mut post_connect_prompt_probe = String::new();
+    let mut saw_ssh_connection_start = false;
     let mut should_capture_session_id = false;
     std::thread::spawn(move || {
         let mut buffer = [0u8; 4096];
         let mut utf8_carry = Vec::<u8>::new();
         let mut session_id_parse_buffer = String::new();
-        let mut post_connect_prompt_probe = String::new();
         let mut chunk_sequence: u64 = 0;
         loop {
             let read = match reader.read(&mut buffer) {
@@ -951,18 +1021,36 @@ pub async fn terminal_start_session(
             }
 
             if let Some(chunk) = decode_utf8_chunk(&buffer[..read], &mut utf8_carry) {
-                if let Some(command) = pending_post_connect_command.as_ref() {
-                    post_connect_prompt_probe.push_str(&strip_ansi_sequences(&chunk));
-                    trim_prompt_probe_buffer(&mut post_connect_prompt_probe);
-                    if looks_like_shell_prompt(&post_connect_prompt_probe) {
-                        if let Ok(mut writer) = post_connect_writer.lock() {
-                            let _ = writer.write_all(format!("{command}\r").as_bytes());
-                            let _ = writer.flush();
+                if pending_post_connect_command.is_some() {
+                    let clean_chunk = strip_ansi_sequences(&chunk);
+                    if !clean_chunk.is_empty() {
+                        let lower = clean_chunk.to_ascii_lowercase();
+                        if lower.contains("starting ssh connection")
+                            || lower.contains("connected to")
+                            || lower.contains("now ready to use")
+                        {
+                            saw_ssh_connection_start = true;
                         }
-                        pending_post_connect_command = None;
+                        post_connect_prompt_probe.push_str(&clean_chunk);
+                        trim_prompt_probe_buffer(&mut post_connect_prompt_probe);
+                    }
+
+                    let should_send_post_connect = should_dispatch_post_connect_command(
+                        &post_connect_prompt_probe,
+                        saw_ssh_connection_start,
+                        post_connect_started_at.elapsed(),
+                    );
+                    if should_send_post_connect {
+                        if let Some(command) = pending_post_connect_command.take() {
+                            if let Ok(mut writer) = post_connect_writer.lock() {
+                                let _ = writer.write_all(format!("{command}\r").as_bytes());
+                                let _ = writer.flush();
+                            }
+                        }
                         post_connect_prompt_probe.clear();
                     }
                 }
+
                 if should_capture_session_id {
                     if let Some(captured_session_id) =
                         extract_resume_session_id_from_chunk(&mut session_id_parse_buffer, &chunk)
@@ -984,6 +1072,7 @@ pub async fn terminal_start_session(
                     TERMINAL_DATA_EVENT,
                     TerminalDataEvent {
                         session_id: data_session_id.clone(),
+                        thread_id: data_thread_id.clone(),
                         data: chunk,
                         sequence: chunk_sequence,
                     },
@@ -993,17 +1082,6 @@ pub async fn terminal_start_session(
 
         if !utf8_carry.is_empty() {
             let trailing = String::from_utf8_lossy(&utf8_carry).to_string();
-            if let Some(command) = pending_post_connect_command.as_ref() {
-                post_connect_prompt_probe.push_str(&strip_ansi_sequences(&trailing));
-                trim_prompt_probe_buffer(&mut post_connect_prompt_probe);
-                if looks_like_shell_prompt(&post_connect_prompt_probe) {
-                    if let Ok(mut writer) = post_connect_writer.lock() {
-                        let _ = writer.write_all(format!("{command}\r").as_bytes());
-                        let _ = writer.flush();
-                    }
-                    post_connect_prompt_probe.clear();
-                }
-            }
             if should_capture_session_id {
                 if let Some(captured_session_id) =
                     extract_resume_session_id_from_chunk(&mut session_id_parse_buffer, &trailing)
@@ -1024,6 +1102,7 @@ pub async fn terminal_start_session(
                 TERMINAL_DATA_EVENT,
                 TerminalDataEvent {
                     session_id: data_session_id.clone(),
+                    thread_id: data_thread_id.clone(),
                     data: trailing,
                     sequence: chunk_sequence,
                 },
@@ -1644,5 +1723,154 @@ mod tests {
         assert!(sanitized.contains("API_TOKEN=<redacted>"));
         assert!(sanitized.contains("SESSION_ID=<redacted>"));
         assert!(sanitized.contains("---\nwhich claude\nAPI_TOKEN=after-separator"));
+    }
+
+    #[test]
+    fn resolve_claude_command_for_rdev_uses_remote_binary() {
+        let settings = Settings::default();
+        let command =
+            resolve_claude_command_for_workspace(WorkspaceKind::Rdev, &settings).expect("rdev command should resolve");
+        assert_eq!(command, "claude");
+    }
+
+    #[test]
+    fn resolve_claude_command_for_local_uses_detected_path() {
+        let tmp_dir =
+            std::env::temp_dir().join(format!("claude-desk-cli-detect-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&tmp_dir).expect("should create temp directory");
+        let cli_path = tmp_dir.join("claude");
+        fs::write(&cli_path, "#!/bin/sh\nexit 0\n").expect("should create fake cli");
+
+        let settings = Settings {
+            claude_cli_path: Some(cli_path.to_string_lossy().to_string()),
+        };
+        let command =
+            resolve_claude_command_for_workspace(WorkspaceKind::Local, &settings).expect("local command should resolve");
+        assert_eq!(command, cli_path.to_string_lossy());
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn build_terminal_shell_command_defaults_rdev_to_non_tmux_post_connect_handoff() {
+        let claude_command = build_claude_shell_command(
+            "/usr/local/bin/claude",
+            "123e4567-e89b-12d3-a456-426614174000",
+            false,
+            false,
+        );
+        let (shell_command, post_connect_command) = build_terminal_shell_command(
+            WorkspaceKind::Rdev,
+            Some("rdev ssh comms-ai-open-connect/offbeat-apple"),
+            &claude_command,
+        )
+        .expect("rdev command should build");
+
+        assert_eq!(
+            shell_command,
+            "rdev ssh comms-ai-open-connect/offbeat-apple --non-tmux"
+        );
+        assert_eq!(
+            post_connect_command,
+            Some(
+                "exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 NO_COLOR= '/usr/local/bin/claude' --session-id '123e4567-e89b-12d3-a456-426614174000'"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn build_terminal_shell_command_preserves_explicit_tmux_mode() {
+        let claude_command = build_claude_shell_command(
+            "/usr/local/bin/claude",
+            "123e4567-e89b-12d3-a456-426614174000",
+            true,
+            true,
+        );
+        let (shell_command, post_connect_command) = build_terminal_shell_command(
+            WorkspaceKind::Rdev,
+            Some("rdev ssh comms-ai-open-connect/offbeat-apple --tmux"),
+            &claude_command,
+        )
+        .expect("rdev command should build");
+
+        assert_eq!(
+            shell_command,
+            "rdev ssh comms-ai-open-connect/offbeat-apple --tmux"
+        );
+        assert_eq!(
+            post_connect_command,
+            Some(
+                "exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 NO_COLOR= '/usr/local/bin/claude' --resume '123e4567-e89b-12d3-a456-426614174000' --dangerously-skip-permissions".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn build_terminal_shell_command_supports_placeholder_substitution() {
+        let claude_command = build_claude_shell_command(
+            "/usr/local/bin/claude",
+            "123e4567-e89b-12d3-a456-426614174000",
+            false,
+            false,
+        );
+        let (shell_command, post_connect_command) = build_terminal_shell_command(
+            WorkspaceKind::Rdev,
+            Some("rdev ssh comms-ai-open-connect/offbeat-apple {CLAUDE_CMD}"),
+            &claude_command,
+        )
+        .expect("placeholder command should build");
+
+        assert_eq!(
+            shell_command,
+            "rdev ssh comms-ai-open-connect/offbeat-apple --non-tmux exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 NO_COLOR= '/usr/local/bin/claude' --session-id '123e4567-e89b-12d3-a456-426614174000'"
+        );
+        assert_eq!(post_connect_command, None);
+    }
+
+    #[test]
+    fn strip_ansi_sequences_removes_osc_payloads() {
+        let stripped =
+            strip_ansi_sequences("\u{1b}]10;rgb:d8d8/e0e0/efef\u{7}\n[rfu@host workspace]$ ");
+        assert_eq!(stripped, "\n[rfu@host workspace]$ ");
+    }
+
+    #[test]
+    fn looks_like_shell_prompt_detects_remote_prompt() {
+        assert!(looks_like_shell_prompt("[rfu@bloody-faraday workspace]$ "));
+    }
+
+    #[test]
+    fn looks_like_shell_prompt_ignores_rdev_bootstrap_lines() {
+        assert!(!looks_like_shell_prompt(
+            "Uploading gh auth token to the rdev\nStarting ssh connection to li-productivity-agents/bloody-faraday\n"
+        ));
+    }
+
+    #[test]
+    fn should_dispatch_post_connect_command_on_prompt_even_without_timeout() {
+        assert!(should_dispatch_post_connect_command(
+            "[rfu@bloody-faraday li-productivity-agents]$ ",
+            false,
+            Duration::from_secs(1),
+        ));
+    }
+
+    #[test]
+    fn should_not_dispatch_post_connect_command_before_timeout_without_prompt() {
+        assert!(!should_dispatch_post_connect_command(
+            "Starting ssh connection to li-productivity-agents/bloody-faraday\n",
+            true,
+            Duration::from_secs(1),
+        ));
+    }
+
+    #[test]
+    fn should_dispatch_post_connect_command_after_timeout_when_ssh_started() {
+        assert!(should_dispatch_post_connect_command(
+            "Starting ssh connection to li-productivity-agents/bloody-faraday\n",
+            true,
+            POST_CONNECT_COMMAND_AFTER_SSH_START_TIMEOUT + Duration::from_secs(1),
+        ));
     }
 }

@@ -195,6 +195,7 @@ pub struct TerminalStartResponse {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalDataEvent {
     pub session_id: String,
+    pub thread_id: String,
     pub data: String,
     pub sequence: u64,
 }
