@@ -355,12 +355,13 @@ fn check_for_update() -> Result<AppUpdateInfo, String> {
 }
 
 #[tauri::command]
-async fn install_latest_update() -> Result<bool, String> {
+async fn install_latest_update(app: tauri::AppHandle) -> Result<bool, String> {
     tokio::task::spawn_blocking(runner::install_latest_update)
         .await
         .map_err(|error| error.to_string())?
-        .map(|_| true)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    app.request_restart();
+    Ok(true)
 }
 
 #[tauri::command]

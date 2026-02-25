@@ -22,6 +22,15 @@ import { ToastRegion, type ToastItem } from './components/ToastRegion';
 import { api, onTerminalData, onTerminalExit, onThreadUpdated } from './lib/api';
 import { clampTerminalLog as clampTerminalLogText } from './lib/terminalLogClamp';
 import {
+  createRunLifecycleState,
+  isStreamingStuck,
+  markRunExited,
+  markRunReady,
+  markRunStreaming,
+  noteRunOutput,
+  type TerminalRunLifecycleState
+} from './lib/terminalRunLifecycle';
+import {
   appendBufferedLive,
   findSuffixPrefixOverlap,
   mergeSnapshotAndBufferedLive,
@@ -59,6 +68,7 @@ const RDEV_SHELL_PROMPT_MAX_POLLS = 12;
 const AUTO_RECOVER_SESSION_TIMEOUT_MS = 900;
 const AUTO_RECOVER_RETRY_COOLDOWN_MS = 1200;
 const THREAD_WORKING_IDLE_TIMEOUT_MS = 1200;
+const THREAD_WORKING_STUCK_TIMEOUT_MS = 15_000;
 const MAX_ATTACHMENT_DRAFTS = 24;
 const MAX_ATTACHMENTS_PER_MESSAGE = 12;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
@@ -642,6 +652,7 @@ export default function App() {
   const latestOutputSequenceByThreadRef = useRef<Record<string, number>>({});
   const seenOutputSequenceByThreadRef = useRef<Record<string, number>>({});
   const lastMeaningfulOutputByThreadRef = useRef<Record<string, string>>({});
+  const runLifecycleByThreadRef = useRef<Record<string, TerminalRunLifecycleState>>({});
   const outputSequenceCounterRef = useRef(0);
   const terminalDataEventHandlerRef = useRef<(event: TerminalDataEvent) => void>(() => undefined);
   const terminalExitEventHandlerRef = useRef<(event: TerminalExitEvent) => void>(() => undefined);
@@ -736,6 +747,7 @@ export default function App() {
       delete lastMeaningfulOutputByThreadRef.current[threadId];
       delete outputControlCarryByThreadRef.current[threadId];
       delete liveDataSeenBySessionRef.current[sessionId];
+      runLifecycleByThreadRef.current[threadId] = createRunLifecycleState();
     },
     [runStore]
   );
@@ -747,6 +759,11 @@ export default function App() {
         [threadId]: { startedAt }
       };
       runStore.startWorking(threadId, startedAt);
+      const startedAtMs = Number.isFinite(Date.parse(startedAt)) ? Date.parse(startedAt) : Date.now();
+      runLifecycleByThreadRef.current[threadId] = markRunStreaming(
+        runLifecycleByThreadRef.current[threadId],
+        startedAtMs
+      );
     },
     [runStore]
   );
@@ -759,6 +776,10 @@ export default function App() {
         workingByThreadRef.current = next;
       }
       runStore.stopWorking(threadId);
+      const lifecycle = runLifecycleByThreadRef.current[threadId];
+      if (lifecycle?.phase === 'streaming') {
+        runLifecycleByThreadRef.current[threadId] = markRunReady(lifecycle);
+      }
     },
     [runStore]
   );
@@ -1031,7 +1052,7 @@ export default function App() {
   }, [hasUnseenThreadOutput]);
 
   const scheduleThreadWorkingStop = useCallback(
-    (threadId: string) => {
+    (threadId: string, delayMs = THREAD_WORKING_IDLE_TIMEOUT_MS) => {
       clearThreadWorkingStopTimer(threadId);
       workingStopTimerByThreadRef.current[threadId] = window.setTimeout(() => {
         delete workingStopTimerByThreadRef.current[threadId];
@@ -1039,7 +1060,7 @@ export default function App() {
         if (selectedThreadIdRef.current !== threadId) {
           markThreadUnread(threadId);
         }
-      }, THREAD_WORKING_IDLE_TIMEOUT_MS);
+      }, delayMs);
     },
     [clearThreadWorkingStopTimer, markThreadUnread, stopThreadWorking]
   );
@@ -1076,6 +1097,7 @@ export default function App() {
       }
       terminalSnapshotRefreshTimersBySessionRef.current = {};
       liveDataSeenBySessionRef.current = {};
+      runLifecycleByThreadRef.current = {};
     };
   }, [cancelScheduledTerminalLogFlush, clearAllThreadWorkingStopTimers]);
 
@@ -1385,6 +1407,7 @@ export default function App() {
               [threadId]: merged
             };
           });
+          runLifecycleByThreadRef.current[threadId] = markRunReady(runLifecycleByThreadRef.current[threadId]);
           setStartingByThread((current) => removeThreadFlag(current, threadId));
           setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
           return;
@@ -1421,6 +1444,7 @@ export default function App() {
           };
         });
       }
+      runLifecycleByThreadRef.current[threadId] = markRunReady(runLifecycleByThreadRef.current[threadId]);
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
     },
@@ -1451,8 +1475,12 @@ export default function App() {
 
       const existing = activeRunsByThreadRef.current[thread.id]?.sessionId ?? null;
       if (existing) {
+        if (!runLifecycleByThreadRef.current[thread.id]) {
+          runLifecycleByThreadRef.current[thread.id] = createRunLifecycleState();
+        }
         setStartingByThread((current) => removeThreadFlag(current, thread.id));
         if (hasCachedTerminalLog(thread.id)) {
+          runLifecycleByThreadRef.current[thread.id] = markRunReady(runLifecycleByThreadRef.current[thread.id]);
           setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
         } else {
           setReadyByThread((current) => removeThreadFlag(current, thread.id));
@@ -2065,6 +2093,7 @@ export default function App() {
       delete outputControlCarryByThreadRef.current[threadId];
       delete latestOutputSequenceByThreadRef.current[threadId];
       delete seenOutputSequenceByThreadRef.current[threadId];
+      delete runLifecycleByThreadRef.current[threadId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
 
@@ -2132,6 +2161,7 @@ export default function App() {
       delete pendingSnapshotBySessionRef.current[sessionId];
       delete terminalDataSequenceBySessionRef.current[sessionId];
       clearSessionSnapshotRefreshTimers(sessionId);
+      runLifecycleByThreadRef.current[threadId] = markRunExited();
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
     },
@@ -2486,6 +2516,24 @@ export default function App() {
 
       const hasMeaningfulOutput = noteThreadOutput(threadId, event.data);
       const isSelectedThread = selectedThreadIdRef.current === threadId;
+      const nowMs = Date.now();
+      runLifecycleByThreadRef.current[threadId] = noteRunOutput(
+        runLifecycleByThreadRef.current[threadId],
+        hasMeaningfulOutput,
+        nowMs
+      );
+
+      const maybeResolveStuckStreaming = () => {
+        if (!workingByThreadRef.current[threadId]) {
+          return;
+        }
+        if (!isStreamingStuck(runLifecycleByThreadRef.current[threadId], nowMs, THREAD_WORKING_STUCK_TIMEOUT_MS)) {
+          return;
+        }
+        clearThreadWorkingStopTimer(threadId);
+        stopThreadWorking(threadId);
+      };
+
       const pendingHydration = pendingSnapshotBySessionRef.current[event.sessionId];
       if (pendingHydration && pendingHydration.threadId === threadId) {
         pendingHydration.bufferedLive = appendBufferedLive(
@@ -2500,7 +2548,11 @@ export default function App() {
           clearThreadUnread(threadId);
         }
         if (workingByThreadRef.current[threadId]) {
-          scheduleThreadWorkingStop(threadId);
+          if (hasMeaningfulOutput) {
+            scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
+          } else {
+            maybeResolveStuckStreaming();
+          }
         } else if (!isSelectedThread && hasMeaningfulOutput) {
           markThreadUnread(threadId);
         } else {
@@ -2515,7 +2567,11 @@ export default function App() {
         clearThreadUnread(threadId);
       }
       if (workingByThreadRef.current[threadId]) {
-        scheduleThreadWorkingStop(threadId);
+        if (hasMeaningfulOutput) {
+          scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
+        } else {
+          maybeResolveStuckStreaming();
+        }
       } else if (!isSelectedThread && hasMeaningfulOutput) {
         markThreadUnread(threadId);
       }
@@ -2524,9 +2580,11 @@ export default function App() {
     [
       appendTerminalLogChunk,
       clearSessionSnapshotRefreshTimers,
+      clearThreadWorkingStopTimer,
       clearThreadUnread,
       markThreadUnread,
       noteThreadOutput,
+      stopThreadWorking,
       scheduleThreadWorkingStop
     ]
   );
@@ -2544,6 +2602,7 @@ export default function App() {
       if (!endedThreadId) {
         return;
       }
+      runLifecycleByThreadRef.current[endedThreadId] = markRunExited();
       const exitStatus = statusFromExit(event);
       setStartingByThread((current) => removeThreadFlag(current, endedThreadId));
       setReadyByThread((current) => removeThreadFlag(current, endedThreadId));
@@ -2944,10 +3003,14 @@ export default function App() {
 
       window.localStorage.removeItem(threadSelectionKey(workspace.id));
       for (const threadId of threadIds) {
+        delete inputBufferByThreadRef.current[threadId];
+        delete inputControlCarryByThreadRef.current[threadId];
+        delete threadTitleInitializedRef.current[threadId];
         delete pendingTerminalChunksByThreadRef.current[threadId];
         delete outputControlCarryByThreadRef.current[threadId];
         delete latestOutputSequenceByThreadRef.current[threadId];
         delete seenOutputSequenceByThreadRef.current[threadId];
+        delete runLifecycleByThreadRef.current[threadId];
       }
       updateTerminalLogMap((current) => {
         let changed = false;
@@ -3159,6 +3222,7 @@ export default function App() {
                   if (submittedLines.length > 0) {
                     clearThreadWorkingStopTimer(selectedThread.id);
                     startThreadWorking(selectedThread.id);
+                    scheduleThreadWorkingStop(selectedThread.id, THREAD_WORKING_STUCK_TIMEOUT_MS);
                   }
                   void api.terminalWrite(sessionId, outboundData);
                   return;

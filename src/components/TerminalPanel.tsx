@@ -4,14 +4,17 @@ import 'xterm/css/xterm.css';
 import { FitAddon } from 'xterm-addon-fit';
 import { Terminal } from 'xterm';
 import { resolveTerminalContentUpdate } from '../lib/terminalContentUpdate';
+import {
+  createFollowState,
+  handleTerminalScroll,
+  jumpToLatest as jumpFollowStateToLatest,
+  shouldAutoFollow
+} from '../lib/terminalFollowState';
 import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
 
 const INPUT_FLUSH_MS = 8;
 const INPUT_CHUNK_SIZE = 4 * 1024;
 const OUTPUT_BATCH_BYTES = 48 * 1024;
-const STICKY_SCROLL_TOLERANCE = 0;
-const AUTO_SCROLL_GUARD_MS = 140;
-const USER_SCROLL_INTENT_MS = 1200;
 
 interface TerminalPanelProps {
   sessionId?: string | null;
@@ -51,12 +54,7 @@ export function TerminalPanel({
   const inputEnabledRef = useRef(inputEnabled);
   const previousInputEnabledRef = useRef(inputEnabled);
   const sessionRef = useRef<string | null>(sessionId);
-  const shouldStickToBottomRef = useRef(true);
-  const manualScrollLockRef = useRef(false);
-  const lastViewportYRef = useRef(0);
-  const autoScrollGuardUntilRef = useRef(0);
-  const autoScrollRequestIdRef = useRef(0);
-  const userScrollIntentUntilRef = useRef(0);
+  const followStateRef = useRef(createFollowState());
   const writeQueueRef = useRef(new TerminalWriteQueue({ maxBatchBytes: OUTPUT_BATCH_BYTES }));
   const inputBufferRef = useRef('');
   const inputFlushTimerRef = useRef<number | null>(null);
@@ -65,44 +63,29 @@ export function TerminalPanel({
   const previousFocusRequestRef = useRef(focusRequestId);
 
   const scrollToBottomSoon = useCallback((term: Terminal) => {
-    if (!shouldStickToBottomRef.current || manualScrollLockRef.current) {
+    if (!shouldAutoFollow(followStateRef.current)) {
       return;
     }
-    const requestId = ++autoScrollRequestIdRef.current;
-    autoScrollGuardUntilRef.current = performance.now() + AUTO_SCROLL_GUARD_MS;
     term.scrollToBottom();
     window.requestAnimationFrame(() => {
       if (terminalRef.current !== term) {
         return;
       }
-      if (requestId !== autoScrollRequestIdRef.current) {
+      if (!shouldAutoFollow(followStateRef.current)) {
         return;
       }
-      if (!shouldStickToBottomRef.current || manualScrollLockRef.current) {
-        return;
-      }
-      autoScrollGuardUntilRef.current = performance.now() + AUTO_SCROLL_GUARD_MS;
       term.scrollToBottom();
     });
   }, []);
 
-  const pauseFollowOutput = useCallback(() => {
-    manualScrollLockRef.current = true;
-    shouldStickToBottomRef.current = false;
-    setFollowOutputPaused((current) => (current ? current : true));
-  }, []);
-
   const resumeFollowOutput = useCallback(() => {
-    manualScrollLockRef.current = false;
-    shouldStickToBottomRef.current = true;
+    const current = followStateRef.current;
+    followStateRef.current = {
+      ...current,
+      mode: 'following'
+    };
     setFollowOutputPaused((current) => (current ? false : current));
   }, []);
-
-  const engageManualScrollLock = useCallback(() => {
-    userScrollIntentUntilRef.current = performance.now() + USER_SCROLL_INTENT_MS;
-    autoScrollRequestIdRef.current += 1;
-    pauseFollowOutput();
-  }, [pauseFollowOutput]);
 
   const scheduleTerminalRefresh = useCallback((term: Terminal) => {
     if (refreshFrameRef.current !== null) {
@@ -154,7 +137,7 @@ export function TerminalPanel({
         return;
       }
 
-      const shouldFollowOutput = shouldStickToBottomRef.current && !manualScrollLockRef.current;
+      const shouldFollowOutput = shouldAutoFollow(followStateRef.current);
       clearPendingWrites();
       term.reset();
       if (nextContent.length > 0) {
@@ -234,8 +217,7 @@ export function TerminalPanel({
       writeQueueRef.current.setSink({
         write: (chunk, done) => {
           term.write(chunk, () => {
-            if (terminalRef.current === term && shouldStickToBottomRef.current && !manualScrollLockRef.current) {
-              autoScrollGuardUntilRef.current = performance.now() + AUTO_SCROLL_GUARD_MS;
+            if (terminalRef.current === term && shouldAutoFollow(followStateRef.current)) {
               term.scrollToBottom();
             }
             scheduleTerminalRefresh(term);
@@ -247,7 +229,7 @@ export function TerminalPanel({
       const fitAndNotify = () => {
         fitAddon.fit();
         onResizeRef.current?.(term.cols, term.rows);
-        if (shouldStickToBottomRef.current) {
+        if (shouldAutoFollow(followStateRef.current)) {
           scrollToBottomSoon(term);
         }
         scheduleTerminalRefresh(term);
@@ -269,8 +251,11 @@ export function TerminalPanel({
       }
 
       if (contentRef.current.length > 0) {
-        manualScrollLockRef.current = false;
-        shouldStickToBottomRef.current = true;
+        followStateRef.current = {
+          mode: 'following',
+          viewportY: followStateRef.current.viewportY,
+          baseY: followStateRef.current.baseY
+        };
         queueWrite(contentRef.current);
         writeQueueRef.current.flushImmediate();
       }
@@ -298,58 +283,13 @@ export function TerminalPanel({
       });
 
       const onScrollDisposable = term.onScroll((viewportY) => {
-        const bottom = term.buffer.active.baseY;
-        const atBottom = viewportY >= Math.max(0, bottom - STICKY_SCROLL_TOLERANCE);
-        const previousViewportY = lastViewportYRef.current;
-        lastViewportYRef.current = viewportY;
-        const guardActive = performance.now() <= autoScrollGuardUntilRef.current;
-        const userScrollIntentActive = performance.now() <= userScrollIntentUntilRef.current;
-
-        // Any user-driven upward scroll should disable follow until they explicitly return to bottom.
-        if ((!guardActive || userScrollIntentActive) && viewportY < previousViewportY) {
-          pauseFollowOutput();
-          userScrollIntentUntilRef.current = 0;
-          return;
-        }
-
-        if (manualScrollLockRef.current) {
-          if (atBottom) {
-            resumeFollowOutput();
-          } else {
-            shouldStickToBottomRef.current = false;
-          }
-          return;
-        }
-
-        shouldStickToBottomRef.current = atBottom;
+        const next = handleTerminalScroll(followStateRef.current, {
+          viewportY,
+          baseY: term.buffer.active.baseY
+        });
+        followStateRef.current = next;
+        setFollowOutputPaused(next.mode === 'pausedByUser');
       });
-      const onWheel = (event: WheelEvent) => {
-        if (event.deltaY !== 0) {
-          engageManualScrollLock();
-        }
-      };
-      const onPointerDown = (event: PointerEvent) => {
-        if (event.button !== 0) {
-          return;
-        }
-        const target = event.target;
-        if (!(target instanceof Element)) {
-          return;
-        }
-        const viewport = target.closest('.xterm-viewport');
-        if (!(viewport instanceof HTMLElement)) {
-          return;
-        }
-        // Left-clicking the scrollbar thumb/track should pause follow mode immediately.
-        const rect = viewport.getBoundingClientRect();
-        const clickedScrollbarGutter = event.clientX >= rect.right - 18;
-        if (!clickedScrollbarGutter) {
-          return;
-        }
-        engageManualScrollLock();
-      };
-      host.addEventListener('wheel', onWheel, { passive: true, capture: true });
-      host.addEventListener('pointerdown', onPointerDown, { capture: true });
 
       const onFocusIn = () => onFocusChangeRef.current?.(true);
       const onFocusOut = () => onFocusChangeRef.current?.(false);
@@ -371,8 +311,6 @@ export function TerminalPanel({
         observer.disconnect();
         onDataDisposable.dispose();
         onScrollDisposable.dispose();
-        host.removeEventListener('wheel', onWheel, true);
-        host.removeEventListener('pointerdown', onPointerDown, true);
         host.removeEventListener('focusin', onFocusIn);
         host.removeEventListener('focusout', onFocusOut);
         flushOutgoingInput();
@@ -381,11 +319,7 @@ export function TerminalPanel({
         writeQueueRef.current.clear();
         term.dispose();
         terminalRef.current = null;
-        manualScrollLockRef.current = false;
-        lastViewportYRef.current = 0;
-        autoScrollGuardUntilRef.current = 0;
-        autoScrollRequestIdRef.current = 0;
-        userScrollIntentUntilRef.current = 0;
+        followStateRef.current = createFollowState();
         inputBufferRef.current = '';
         if (inputFlushTimerRef.current !== null) {
           window.clearTimeout(inputFlushTimerRef.current);
@@ -407,10 +341,7 @@ export function TerminalPanel({
   }, [
     fallback,
     flushOutgoingInput,
-    engageManualScrollLock,
-    pauseFollowOutput,
     queueWrite,
-    resumeFollowOutput,
     scrollToBottomSoon,
     scheduleOutgoingInputFlush
   ]);
@@ -428,8 +359,7 @@ export function TerminalPanel({
     term.options.disableStdin = readOnly || !inputEnabled;
 
     const wasEnabled = previousInputEnabledRef.current;
-    if (!wasEnabled && inputEnabled && !readOnly && !manualScrollLockRef.current) {
-      shouldStickToBottomRef.current = true;
+    if (!wasEnabled && inputEnabled && !readOnly && shouldAutoFollow(followStateRef.current)) {
       scrollToBottomSoon(term);
       window.setTimeout(() => {
         if (terminalRef.current !== term) {
@@ -453,12 +383,7 @@ export function TerminalPanel({
     }
 
     sessionRef.current = sessionId;
-    manualScrollLockRef.current = false;
-    lastViewportYRef.current = 0;
-    autoScrollGuardUntilRef.current = 0;
-    autoScrollRequestIdRef.current = 0;
-    userScrollIntentUntilRef.current = 0;
-    shouldStickToBottomRef.current = true;
+    followStateRef.current = createFollowState();
     setFollowOutputPaused(false);
     clearPendingWrites();
     inputBufferRef.current = '';
@@ -496,7 +421,7 @@ export function TerminalPanel({
         queueWrite(nextUpdate.delta);
       }
       renderedContentRef.current = content;
-      if (shouldStickToBottomRef.current) {
+      if (shouldAutoFollow(followStateRef.current)) {
         scrollToBottomSoon(term);
       }
       return;
@@ -536,11 +461,13 @@ export function TerminalPanel({
     if (!term) {
       return;
     }
-    userScrollIntentUntilRef.current = 0;
-    resumeFollowOutput();
+    followStateRef.current = jumpFollowStateToLatest(followStateRef.current, {
+      baseY: term.buffer.active.baseY
+    });
+    setFollowOutputPaused(false);
     scrollToBottomSoon(term);
     scheduleTerminalRefresh(term);
-  }, [resumeFollowOutput, scheduleTerminalRefresh, scrollToBottomSoon]);
+  }, [scheduleTerminalRefresh, scrollToBottomSoon]);
 
   if (fallback) {
     return (

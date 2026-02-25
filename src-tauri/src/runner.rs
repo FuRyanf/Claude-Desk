@@ -1401,11 +1401,6 @@ pub fn install_latest_update() -> Result<()> {
             .arg(&target_app)
             .status();
 
-        let open_status = StdCommand::new("open").arg(&target_app).status()?;
-        if !open_status.success() {
-            return Err(anyhow!("Copied app but failed to launch /Applications/Claude Desk.app"));
-        }
-
         Ok(())
     })();
 

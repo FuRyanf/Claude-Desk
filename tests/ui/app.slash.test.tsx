@@ -448,4 +448,38 @@ describe('Sidebar behavior', () => {
     const after = Number(screen.getByTestId('sidebar').getAttribute('data-render-count') ?? '0');
     expect(after).toBe(before);
   });
+
+  it('clears stuck working state when only control chunks keep arriving', async () => {
+    const user = userEvent.setup();
+    const nowSpy = vi.spyOn(Date, 'now');
+    let nowMs = Date.now();
+    nowSpy.mockImplementation(() => nowMs);
+
+    try {
+      render(<App />);
+
+      await screen.findByRole('button', { name: /First thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-1' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'send-first-prompt' }));
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-running-thread-1')).toBeInTheDocument();
+      });
+
+      for (let index = 0; index < 40; index += 1) {
+        act(() => {
+          nowMs += 500;
+          mocks.emitTerminalData({ sessionId: 'session-thread-1', data: '\u001b[2K\r' });
+        });
+      }
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-running-thread-1')).not.toBeInTheDocument();
+      });
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
 });
