@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { createPortal } from 'react-dom';
 
 import type { GitBranchEntry, GitInfo, GitWorkspaceStatus, ThreadMetadata, Workspace } from '../types';
 
@@ -21,6 +22,14 @@ interface BottomBarProps {
   onToggleFullAccess: () => Promise<void>;
   onLoadBranchSwitcher: () => Promise<BranchSwitcherSnapshot>;
   onCheckoutBranch: (branchName: string) => Promise<boolean>;
+}
+
+interface BranchPopoverPosition {
+  left: number;
+  width: number;
+  maxHeight: number;
+  top?: number;
+  bottom?: number;
 }
 
 function decodeFileUriToPath(uri: string): string {
@@ -129,8 +138,11 @@ export function BottomBar({
   const [isSwitchingBranch, setIsSwitchingBranch] = React.useState(false);
   const [highlightedIndex, setHighlightedIndex] = React.useState(0);
   const [attachmentDragActive, setAttachmentDragActive] = React.useState(false);
+  const [branchPopoverPosition, setBranchPopoverPosition] = React.useState<BranchPopoverPosition | null>(null);
 
-  const popoverRef = React.useRef<HTMLDivElement | null>(null);
+  const switcherRef = React.useRef<HTMLDivElement | null>(null);
+  const branchTriggerRef = React.useRef<HTMLButtonElement | null>(null);
+  const branchPopoverRef = React.useRef<HTMLElement | null>(null);
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const filteredBranches = React.useMemo(() => {
@@ -141,16 +153,54 @@ export function BottomBar({
     return branches.filter((branch) => branch.name.toLowerCase().includes(query));
   }, [branchSearch, branches]);
 
+  const updateBranchPopoverPosition = React.useCallback(() => {
+    const trigger = branchTriggerRef.current;
+    if (!trigger) {
+      setBranchPopoverPosition(null);
+      return;
+    }
+
+    const viewportPadding = 8;
+    const desiredWidth = 360;
+    const rect = trigger.getBoundingClientRect();
+
+    const availableWidth = Math.max(260, window.innerWidth - viewportPadding * 2);
+    const width = Math.min(desiredWidth, availableWidth);
+    const left = Math.max(viewportPadding, Math.min(rect.right - width, window.innerWidth - width - viewportPadding));
+
+    const spaceAbove = Math.max(0, rect.top - viewportPadding - 8);
+    const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - viewportPadding - 8);
+    const openUpward = spaceAbove >= spaceBelow;
+    const maxHeight = Math.max(180, Math.min(420, openUpward ? spaceAbove : spaceBelow));
+
+    if (openUpward) {
+      setBranchPopoverPosition({
+        left,
+        width,
+        maxHeight,
+        bottom: Math.max(viewportPadding, window.innerHeight - rect.top + 8)
+      });
+      return;
+    }
+
+    setBranchPopoverPosition({
+      left,
+      width,
+      maxHeight,
+      top: Math.max(viewportPadding, rect.bottom + 8)
+    });
+  }, []);
+
   React.useEffect(() => {
     if (!branchPopoverOpen) {
       return;
     }
 
     const onPointerDown = (event: MouseEvent) => {
-      if (!popoverRef.current) {
-        return;
-      }
-      if (!popoverRef.current.contains(event.target as Node)) {
+      const target = event.target as Node;
+      const withinSwitcher = switcherRef.current?.contains(target) ?? false;
+      const withinPopover = branchPopoverRef.current?.contains(target) ?? false;
+      if (!withinSwitcher && !withinPopover) {
         setBranchPopoverOpen(false);
       }
     };
@@ -163,11 +213,15 @@ export function BottomBar({
 
     window.addEventListener('mousedown', onPointerDown);
     window.addEventListener('keydown', onEscape);
+    window.addEventListener('resize', updateBranchPopoverPosition);
+    window.addEventListener('scroll', updateBranchPopoverPosition, true);
     return () => {
       window.removeEventListener('mousedown', onPointerDown);
       window.removeEventListener('keydown', onEscape);
+      window.removeEventListener('resize', updateBranchPopoverPosition);
+      window.removeEventListener('scroll', updateBranchPopoverPosition, true);
     };
-  }, [branchPopoverOpen]);
+  }, [branchPopoverOpen, updateBranchPopoverPosition]);
 
   React.useEffect(() => {
     if (!branchPopoverOpen) {
@@ -186,11 +240,12 @@ export function BottomBar({
     if (!branchPopoverOpen) {
       return;
     }
+    updateBranchPopoverPosition();
     window.setTimeout(() => {
       searchInputRef.current?.focus();
       searchInputRef.current?.select();
     }, 0);
-  }, [branchPopoverOpen]);
+  }, [branchPopoverOpen, updateBranchPopoverPosition]);
 
   React.useEffect(() => {
     setAttachmentDragActive(false);
@@ -256,6 +311,7 @@ export function BottomBar({
       return;
     }
     setBranchPopoverOpen(true);
+    updateBranchPopoverPosition();
     setBranchSearch('');
     setIsLoadingBranches(true);
     try {
@@ -267,7 +323,7 @@ export function BottomBar({
     } finally {
       setIsLoadingBranches(false);
     }
-  }, [gitInfo, onLoadBranchSwitcher, workspace]);
+  }, [gitInfo, onLoadBranchSwitcher, updateBranchPopoverPosition, workspace]);
 
   const runCheckout = React.useCallback(
     async (branchName: string) => {
@@ -375,8 +431,9 @@ export function BottomBar({
     <footer className="bottom-bar" data-testid="bottom-bar">
       <div className="bottom-bar-left">
         <span className="bottom-bar-label">{workspace && workspace.kind !== 'local' ? 'Remote' : 'Local'}</span>
-        <div className="branch-switcher" ref={popoverRef}>
+        <div className="branch-switcher" ref={switcherRef}>
           <button
+            ref={branchTriggerRef}
             type="button"
             className="ghost-button branch-trigger"
             onClick={() => void (branchPopoverOpen ? setBranchPopoverOpen(false) : openBranchPopover())}
@@ -392,9 +449,25 @@ export function BottomBar({
               </svg>
             </span>
           </button>
+        </div>
+      </div>
 
-          {branchPopoverOpen ? (
-            <section className="branch-popover" role="dialog" aria-label="Branch switcher">
+      {branchPopoverOpen && branchPopoverPosition && typeof document !== 'undefined'
+        ? createPortal(
+            <section
+              ref={branchPopoverRef}
+              className="branch-popover branch-popover-portal"
+              role="dialog"
+              aria-label="Branch switcher"
+              style={{
+                left: branchPopoverPosition.left,
+                width: branchPopoverPosition.width,
+                maxHeight: branchPopoverPosition.maxHeight,
+                ...(typeof branchPopoverPosition.top === 'number'
+                  ? { top: branchPopoverPosition.top }
+                  : { bottom: branchPopoverPosition.bottom ?? 8 })
+              }}
+            >
               <div className="branch-search-row">
                 <input
                   ref={searchInputRef}
@@ -449,10 +522,10 @@ export function BottomBar({
                 )}
               </div>
 
-            </section>
-          ) : null}
-        </div>
-      </div>
+            </section>,
+            document.body
+          )
+        : null}
 
       <div
         className={attachmentDragActive ? 'attachment-composer attachment-drop-active' : 'attachment-composer'}
