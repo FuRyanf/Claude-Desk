@@ -8,16 +8,71 @@ mod storage;
 
 use std::sync::Arc;
 
+use serde::Deserialize;
 use tauri::{Manager, State};
 
 use crate::models::{
-    ContextPreview, GitBranchEntry, GitDiffSummary, GitInfo, GitPullForNewThreadResult,
-    GitWorkspaceStatus, RunClaudeRequest, RunClaudeResponse, Settings, SkillInfo,
+    AppUpdateInfo, ContextPreview, GitBranchEntry, GitDiffSummary, GitInfo,
+    GitPullForNewThreadResult, GitWorkspaceStatus, RunClaudeRequest, RunClaudeResponse, Settings,
+    SkillInfo,
     TerminalStartResponse, ThreadMetadata, TranscriptEntry, Workspace,
 };
 
 struct AppState {
     runner: Arc<runner::RunnerState>,
+}
+
+const GITHUB_LATEST_RELEASE_API_URL: &str =
+    "https://api.github.com/repos/FuRyanf/Claude-Desk/releases/latest";
+
+#[derive(Debug, Deserialize)]
+struct GitHubLatestRelease {
+    tag_name: String,
+    html_url: Option<String>,
+}
+
+fn parse_semver_like(version: &str) -> Option<Vec<u64>> {
+    let trimmed = version.trim().trim_start_matches('v');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    for segment in trimmed.split('.') {
+        let digits: String = segment
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect();
+        if digits.is_empty() {
+            return None;
+        }
+        parts.push(digits.parse().ok()?);
+    }
+
+    Some(parts)
+}
+
+fn is_version_newer(latest: &str, current: &str) -> bool {
+    let Some(mut latest_parts) = parse_semver_like(latest) else {
+        return false;
+    };
+    let Some(mut current_parts) = parse_semver_like(current) else {
+        return false;
+    };
+
+    let length = latest_parts.len().max(current_parts.len());
+    latest_parts.resize(length, 0);
+    current_parts.resize(length, 0);
+
+    latest_parts > current_parts
+}
+
+fn current_build_version() -> String {
+    option_env!("CLAUDE_DESK_BUILD_VERSION")
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+        .trim()
+        .trim_start_matches('v')
+        .to_string()
 }
 
 #[tauri::command]
@@ -268,6 +323,47 @@ fn detect_claude_cli_path() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+fn check_for_update() -> Result<AppUpdateInfo, String> {
+    let current_version = current_build_version();
+    let output = std::process::Command::new("curl")
+        .args([
+            "-fsSL",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            "User-Agent: Claude-Desk",
+            GITHUB_LATEST_RELEASE_API_URL,
+        ])
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if !output.status.success() {
+        return Err("Failed to fetch latest release info".to_string());
+    }
+
+    let release: GitHubLatestRelease =
+        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    let latest_version = release.tag_name.trim().trim_start_matches('v').to_string();
+    let update_available = is_version_newer(&latest_version, &current_version);
+
+    Ok(AppUpdateInfo {
+        current_version,
+        latest_version: Some(latest_version),
+        update_available,
+        release_url: release.html_url,
+    })
+}
+
+#[tauri::command]
+async fn install_latest_update() -> Result<bool, String> {
+    tokio::task::spawn_blocking(runner::install_latest_update)
+        .await
+        .map_err(|error| error.to_string())?
+        .map(|_| true)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn run_claude(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -473,6 +569,8 @@ fn main() {
             get_settings,
             save_settings,
             detect_claude_cli_path,
+            check_for_update,
+            install_latest_update,
             run_claude,
             cancel_run,
             terminal_start_session,

@@ -71,6 +71,13 @@ export interface Settings {
   claudeCliPath?: string | null;
 }
 
+export interface AppUpdateInfo {
+  currentVersion: string;
+  latestVersion?: string | null;
+  updateAvailable: boolean;
+  releaseUrl?: string | null;
+}
+
 export interface SkillInfo {
   id: string;
   name: string;

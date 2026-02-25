@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
+  AppUpdateInfo,
   ContextPack,
   ContextPreview,
   GitBranchEntry,
@@ -84,6 +85,8 @@ export const api = {
   getSettings: () => invoke<Settings>('get_settings'),
   saveSettings: (settings: Settings) => invoke<Settings>('save_settings', { settings }),
   detectClaudeCliPath: () => invoke<string | null>('detect_claude_cli_path'),
+  checkForUpdate: () => invoke<AppUpdateInfo>('check_for_update'),
+  installLatestUpdate: () => invoke<boolean>('install_latest_update'),
   runClaude: (request: RunClaudeRequest) =>
     invoke<RunClaudeResponse>('run_claude', { request }),
   cancelRun: (runId: string) => invoke<boolean>('cancel_run', { runId }),

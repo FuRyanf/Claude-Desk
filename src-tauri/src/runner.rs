@@ -1332,6 +1332,90 @@ pub fn copy_terminal_env_diagnostics(workspace_path: String) -> Result<String> {
     Ok(diagnostics)
 }
 
+fn extract_mounted_volume_path(hdiutil_output: &str) -> Option<String> {
+    hdiutil_output
+        .lines()
+        .find_map(|line| line.find("/Volumes/").map(|index| line[index..].trim().to_string()))
+}
+
+pub fn install_latest_update() -> Result<()> {
+    let home_dir = dirs::home_dir().ok_or_else(|| anyhow!("Unable to resolve home directory"))?;
+    let downloads_dir = home_dir.join("Downloads");
+    fs::create_dir_all(&downloads_dir)?;
+    let dmg_path = downloads_dir.join("Claude-Desk.dmg");
+    let dmg_path_string = dmg_path.to_string_lossy().to_string();
+
+    let mut download_command = StdCommand::new("curl");
+    download_command.args([
+        "-L",
+        "-o",
+        &dmg_path_string,
+        "https://github.com/FuRyanf/Claude-Desk/releases/latest/download/Claude-Desk.dmg",
+    ]);
+    let download_output = run_std_command_with_timeout(
+        download_command,
+        Duration::from_secs(300),
+        "Claude Desk DMG download",
+    )?;
+    if !download_output.status.success() {
+        let stderr = String::from_utf8_lossy(&download_output.stderr);
+        return Err(anyhow!("Failed to download latest DMG: {stderr}"));
+    }
+
+    let mut attach_command = StdCommand::new("hdiutil");
+    attach_command.args(["attach", &dmg_path_string, "-nobrowse"]);
+    let attach_output =
+        run_std_command_with_timeout(attach_command, Duration::from_secs(60), "DMG mount")?;
+    if !attach_output.status.success() {
+        let stderr = String::from_utf8_lossy(&attach_output.stderr);
+        return Err(anyhow!("Failed to mount DMG: {stderr}"));
+    }
+
+    let attach_stdout = String::from_utf8_lossy(&attach_output.stdout);
+    let attach_stderr = String::from_utf8_lossy(&attach_output.stderr);
+    let mount_path = extract_mounted_volume_path(&attach_stdout)
+        .or_else(|| extract_mounted_volume_path(&attach_stderr))
+        .ok_or_else(|| anyhow!("Unable to locate mounted DMG volume path"))?;
+
+    let source_app = Path::new(&mount_path).join("Claude Desk.app");
+    if !source_app.exists() {
+        let _ = StdCommand::new("hdiutil")
+            .args(["detach", &mount_path, "-quiet"])
+            .status();
+        return Err(anyhow!("Mounted DMG does not contain Claude Desk.app"));
+    }
+
+    let target_app = PathBuf::from("/Applications/Claude Desk.app");
+
+    let install_result = (|| -> Result<()> {
+        let copy_status = StdCommand::new("ditto")
+            .arg(&source_app)
+            .arg(&target_app)
+            .status()?;
+        if !copy_status.success() {
+            return Err(anyhow!("Failed to copy Claude Desk.app into /Applications"));
+        }
+
+        let _ = StdCommand::new("xattr")
+            .args(["-dr", "com.apple.quarantine"])
+            .arg(&target_app)
+            .status();
+
+        let open_status = StdCommand::new("open").arg(&target_app).status()?;
+        if !open_status.success() {
+            return Err(anyhow!("Copied app but failed to launch /Applications/Claude Desk.app"));
+        }
+
+        Ok(())
+    })();
+
+    let _ = StdCommand::new("hdiutil")
+        .args(["detach", &mount_path, "-quiet"])
+        .status();
+
+    install_result
+}
+
 pub async fn run_claude(
     app: AppHandle,
     state: Arc<RunnerState>,

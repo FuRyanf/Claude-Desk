@@ -205,11 +205,98 @@ const ThreadRow = React.memo(function ThreadRow({
   onDeleteThread
 }: ThreadRowProps) {
   const skipBlurCommitRef = React.useRef(false);
+  const renameInputRef = React.useRef<HTMLInputElement | null>(null);
   React.useEffect(() => {
     if (!isEditing) {
       skipBlurCommitRef.current = false;
     }
   }, [isEditing]);
+  React.useEffect(() => {
+    if (!isEditing) {
+      return;
+    }
+    const focusId = window.requestAnimationFrame(() => {
+      const input = renameInputRef.current;
+      if (!input) {
+        return;
+      }
+      input.focus();
+      const cursor = input.value.length;
+      input.setSelectionRange(cursor, cursor);
+    });
+    return () => {
+      window.cancelAnimationFrame(focusId);
+    };
+  }, [isEditing]);
+
+  const rowContent = (
+    <span className="thread-main-row">
+      <span className="thread-main-leading">
+        {isEditing ? (
+          <input
+            ref={renameInputRef}
+            className="thread-rename-input"
+            value={editingValue}
+            maxLength={80}
+            autoFocus
+            onChange={(event) => onEditingValueChange(event.target.value)}
+            onClick={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onKeyDown={async (event) => {
+              // Keep keyboard input local to rename mode; don't bubble shortcuts to the app.
+              event.stopPropagation();
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                skipBlurCommitRef.current = true;
+                onCancelRename();
+                return;
+              }
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                skipBlurCommitRef.current = true;
+                await onCommitRename(thread);
+                return;
+              }
+            }}
+            onKeyUp={(event) => {
+              event.stopPropagation();
+            }}
+            onBlur={async () => {
+              if (skipBlurCommitRef.current) {
+                skipBlurCommitRef.current = false;
+                return;
+              }
+              await onCommitRename(thread);
+            }}
+          />
+        ) : (
+          <span
+            className="thread-title"
+            onDoubleClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onStartRename(thread);
+            }}
+          >
+            {thread.title}
+          </span>
+        )}
+      </span>
+      <span className="thread-main-trailing">
+        {isWorking ? (
+          <span className="thread-running" data-testid={`thread-running-${thread.id}`} aria-label="Thread is working">
+            <span className="spinner-dot" />
+          </span>
+        ) : hasUnreadOutput && !active ? (
+          <span className="thread-unread-dot" data-testid={`thread-unread-${thread.id}`} aria-label="Unread output" />
+        ) : relativeTime ? (
+          <span className="thread-time" data-testid={`thread-recency-${thread.id}`}>
+            {relativeTime}
+          </span>
+        ) : null}
+      </span>
+    </span>
+  );
 
   return (
     <li
@@ -220,76 +307,23 @@ const ThreadRow = React.memo(function ThreadRow({
         onOpenThreadContextMenu(event, thread);
       }}
     >
-      <button
-        type="button"
-        onClick={() => onSelectThread(thread.workspaceId, thread.id)}
-        onDoubleClick={(event) => {
-          event.preventDefault();
-          onStartRename(thread);
-        }}
-        className={active ? 'thread-button active' : 'thread-button'}
-      >
-        <span className="thread-main-row">
-          <span className="thread-main-leading">
-            {isEditing ? (
-              <input
-                className="thread-rename-input"
-                value={editingValue}
-                maxLength={80}
-                autoFocus
-                onChange={(event) => onEditingValueChange(event.target.value)}
-                onClick={(event) => event.stopPropagation()}
-                onKeyDown={async (event) => {
-                  event.stopPropagation();
-                  if (event.key === 'Escape') {
-                    event.preventDefault();
-                    skipBlurCommitRef.current = true;
-                    onCancelRename();
-                    return;
-                  }
-                  if (event.key === 'Enter') {
-                    event.preventDefault();
-                    skipBlurCommitRef.current = true;
-                    await onCommitRename(thread);
-                    return;
-                  }
-                }}
-                onBlur={async () => {
-                  if (skipBlurCommitRef.current) {
-                    skipBlurCommitRef.current = false;
-                    return;
-                  }
-                  await onCommitRename(thread);
-                }}
-              />
-            ) : (
-              <span
-                className="thread-title"
-                onDoubleClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onStartRename(thread);
-                }}
-              >
-                {thread.title}
-              </span>
-            )}
-        </span>
-        <span className="thread-main-trailing">
-          {isWorking ? (
-            <span className="thread-running" data-testid={`thread-running-${thread.id}`} aria-label="Thread is working">
-              <span className="spinner-dot" />
-            </span>
-          ) : hasUnreadOutput && !active ? (
-            <span className="thread-unread-dot" data-testid={`thread-unread-${thread.id}`} aria-label="Unread output" />
-          ) : relativeTime ? (
-              <span className="thread-time" data-testid={`thread-recency-${thread.id}`}>
-                {relativeTime}
-              </span>
-            ) : null}
-        </span>
-        </span>
-      </button>
+      {isEditing ? (
+        <div className={active ? 'thread-button active thread-button-editing' : 'thread-button thread-button-editing'}>
+          {rowContent}
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => onSelectThread(thread.workspaceId, thread.id)}
+          onDoubleClick={(event) => {
+            event.preventDefault();
+            onStartRename(thread);
+          }}
+          className={active ? 'thread-button active' : 'thread-button'}
+        >
+          {rowContent}
+        </button>
+      )}
       <button
         type="button"
         className="thread-delete-button"
@@ -422,6 +456,12 @@ function LeftRailComponent({
   }, []);
 
   const onStartRename = React.useCallback((thread: ThreadMetadata) => {
+    if (typeof document !== 'undefined') {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement) {
+        active.blur();
+      }
+    }
     setEditingThreadId(thread.id);
     setEditingValue(thread.title);
     setEditingOriginal(thread.title);

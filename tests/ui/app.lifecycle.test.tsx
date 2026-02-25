@@ -183,6 +183,13 @@ const mocks = vi.hoisted(() => {
     getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
     saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
     detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
+    checkForUpdate: vi.fn(async () => ({
+      currentVersion: '0.1.12',
+      latestVersion: '0.1.12',
+      updateAvailable: false,
+      releaseUrl: null
+    })),
+    installLatestUpdate: vi.fn(async () => true),
     terminalStartSession: vi.fn(terminalStartSessionImpl),
     terminalWrite: vi.fn(async () => true),
     terminalResize: vi.fn(async () => true),
@@ -289,6 +296,27 @@ describe('Thread lifecycle integration', () => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
         expect.objectContaining({ threadId: 'thread-1' })
       );
+    });
+  });
+
+  it('shows an update button only when a newer release is available', async () => {
+    const user = userEvent.setup();
+    mocks.api.checkForUpdate.mockResolvedValueOnce({
+      currentVersion: '0.1.12',
+      latestVersion: '0.1.14',
+      updateAvailable: true,
+      releaseUrl: 'https://github.com/FuRyanf/Claude-Desk/releases/tag/v0.1.14'
+    });
+
+    render(<App />);
+
+    const updateButton = await screen.findByRole('button', { name: 'Update' });
+    expect(updateButton).toBeInTheDocument();
+
+    await user.click(updateButton);
+
+    await waitFor(() => {
+      expect(mocks.api.installLatestUpdate).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -760,8 +788,10 @@ describe('Thread lifecycle integration', () => {
     fireEvent.keyDown(input, { key: 'Control' });
     fireEvent.keyDown(input, { key: 'Alt' });
     fireEvent.keyDown(input, { key: 'Shift' });
+    await user.type(input, ' ');
 
-    expect(screen.getByDisplayValue('Thread one')).toBeInTheDocument();
+    expect(input).toHaveValue('Thread one ');
+    expect(input).toHaveFocus();
     expect(mocks.api.renameThread).not.toHaveBeenCalled();
 
     fireEvent.keyDown(input, { key: 'Escape' });

@@ -102,6 +102,12 @@ jobs:
           rm -f src-tauri/target/release/claude_desk
           rm -rf dist
 
+      - name: Stamp build version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          echo "CLAUDE_DESK_BUILD_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Build app
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}

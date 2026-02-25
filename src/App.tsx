@@ -30,6 +30,7 @@ import {
 import { useRunStore } from './stores/runStore';
 import { useThreadStore } from './stores/threadStore';
 import type {
+  AppUpdateInfo,
   GitBranchEntry,
   GitInfo,
   GitWorkspaceStatus,
@@ -386,14 +387,44 @@ function clampTerminalLog(text: string): string {
   return clampTerminalLogText(text, TERMINAL_LOG_BUFFER_CHARS);
 }
 
-function shouldIgnoreGlobalTerminalShortcutTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) {
+function isEditableElement(element: Element | null): boolean {
+  if (!(element instanceof HTMLElement)) {
     return false;
   }
-  if (target.classList.contains('thread-rename-input')) {
+
+  if (element.isContentEditable) {
     return true;
   }
-  return target.closest('.thread-rename-input') !== null;
+
+  if (element.closest('.thread-rename-input') !== null) {
+    return true;
+  }
+
+  if (element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+    return true;
+  }
+
+  if (element instanceof HTMLInputElement) {
+    const type = element.type.toLowerCase();
+    if (type === 'button' || type === 'checkbox' || type === 'file' || type === 'radio' || type === 'reset' || type === 'submit') {
+      return false;
+    }
+    return true;
+  }
+
+  return element.getAttribute('role') === 'textbox';
+}
+
+function shouldIgnoreGlobalTerminalShortcutTarget(target: EventTarget | null): boolean {
+  if (target instanceof Element && isEditableElement(target)) {
+    return true;
+  }
+
+  if (typeof document !== 'undefined' && isEditableElement(document.activeElement)) {
+    return true;
+  }
+
+  return false;
 }
 
 function hasMeaningfulTerminalOutputChunk(chunk: string): boolean {
@@ -568,6 +599,8 @@ export default function App() {
   const [addingWorkspace, setAddingWorkspace] = useState(false);
 
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [appUpdateInfo, setAppUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
   const [fullAccessUpdating, setFullAccessUpdating] = useState(false);
   const [startingByThread, setStartingByThread] = useState<Record<string, boolean>>({});
   const [readyByThread, setReadyByThread] = useState<Record<string, boolean>>({});
@@ -843,6 +876,25 @@ export default function App() {
       setToasts((current) => current.filter((toast) => toast.id !== id));
     }, 4500);
   }, []);
+
+  const refreshAppUpdateInfo = useCallback(async () => {
+    try {
+      const updateInfo = await api.checkForUpdate();
+      setAppUpdateInfo(updateInfo);
+    } catch {
+      setAppUpdateInfo(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshAppUpdateInfo();
+    const handle = window.setInterval(() => {
+      void refreshAppUpdateInfo();
+    }, 10 * 60 * 1000);
+    return () => {
+      window.clearInterval(handle);
+    };
+  }, [refreshAppUpdateInfo]);
 
   const updateTerminalLogMap = useCallback(
     (updater: (current: Record<string, string>) => Record<string, string>): Record<string, string> => {
@@ -2840,6 +2892,22 @@ export default function App() {
     [pushToast]
   );
 
+  const installLatestUpdate = useCallback(async () => {
+    if (installingUpdate) {
+      return;
+    }
+
+    setInstallingUpdate(true);
+    pushToast('Downloading and installing the latest Claude Desk release…', 'info');
+    try {
+      await api.installLatestUpdate();
+    } catch (error) {
+      pushToast(`Update failed: ${String(error)}`, 'error');
+    } finally {
+      setInstallingUpdate(false);
+    }
+  }, [installingUpdate, pushToast]);
+
   const onRemoveWorkspace = useCallback(
     async (workspace: Workspace) => {
       const detail =
@@ -3003,6 +3071,10 @@ export default function App() {
         <HeaderBar
           workspace={selectedWorkspace}
           selectedThread={selectedThread}
+          updateAvailable={Boolean(appUpdateInfo?.updateAvailable)}
+          updateVersionLabel={appUpdateInfo?.latestVersion ?? undefined}
+          updating={installingUpdate}
+          onInstallUpdate={installLatestUpdate}
           onOpenWorkspace={() => {
             if (selectedWorkspace) {
               openWorkspaceInFinder(selectedWorkspace);

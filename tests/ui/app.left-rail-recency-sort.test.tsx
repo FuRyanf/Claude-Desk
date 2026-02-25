@@ -120,6 +120,13 @@ const mocks = vi.hoisted(() => {
     getSettings: vi.fn(async () => ({ claudeCliPath: '/usr/local/bin/claude' })),
     saveSettings: vi.fn(async (settings: { claudeCliPath: string | null }) => settings),
     detectClaudeCliPath: vi.fn(async () => '/usr/local/bin/claude'),
+    checkForUpdate: vi.fn(async () => ({
+      currentVersion: '0.1.12',
+      latestVersion: '0.1.12',
+      updateAvailable: false,
+      releaseUrl: null
+    })),
+    installLatestUpdate: vi.fn(async () => true),
     terminalStartSession: vi.fn(async (params: { threadId: string }) => ({
       sessionId: `session-${params.threadId}`,
       sessionMode: 'new',
