@@ -7,20 +7,28 @@ type CancelFlush = (id: number) => void;
 
 interface TerminalWriteQueueOptions {
   maxBatchBytes?: number;
+  maxFlushDelayMs?: number;
   scheduleFlush?: ScheduleFlush;
   cancelFlush?: CancelFlush;
+  scheduleTimer?: (flush: () => void, delayMs: number) => number;
+  cancelTimer?: (id: number) => void;
 }
 
 export interface TerminalWriteQueueStats {
   pendingChunks: number;
   pendingBytes: number;
   highWaterBytes: number;
+  highWaterChunks: number;
   totalWrites: number;
   totalBytesWritten: number;
   writing: boolean;
+  lastQueueLatencyMs: number;
+  maxQueueLatencyMs: number;
+  maxFlushDelayMs: number;
 }
 
 const DEFAULT_MAX_BATCH_BYTES = 48 * 1024;
+const DEFAULT_MAX_FLUSH_DELAY_MS = 48;
 
 function defaultScheduleFlush(flush: () => void): number {
   if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
@@ -37,20 +45,41 @@ function defaultCancelFlush(id: number) {
   globalThis.clearTimeout(id);
 }
 
+function defaultScheduleTimer(flush: () => void, delayMs: number): number {
+  return globalThis.setTimeout(flush, delayMs) as unknown as number;
+}
+
+function defaultCancelTimer(id: number) {
+  globalThis.clearTimeout(id);
+}
+
+interface PendingChunk {
+  chunk: string;
+  enqueuedAtMs: number;
+}
+
 export class TerminalWriteQueue {
-  private readonly maxBatchBytes: number;
+  private maxBatchBytes: number;
+
+  private readonly maxFlushDelayMs: number;
 
   private readonly scheduleFlush: ScheduleFlush;
 
   private readonly cancelFlush: CancelFlush;
 
+  private readonly scheduleTimer: (flush: () => void, delayMs: number) => number;
+
+  private readonly cancelTimer: (id: number) => void;
+
   private sink: WriteSink | null = null;
 
-  private pendingChunks: string[] = [];
+  private pendingChunks: PendingChunk[] = [];
 
   private pendingBytes = 0;
 
   private highWaterBytes = 0;
+
+  private highWaterChunks = 0;
 
   private totalWrites = 0;
 
@@ -58,21 +87,38 @@ export class TerminalWriteQueue {
 
   private writing = false;
 
+  private lastQueueLatencyMs = 0;
+
+  private maxQueueLatencyMs = 0;
+
   private scheduledFlushId: number | null = null;
+
+  private delayedFlushGuardId: number | null = null;
 
   private epoch = 0;
 
   constructor(options: TerminalWriteQueueOptions = {}) {
     this.maxBatchBytes = options.maxBatchBytes ?? DEFAULT_MAX_BATCH_BYTES;
+    this.maxFlushDelayMs = options.maxFlushDelayMs ?? DEFAULT_MAX_FLUSH_DELAY_MS;
     this.scheduleFlush = options.scheduleFlush ?? defaultScheduleFlush;
     this.cancelFlush = options.cancelFlush ?? defaultCancelFlush;
+    this.scheduleTimer = options.scheduleTimer ?? defaultScheduleTimer;
+    this.cancelTimer = options.cancelTimer ?? defaultCancelTimer;
   }
 
   setSink(sink: WriteSink | null) {
     this.sink = sink;
     if (sink) {
       this.scheduleDrain();
+      this.scheduleDelayedFlushGuard();
     }
+  }
+
+  setMaxBatchBytes(maxBatchBytes: number) {
+    if (!Number.isFinite(maxBatchBytes) || maxBatchBytes <= 0) {
+      return;
+    }
+    this.maxBatchBytes = Math.floor(maxBatchBytes);
   }
 
   enqueue(chunk: string) {
@@ -80,12 +126,20 @@ export class TerminalWriteQueue {
       return;
     }
 
-    this.pendingChunks.push(chunk);
+    const nowMs = Date.now();
+    this.pendingChunks.push({
+      chunk,
+      enqueuedAtMs: nowMs
+    });
     this.pendingBytes += chunk.length;
     if (this.pendingBytes > this.highWaterBytes) {
       this.highWaterBytes = this.pendingBytes;
     }
+    if (this.pendingChunks.length > this.highWaterChunks) {
+      this.highWaterChunks = this.pendingChunks.length;
+    }
     this.scheduleDrain();
+    this.scheduleDelayedFlushGuard();
   }
 
   clear() {
@@ -97,12 +151,20 @@ export class TerminalWriteQueue {
       this.cancelFlush(this.scheduledFlushId);
       this.scheduledFlushId = null;
     }
+    if (this.delayedFlushGuardId !== null) {
+      this.cancelTimer(this.delayedFlushGuardId);
+      this.delayedFlushGuardId = null;
+    }
   }
 
   flushImmediate() {
     if (this.scheduledFlushId !== null) {
       this.cancelFlush(this.scheduledFlushId);
       this.scheduledFlushId = null;
+    }
+    if (this.delayedFlushGuardId !== null) {
+      this.cancelTimer(this.delayedFlushGuardId);
+      this.delayedFlushGuardId = null;
     }
     this.drain();
   }
@@ -112,9 +174,13 @@ export class TerminalWriteQueue {
       pendingChunks: this.pendingChunks.length,
       pendingBytes: this.pendingBytes,
       highWaterBytes: this.highWaterBytes,
+      highWaterChunks: this.highWaterChunks,
       totalWrites: this.totalWrites,
       totalBytesWritten: this.totalBytesWritten,
-      writing: this.writing
+      writing: this.writing,
+      lastQueueLatencyMs: this.lastQueueLatencyMs,
+      maxQueueLatencyMs: this.maxQueueLatencyMs,
+      maxFlushDelayMs: this.maxFlushDelayMs
     };
   }
 
@@ -128,6 +194,26 @@ export class TerminalWriteQueue {
     });
   }
 
+  private scheduleDelayedFlushGuard() {
+    if (this.maxFlushDelayMs <= 0) {
+      return;
+    }
+    if (this.delayedFlushGuardId !== null) {
+      return;
+    }
+    this.delayedFlushGuardId = this.scheduleTimer(() => {
+      this.delayedFlushGuardId = null;
+      if (this.pendingChunks.length === 0) {
+        return;
+      }
+      if (this.writing) {
+        this.scheduleDelayedFlushGuard();
+        return;
+      }
+      this.flushImmediate();
+    }, this.maxFlushDelayMs);
+  }
+
   private drain() {
     if (this.writing) {
       return;
@@ -137,6 +223,12 @@ export class TerminalWriteQueue {
     }
     if (this.pendingChunks.length === 0) {
       return;
+    }
+
+    const queueLatencyMs = Math.max(0, Date.now() - this.pendingChunks[0].enqueuedAtMs);
+    this.lastQueueLatencyMs = queueLatencyMs;
+    if (queueLatencyMs > this.maxQueueLatencyMs) {
+      this.maxQueueLatencyMs = queueLatencyMs;
     }
 
     const batch = this.takeBatch();
@@ -155,6 +247,7 @@ export class TerminalWriteQueue {
       this.writing = false;
       if (this.pendingChunks.length > 0) {
         this.scheduleDrain();
+        this.scheduleDelayedFlushGuard();
       }
     });
   }
@@ -168,13 +261,13 @@ export class TerminalWriteQueue {
     const parts: string[] = [];
     while (this.pendingChunks.length > 0) {
       const head = this.pendingChunks[0];
-      if (parts.length > 0 && batchBytes + head.length > this.maxBatchBytes) {
+      if (parts.length > 0 && batchBytes + head.chunk.length > this.maxBatchBytes) {
         break;
       }
-      parts.push(head);
+      parts.push(head.chunk);
       this.pendingChunks.shift();
-      this.pendingBytes -= head.length;
-      batchBytes += head.length;
+      this.pendingBytes -= head.chunk.length;
+      batchBytes += head.chunk.length;
       if (batchBytes >= this.maxBatchBytes) {
         break;
       }

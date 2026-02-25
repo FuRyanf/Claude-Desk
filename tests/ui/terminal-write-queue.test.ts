@@ -35,6 +35,7 @@ describe('TerminalWriteQueue', () => {
     vi.useFakeTimers();
     const queue = new TerminalWriteQueue({
       maxBatchBytes: 2,
+      maxFlushDelayMs: 48,
       scheduleFlush: (flush) => window.setTimeout(flush, 0),
       cancelFlush: (id) => window.clearTimeout(id)
     });
@@ -51,19 +52,69 @@ describe('TerminalWriteQueue', () => {
     queue.enqueue('bb');
     queue.enqueue('cc');
 
-    vi.runOnlyPendingTimers();
-    await Promise.resolve();
-    expect(writes).toEqual(['aa']);
-
-    vi.advanceTimersByTime(5);
-    vi.runOnlyPendingTimers();
-    await Promise.resolve();
-    expect(writes).toEqual(['aa', 'bb']);
-
-    vi.advanceTimersByTime(5);
-    vi.runOnlyPendingTimers();
+    vi.runAllTimers();
     await Promise.resolve();
     expect(writes).toEqual(['aa', 'bb', 'cc']);
+    vi.useRealTimers();
+  });
+
+  it('forces a flush when scheduled frame flush is delayed beyond max latency', async () => {
+    vi.useFakeTimers();
+    const queue = new TerminalWriteQueue({
+      maxBatchBytes: 8,
+      maxFlushDelayMs: 20,
+      scheduleFlush: (flush) => window.setTimeout(flush, 1_000),
+      cancelFlush: (id) => window.clearTimeout(id),
+      scheduleTimer: (flush, delayMs) => window.setTimeout(flush, delayMs),
+      cancelTimer: (id) => window.clearTimeout(id)
+    });
+
+    const writes: string[] = [];
+    queue.setSink({
+      write: (chunk, done) => {
+        writes.push(chunk);
+        done();
+      }
+    });
+
+    queue.enqueue('burst');
+    vi.advanceTimersByTime(19);
+    await Promise.resolve();
+    expect(writes).toEqual([]);
+
+    vi.advanceTimersByTime(1);
+    await Promise.resolve();
+    expect(writes).toEqual(['burst']);
+    expect(queue.getStats().maxQueueLatencyMs).toBeGreaterThanOrEqual(20);
+    vi.useRealTimers();
+  });
+
+  it('supports dynamic batch-size changes without reordering output', async () => {
+    vi.useFakeTimers();
+    const queue = new TerminalWriteQueue({
+      maxBatchBytes: 8,
+      scheduleFlush: (flush) => window.setTimeout(flush, 0),
+      cancelFlush: (id) => window.clearTimeout(id)
+    });
+
+    const writes: string[] = [];
+    queue.setSink({
+      write: (chunk, done) => {
+        writes.push(chunk);
+        done();
+      }
+    });
+
+    queue.enqueue('AAA');
+    queue.enqueue('BBB');
+    queue.enqueue('CCC');
+    queue.setMaxBatchBytes(4);
+
+    vi.runAllTimers();
+    await Promise.resolve();
+
+    expect(writes).toEqual(['AAA', 'BBB', 'CCC']);
+    expect(writes.join('')).toBe('AAABBBCCC');
     vi.useRealTimers();
   });
 });

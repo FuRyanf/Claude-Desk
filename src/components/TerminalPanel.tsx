@@ -15,6 +15,11 @@ import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
 const INPUT_FLUSH_MS = 8;
 const INPUT_CHUNK_SIZE = 4 * 1024;
 const OUTPUT_BATCH_BYTES = 48 * 1024;
+const OUTPUT_BATCH_BYTES_INTERACTIVE = 12 * 1024;
+const OUTPUT_MAX_FLUSH_DELAY_MS = 48;
+const OUTPUT_QUEUE_WARN_PENDING_BYTES = 128 * 1024;
+const OUTPUT_QUEUE_WARN_LATENCY_MS = 96;
+const OUTPUT_QUEUE_WARN_COOLDOWN_MS = 2_000;
 
 interface TerminalPanelProps {
   sessionId?: string | null;
@@ -55,12 +60,18 @@ export function TerminalPanel({
   const previousInputEnabledRef = useRef(inputEnabled);
   const sessionRef = useRef<string | null>(sessionId);
   const followStateRef = useRef(createFollowState());
-  const writeQueueRef = useRef(new TerminalWriteQueue({ maxBatchBytes: OUTPUT_BATCH_BYTES }));
+  const writeQueueRef = useRef(
+    new TerminalWriteQueue({
+      maxBatchBytes: OUTPUT_BATCH_BYTES,
+      maxFlushDelayMs: OUTPUT_MAX_FLUSH_DELAY_MS
+    })
+  );
   const inputBufferRef = useRef('');
   const inputFlushTimerRef = useRef<number | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
   const refreshFrameRef = useRef<number | null>(null);
   const previousFocusRequestRef = useRef(focusRequestId);
+  const lastQueueWarningAtRef = useRef(0);
 
   const scrollToBottomSoon = useCallback((term: Terminal) => {
     if (!shouldAutoFollow(followStateRef.current)) {
@@ -97,6 +108,33 @@ export function TerminalPanel({
         return;
       }
       term.refresh(0, Math.max(0, term.rows - 1));
+    });
+  }, []);
+
+  const maybeLogQueueHealth = useCallback(() => {
+    if (!import.meta.env.DEV) {
+      return;
+    }
+    const stats = writeQueueRef.current.getStats();
+    if (
+      stats.pendingBytes < OUTPUT_QUEUE_WARN_PENDING_BYTES &&
+      stats.lastQueueLatencyMs < OUTPUT_QUEUE_WARN_LATENCY_MS
+    ) {
+      return;
+    }
+    const nowMs = Date.now();
+    if (nowMs - lastQueueWarningAtRef.current < OUTPUT_QUEUE_WARN_COOLDOWN_MS) {
+      return;
+    }
+    lastQueueWarningAtRef.current = nowMs;
+    console.debug('[terminal-write-queue] burst pressure', {
+      pendingBytes: stats.pendingBytes,
+      pendingChunks: stats.pendingChunks,
+      highWaterBytes: stats.highWaterBytes,
+      highWaterChunks: stats.highWaterChunks,
+      lastQueueLatencyMs: stats.lastQueueLatencyMs,
+      maxQueueLatencyMs: stats.maxQueueLatencyMs,
+      maxFlushDelayMs: stats.maxFlushDelayMs
     });
   }, []);
 
@@ -221,6 +259,7 @@ export function TerminalPanel({
               term.scrollToBottom();
             }
             scheduleTerminalRefresh(term);
+            maybeLogQueueHealth();
             done();
           });
         }
@@ -341,10 +380,15 @@ export function TerminalPanel({
   }, [
     fallback,
     flushOutgoingInput,
+    maybeLogQueueHealth,
     queueWrite,
     scrollToBottomSoon,
     scheduleOutgoingInputFlush
   ]);
+
+  useEffect(() => {
+    writeQueueRef.current.setMaxBatchBytes(followOutputPaused ? OUTPUT_BATCH_BYTES_INTERACTIVE : OUTPUT_BATCH_BYTES);
+  }, [followOutputPaused]);
 
   useEffect(() => {
     readOnlyRef.current = readOnly;
