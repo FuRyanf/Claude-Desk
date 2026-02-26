@@ -157,6 +157,7 @@ fn build_terminal_shell_command(
     workspace_kind: WorkspaceKind,
     rdev_ssh_command: Option<&str>,
     ssh_command: Option<&str>,
+    remote_path: Option<&str>,
     claude_shell_command: &str,
 ) -> Result<(String, Option<String>)> {
     if workspace_kind == WorkspaceKind::Local {
@@ -178,14 +179,31 @@ fn build_terminal_shell_command(
             .to_string(),
         WorkspaceKind::Local => unreachable!(),
     };
-    let exec_claude_command = format!("exec {claude_shell_command}");
+    let base_exec_claude_command = format!("exec {claude_shell_command}");
 
     if remote_command.contains("{CLAUDE_CMD}") {
         return Ok((
-            remote_command.replace("{CLAUDE_CMD}", &exec_claude_command),
+            remote_command.replace("{CLAUDE_CMD}", &base_exec_claude_command),
             None,
         ));
     }
+
+    let exec_claude_command = if workspace_kind == WorkspaceKind::Ssh {
+        if let Some(path) = remote_path
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            format!(
+                "cd {} && exec {}",
+                shell_escape_arg(path),
+                claude_shell_command
+            )
+        } else {
+            base_exec_claude_command
+        }
+    } else {
+        base_exec_claude_command
+    };
 
     Ok((remote_command, Some(exec_claude_command)))
 }
@@ -902,6 +920,7 @@ pub async fn terminal_start_session(
         workspace.kind,
         workspace.rdev_ssh_command.as_deref(),
         workspace.ssh_command.as_deref(),
+        workspace.remote_path.as_deref(),
         &claude_shell_command,
     )?;
     let command_manifest = vec![
@@ -1857,6 +1876,7 @@ mod tests {
             WorkspaceKind::Rdev,
             Some("rdev ssh comms-ai-open-connect/offbeat-apple"),
             None,
+            Some("~/projects/ignored-for-rdev"),
             &claude_command,
         )
         .expect("rdev command should build");
@@ -1886,6 +1906,7 @@ mod tests {
             WorkspaceKind::Rdev,
             Some("rdev ssh comms-ai-open-connect/offbeat-apple --tmux"),
             None,
+            Some("~/projects/ignored-for-rdev"),
             &claude_command,
         )
         .expect("rdev command should build");
@@ -1914,6 +1935,7 @@ mod tests {
             WorkspaceKind::Rdev,
             Some("rdev ssh comms-ai-open-connect/offbeat-apple {CLAUDE_CMD}"),
             None,
+            Some("~/projects/ignored-for-rdev"),
             &claude_command,
         )
         .expect("placeholder command should build");
@@ -1937,6 +1959,7 @@ mod tests {
             WorkspaceKind::Ssh,
             None,
             Some("ssh rfu@bloody-faraday"),
+            Some("~/projects/atc"),
             &claude_command,
         )
         .expect("ssh command should build");
@@ -1945,10 +1968,70 @@ mod tests {
         assert_eq!(
             post_connect_command,
             Some(
+                "cd '~/projects/atc' && exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 NO_COLOR= '/usr/local/bin/claude' --session-id '123e4567-e89b-12d3-a456-426614174000'"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn build_terminal_shell_command_for_ssh_skips_cd_when_remote_path_missing_or_empty() {
+        let claude_command = build_claude_shell_command(
+            "/usr/local/bin/claude",
+            "123e4567-e89b-12d3-a456-426614174000",
+            false,
+            false,
+        );
+
+        let (_, without_path) = build_terminal_shell_command(
+            WorkspaceKind::Ssh,
+            None,
+            Some("ssh rfu@bloody-faraday"),
+            None,
+            &claude_command,
+        )
+        .expect("ssh command without path should build");
+        assert_eq!(
+            without_path,
+            Some(
                 "exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 NO_COLOR= '/usr/local/bin/claude' --session-id '123e4567-e89b-12d3-a456-426614174000'"
                     .to_string()
             )
         );
+
+        let (_, with_empty_path) = build_terminal_shell_command(
+            WorkspaceKind::Ssh,
+            None,
+            Some("ssh rfu@bloody-faraday"),
+            Some("   "),
+            &claude_command,
+        )
+        .expect("ssh command with empty path should build");
+        assert_eq!(with_empty_path, without_path);
+    }
+
+    #[test]
+    fn build_terminal_shell_command_for_ssh_placeholder_skips_remote_path_prefix() {
+        let claude_command = build_claude_shell_command(
+            "/usr/local/bin/claude",
+            "123e4567-e89b-12d3-a456-426614174000",
+            false,
+            false,
+        );
+        let (shell_command, post_connect_command) = build_terminal_shell_command(
+            WorkspaceKind::Ssh,
+            None,
+            Some("ssh rfu@bloody-faraday {CLAUDE_CMD}"),
+            Some("~/projects/should-not-be-applied"),
+            &claude_command,
+        )
+        .expect("ssh placeholder command should build");
+
+        assert_eq!(
+            shell_command,
+            "ssh rfu@bloody-faraday exec env TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 NO_COLOR= '/usr/local/bin/claude' --session-id '123e4567-e89b-12d3-a456-426614174000'"
+        );
+        assert_eq!(post_connect_command, None);
     }
 
     #[test]

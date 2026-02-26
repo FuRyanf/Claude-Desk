@@ -605,6 +605,7 @@ export default function App() {
   const [addWorkspacePath, setAddWorkspacePath] = useState('');
   const [addWorkspaceRdevCommand, setAddWorkspaceRdevCommand] = useState('');
   const [addWorkspaceSshCommand, setAddWorkspaceSshCommand] = useState('');
+  const [addWorkspaceSshRemotePath, setAddWorkspaceSshRemotePath] = useState('');
   const [addWorkspaceDisplayName, setAddWorkspaceDisplayName] = useState('');
   const [addWorkspaceError, setAddWorkspaceError] = useState<string | null>(null);
   const [addingWorkspace, setAddingWorkspace] = useState(false);
@@ -1931,13 +1932,17 @@ export default function App() {
   );
 
   const addSshWorkspaceByCommand = useCallback(
-    async (sshCommand: string, displayName: string) => {
+    async (sshCommand: string, displayName: string, remotePath: string) => {
       const command = sshCommand.trim();
       if (!command) {
         throw new Error('Please enter an ssh command.');
       }
 
-      const workspace = await api.addSshWorkspace(command, displayName.trim() || null);
+      const workspace = await api.addSshWorkspace(
+        command,
+        displayName.trim() || null,
+        remotePath.trim() || null
+      );
       setWorkspaces((current) => {
         if (current.some((item) => item.id === workspace.id)) {
           return current;
@@ -1957,6 +1962,7 @@ export default function App() {
     setAddWorkspacePath('');
     setAddWorkspaceRdevCommand('');
     setAddWorkspaceSshCommand('');
+    setAddWorkspaceSshRemotePath('');
     setAddWorkspaceDisplayName('');
     setAddWorkspaceError(null);
     setAddWorkspaceOpen(true);
@@ -1995,11 +2001,13 @@ export default function App() {
       setAddWorkspaceMode('local');
       setAddWorkspacePath(path);
       setAddWorkspaceSshCommand('');
+      setAddWorkspaceSshRemotePath('');
       try {
         await addWorkspaceByPath(path);
         setAddWorkspaceOpen(false);
         setAddWorkspacePath('');
         setAddWorkspaceSshCommand('');
+        setAddWorkspaceSshRemotePath('');
         setAddWorkspaceError(null);
       } catch (error) {
         const message = String(error);
@@ -2019,12 +2027,14 @@ export default function App() {
       setAddWorkspaceMode('rdev');
       setAddWorkspaceRdevCommand(rdevSshCommand);
       setAddWorkspaceSshCommand('');
+      setAddWorkspaceSshRemotePath('');
       setAddWorkspaceDisplayName(displayName);
       try {
         await addRdevWorkspaceByCommand(rdevSshCommand, displayName);
         setAddWorkspaceOpen(false);
         setAddWorkspaceRdevCommand('');
         setAddWorkspaceSshCommand('');
+        setAddWorkspaceSshRemotePath('');
         setAddWorkspaceDisplayName('');
         setAddWorkspaceError(null);
       } catch (error) {
@@ -2039,18 +2049,20 @@ export default function App() {
   );
 
   const confirmSshWorkspace = useCallback(
-    async (sshCommand: string, displayName: string) => {
+    async (sshCommand: string, displayName: string, remotePath: string) => {
       setAddingWorkspace(true);
       setAddWorkspaceError(null);
       setAddWorkspaceMode('ssh');
       setAddWorkspaceRdevCommand('');
       setAddWorkspaceSshCommand(sshCommand);
+      setAddWorkspaceSshRemotePath(remotePath);
       setAddWorkspaceDisplayName(displayName);
       try {
-        await addSshWorkspaceByCommand(sshCommand, displayName);
+        await addSshWorkspaceByCommand(sshCommand, displayName, remotePath);
         setAddWorkspaceOpen(false);
         setAddWorkspaceRdevCommand('');
         setAddWorkspaceSshCommand('');
+        setAddWorkspaceSshRemotePath('');
         setAddWorkspaceDisplayName('');
         setAddWorkspaceError(null);
       } catch (error) {
@@ -3486,6 +3498,7 @@ export default function App() {
         initialPath={addWorkspacePath}
         initialRdevCommand={addWorkspaceRdevCommand}
         initialSshCommand={addWorkspaceSshCommand}
+        initialSshRemotePath={addWorkspaceSshRemotePath}
         initialDisplayName={addWorkspaceDisplayName}
         error={addWorkspaceError}
         saving={addingWorkspace}
@@ -3493,11 +3506,14 @@ export default function App() {
           setAddWorkspaceOpen(false);
           setAddWorkspaceError(null);
           setAddWorkspaceSshCommand('');
+          setAddWorkspaceSshRemotePath('');
         }}
         onPickDirectory={() => void pickWorkspaceDirectory()}
         onConfirmLocal={(path) => void confirmManualWorkspace(path)}
         onConfirmRdev={(command, displayName) => void confirmRdevWorkspace(command, displayName)}
-        onConfirmSsh={(command, displayName) => void confirmSshWorkspace(command, displayName)}
+        onConfirmSsh={(command, displayName, remotePath) =>
+          void confirmSshWorkspace(command, displayName, remotePath)
+        }
       />
 
       <ImportSessionModal

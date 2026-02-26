@@ -273,6 +273,23 @@ export function TerminalPanel({
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
       term.open(host);
+      term.attachCustomKeyEventHandler((event) => {
+        if (
+          event.type === 'keydown' &&
+          event.key === 'Enter' &&
+          event.shiftKey &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.altKey
+        ) {
+          if (!readOnlyRef.current && inputEnabledRef.current) {
+            inputBufferRef.current += '\n';
+            scheduleOutgoingInputFlush();
+          }
+          return false;
+        }
+        return true;
+      });
       terminalRef.current = term;
       writeQueueRef.current.setSink({
         write: (chunk, done) => {

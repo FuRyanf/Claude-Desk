@@ -141,6 +141,7 @@ pub fn add_workspace(path: &str) -> Result<Workspace> {
         kind: WorkspaceKind::Local,
         rdev_ssh_command: None,
         ssh_command: None,
+        remote_path: None,
         git_pull_on_master_for_new_threads: false,
         created_at: now,
         updated_at: now,
@@ -197,6 +198,7 @@ pub fn add_rdev_workspace(rdev_ssh_command: &str, display_name: Option<&str>) ->
         kind: WorkspaceKind::Rdev,
         rdev_ssh_command: Some(normalized_command.to_string()),
         ssh_command: None,
+        remote_path: None,
         git_pull_on_master_for_new_threads: false,
         created_at: now,
         updated_at: now,
@@ -209,7 +211,11 @@ pub fn add_rdev_workspace(rdev_ssh_command: &str, display_name: Option<&str>) ->
     Ok(workspace)
 }
 
-pub fn add_ssh_workspace(ssh_command: &str, display_name: Option<&str>) -> Result<Workspace> {
+pub fn add_ssh_workspace(
+    ssh_command: &str,
+    display_name: Option<&str>,
+    remote_path: Option<&str>,
+) -> Result<Workspace> {
     let normalized_command = ssh_command.trim();
     if normalized_command.is_empty() {
         return Err(anyhow!("Please enter an ssh command."));
@@ -246,6 +252,10 @@ pub fn add_ssh_workspace(ssh_command: &str, display_name: Option<&str>) -> Resul
     } else {
         trimmed_display_name
     };
+    let trimmed_remote_path = remote_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
 
     let workspace = Workspace {
         id: Uuid::new_v4().to_string(),
@@ -254,6 +264,7 @@ pub fn add_ssh_workspace(ssh_command: &str, display_name: Option<&str>) -> Resul
         kind: WorkspaceKind::Ssh,
         rdev_ssh_command: None,
         ssh_command: Some(normalized_command.to_string()),
+        remote_path: trimmed_remote_path,
         git_pull_on_master_for_new_threads: false,
         created_at: now,
         updated_at: now,
@@ -296,6 +307,28 @@ pub fn set_workspace_git_pull_on_master_for_new_threads(
         .find(|workspace| workspace.id == workspace_id)
         .ok_or_else(|| anyhow!("Workspace not found"))?;
     workspace.git_pull_on_master_for_new_threads = enabled;
+    workspace.updated_at = Utc::now();
+    let updated = workspace.clone();
+    save_workspaces(&workspaces)?;
+    Ok(updated)
+}
+
+#[allow(dead_code)]
+pub fn set_workspace_remote_path(
+    workspace_id: &str,
+    remote_path: Option<&str>,
+) -> Result<Workspace> {
+    let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
+    let mut workspaces = load_workspaces()?;
+    let workspace = workspaces
+        .iter_mut()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| anyhow!("Workspace not found"))?;
+
+    workspace.remote_path = remote_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
     workspace.updated_at = Utc::now();
     let updated = workspace.clone();
     save_workspaces(&workspaces)?;
@@ -785,11 +818,15 @@ mod tests {
         ));
         std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
 
-        let added =
-            add_ssh_workspace("ssh rfu@bloody-faraday", Some("bloody-faraday"))
-                .expect("ssh workspace should be added");
+        let added = add_ssh_workspace(
+            "ssh rfu@bloody-faraday",
+            Some("bloody-faraday"),
+            Some("  ~/projects/atc  "),
+        )
+        .expect("ssh workspace should be added");
         assert_eq!(added.kind, WorkspaceKind::Ssh);
         assert_eq!(added.ssh_command.as_deref(), Some("ssh rfu@bloody-faraday"));
+        assert_eq!(added.remote_path.as_deref(), Some("~/projects/atc"));
         assert!(
             added.path.starts_with("ssh-workspace-"),
             "ssh workspace path should use deterministic non-filesystem marker"
@@ -799,6 +836,32 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, added.id);
         assert_eq!(loaded[0].kind, WorkspaceKind::Ssh);
+
+        std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn set_workspace_remote_path_trims_and_clears() {
+        let _guard = test_lock().lock().expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "claude-desk-ssh-remote-path-test-{}",
+            Uuid::new_v4()
+        ));
+        std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
+
+        let added = add_ssh_workspace("ssh rfu@bloody-faraday", Some("bloody-faraday"), None)
+            .expect("ssh workspace should be added");
+        assert!(added.remote_path.is_none());
+
+        let updated = set_workspace_remote_path(&added.id, Some("  ~/projects/foo  "))
+            .expect("should set remote path");
+        assert_eq!(updated.remote_path.as_deref(), Some("~/projects/foo"));
+
+        let cleared = set_workspace_remote_path(&added.id, Some("   "))
+            .expect("should clear remote path");
+        assert!(cleared.remote_path.is_none());
 
         std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
         let _ = fs::remove_dir_all(temp_root);

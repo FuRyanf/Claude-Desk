@@ -102,8 +102,12 @@ fn add_rdev_workspace(
 }
 
 #[tauri::command]
-fn add_ssh_workspace(ssh_command: String, display_name: Option<String>) -> Result<Workspace, String> {
-    storage::add_ssh_workspace(&ssh_command, display_name.as_deref())
+fn add_ssh_workspace(
+    ssh_command: String,
+    display_name: Option<String>,
+    remote_path: Option<String>,
+) -> Result<Workspace, String> {
+    storage::add_ssh_workspace(&ssh_command, display_name.as_deref(), remote_path.as_deref())
         .map_err(|error| error.to_string())
 }
 

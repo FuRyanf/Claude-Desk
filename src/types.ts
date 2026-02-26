@@ -10,6 +10,7 @@ export interface Workspace {
   kind?: WorkspaceKind;
   rdevSshCommand?: string | null;
   sshCommand?: string | null;
+  remotePath?: string | null;
   gitPullOnMasterForNewThreads: boolean;
   createdAt: string;
   updatedAt: string;

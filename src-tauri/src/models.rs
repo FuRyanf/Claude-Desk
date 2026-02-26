@@ -23,6 +23,8 @@ pub struct Workspace {
     #[serde(default)]
     pub ssh_command: Option<String>,
     #[serde(default)]
+    pub remote_path: Option<String>,
+    #[serde(default)]
     pub git_pull_on_master_for_new_threads: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

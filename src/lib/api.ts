@@ -37,8 +37,8 @@ export const api = {
   addWorkspace: (path: string) => invoke<Workspace>('add_workspace', { path }),
   addRdevWorkspace: (rdevSshCommand: string, displayName?: string | null) =>
     invoke<Workspace>('add_rdev_workspace', { rdevSshCommand, displayName }),
-  addSshWorkspace: (sshCommand: string, displayName?: string | null) =>
-    invoke<Workspace>('add_ssh_workspace', { sshCommand, displayName }),
+  addSshWorkspace: (sshCommand: string, displayName?: string | null, remotePath?: string | null) =>
+    invoke<Workspace>('add_ssh_workspace', { sshCommand, displayName, remotePath }),
   removeWorkspace: (workspaceId: string) => invoke<boolean>('remove_workspace', { workspaceId }),
   setWorkspaceOrder: (workspaceIds: string[]) => invoke<Workspace[]>('set_workspace_order', { workspaceIds }),
   setWorkspaceGitPullOnMasterForNewThreads: (workspaceId: string, enabled: boolean) =>

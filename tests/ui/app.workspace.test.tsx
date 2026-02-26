@@ -43,6 +43,7 @@ const mocks = vi.hoisted(() => {
     kind: 'ssh' as const,
     rdevSshCommand: null,
     sshCommand: 'ssh rfu@bloody-faraday',
+    remotePath: '~/projects/atc',
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -390,9 +391,14 @@ describe('Workspace add flow', () => {
     await user.click(screen.getByRole('tab', { name: 'ssh' }));
     await user.type(screen.getByLabelText('ssh command'), 'ssh rfu@bloody-faraday');
     await user.type(screen.getByLabelText('Display name (optional)'), 'bloody-faraday');
+    await user.type(screen.getByLabelText('Remote path (optional)'), '~/projects/atc');
     await user.click(screen.getByRole('button', { name: 'Add ssh project' }));
 
-    expect(mocks.api.addSshWorkspace).toHaveBeenCalledWith('ssh rfu@bloody-faraday', 'bloody-faraday');
+    expect(mocks.api.addSshWorkspace).toHaveBeenCalledWith(
+      'ssh rfu@bloody-faraday',
+      'bloody-faraday',
+      '~/projects/atc'
+    );
     expect(await screen.findByRole('button', { name: /bloody-faraday/i })).toBeInTheDocument();
   });
 

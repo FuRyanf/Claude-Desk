@@ -7,6 +7,7 @@ interface AddWorkspaceModalProps {
   initialPath?: string;
   initialRdevCommand?: string;
   initialSshCommand?: string;
+  initialSshRemotePath?: string;
   initialDisplayName?: string;
   initialMode?: AddWorkspaceMode;
   error?: string | null;
@@ -14,7 +15,7 @@ interface AddWorkspaceModalProps {
   onClose: () => void;
   onConfirmLocal: (path: string) => void;
   onConfirmRdev: (rdevSshCommand: string, displayName: string) => void;
-  onConfirmSsh: (sshCommand: string, displayName: string) => void;
+  onConfirmSsh: (sshCommand: string, displayName: string, remotePath: string) => void;
   onPickDirectory: () => void;
 }
 
@@ -23,6 +24,7 @@ export function AddWorkspaceModal({
   initialPath = '',
   initialRdevCommand = '',
   initialSshCommand = '',
+  initialSshRemotePath = '',
   initialDisplayName = '',
   initialMode = 'local',
   error,
@@ -37,6 +39,7 @@ export function AddWorkspaceModal({
   const [path, setPath] = useState(initialPath);
   const [rdevCommand, setRdevCommand] = useState(initialRdevCommand);
   const [sshCommand, setSshCommand] = useState(initialSshCommand);
+  const [sshRemotePath, setSshRemotePath] = useState(initialSshRemotePath);
   const [displayName, setDisplayName] = useState(initialDisplayName);
 
   useEffect(() => {
@@ -45,9 +48,18 @@ export function AddWorkspaceModal({
       setPath(initialPath);
       setRdevCommand(initialRdevCommand);
       setSshCommand(initialSshCommand);
+      setSshRemotePath(initialSshRemotePath);
       setDisplayName(initialDisplayName);
     }
-  }, [initialDisplayName, initialMode, initialPath, initialRdevCommand, initialSshCommand, open]);
+  }, [
+    initialDisplayName,
+    initialMode,
+    initialPath,
+    initialRdevCommand,
+    initialSshCommand,
+    initialSshRemotePath,
+    open
+  ]);
 
   if (!open) {
     return null;
@@ -157,7 +169,7 @@ export function AddWorkspaceModal({
               onKeyDown={(event) => {
                 if (event.key === 'Enter') {
                   event.preventDefault();
-                  onConfirmSsh(sshCommand.trim(), displayName.trim());
+                  onConfirmSsh(sshCommand.trim(), displayName.trim(), sshRemotePath.trim());
                 }
               }}
               autoFocus
@@ -170,6 +182,21 @@ export function AddWorkspaceModal({
               placeholder="remote-host"
               value={displayName}
               onChange={(event) => setDisplayName(event.target.value)}
+            />
+
+            <label htmlFor="workspace-ssh-remote-path">Remote path (optional)</label>
+            <input
+              id="workspace-ssh-remote-path"
+              type="text"
+              placeholder="~/projects/my-repo"
+              value={sshRemotePath}
+              onChange={(event) => setSshRemotePath(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  onConfirmSsh(sshCommand.trim(), displayName.trim(), sshRemotePath.trim());
+                }
+              }}
             />
           </>
         )}
@@ -192,7 +219,7 @@ export function AddWorkspaceModal({
                 onConfirmRdev(rdevCommand.trim(), displayName.trim());
                 return;
               }
-              onConfirmSsh(sshCommand.trim(), displayName.trim());
+              onConfirmSsh(sshCommand.trim(), displayName.trim(), sshRemotePath.trim());
             }}
             disabled={
               saving ||
