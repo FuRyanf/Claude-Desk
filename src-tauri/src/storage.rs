@@ -484,6 +484,23 @@ pub fn clear_thread_claude_session(workspace_id: &str, thread_id: &str) -> Resul
     })
 }
 
+pub fn set_thread_claude_session_id(
+    workspace_id: &str,
+    thread_id: &str,
+    claude_session_id: &str,
+) -> Result<ThreadMetadata> {
+    let normalized = claude_session_id.trim();
+    mutate_thread_metadata(workspace_id, thread_id, |thread| {
+        thread.claude_session_id = if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized.to_string())
+        };
+        thread.updated_at = Utc::now();
+        Ok(())
+    })
+}
+
 pub fn set_thread_claude_session_id_if_missing(
     workspace_id: &str,
     thread_id: &str,
@@ -903,6 +920,52 @@ mod tests {
 
         let cleared =
             clear_thread_claude_session(&workspace.id, &thread.id).expect("clear should succeed");
+        assert!(cleared.claude_session_id.is_none());
+
+        std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn set_thread_claude_session_id_overwrites_and_trims() {
+        let _guard = test_lock().lock().expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir()
+            .join(format!("claude-desk-force-session-test-{}", Uuid::new_v4()));
+        let workspace_path = temp_root.join("workspace");
+        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
+
+        std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
+
+        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
+            .expect("workspace should be added");
+        let thread = create_thread(&workspace.id, Some("claude-code".to_string()))
+            .expect("thread should be created");
+
+        let updated = set_thread_claude_session_id(
+            &workspace.id,
+            &thread.id,
+            " 123e4567-e89b-12d3-a456-426614174000 ",
+        )
+        .expect("force set should succeed");
+        assert_eq!(
+            updated.claude_session_id.as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174000")
+        );
+
+        let overwritten = set_thread_claude_session_id(
+            &workspace.id,
+            &thread.id,
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        )
+        .expect("overwrite should succeed");
+        assert_eq!(
+            overwritten.claude_session_id.as_deref(),
+            Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        );
+
+        let cleared =
+            set_thread_claude_session_id(&workspace.id, &thread.id, "   ").expect("clear should succeed");
         assert!(cleared.claude_session_id.is_none());
 
         std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");

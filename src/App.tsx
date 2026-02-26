@@ -13,6 +13,7 @@ import { confirm, open } from '@tauri-apps/plugin-dialog';
 
 import './styles.css';
 import { AddWorkspaceModal } from './components/AddWorkspaceModal';
+import { ImportSessionModal } from './components/ImportSessionModal';
 import { BottomBar } from './components/BottomBar';
 import { HeaderBar } from './components/HeaderBar';
 import { LeftRail } from './components/LeftRail';
@@ -607,6 +608,10 @@ export default function App() {
   const [addWorkspaceDisplayName, setAddWorkspaceDisplayName] = useState('');
   const [addWorkspaceError, setAddWorkspaceError] = useState<string | null>(null);
   const [addingWorkspace, setAddingWorkspace] = useState(false);
+
+  const [importSessionWorkspace, setImportSessionWorkspace] = useState<Workspace | null>(null);
+  const [importSessionError, setImportSessionError] = useState<string | null>(null);
+  const [importingSession, setImportingSession] = useState(false);
 
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [appUpdateInfo, setAppUpdateInfo] = useState<AppUpdateInfo | null>(null);
@@ -3059,6 +3064,92 @@ export default function App() {
     [pushToast]
   );
 
+  const copyResumeCommand = useCallback(
+    (thread: ThreadMetadata) => {
+      const sessionId = thread.claudeSessionId?.trim();
+      if (!sessionId) {
+        pushToast('No Claude session ID available — start a session first.', 'error');
+        return;
+      }
+      const command = `claude --resume ${sessionId}`;
+      void navigator.clipboard
+        .writeText(command)
+        .then(() => {
+          pushToast('Resume command copied to clipboard.', 'info');
+        })
+        .catch((error) => {
+          pushToast(`Failed to copy resume command: ${String(error)}`, 'error');
+        });
+    },
+    [pushToast]
+  );
+
+  const copyWorkspaceCommand = useCallback(
+    (workspace: Workspace) => {
+      const command = (
+        workspace.kind === 'rdev' ? workspace.rdevSshCommand : workspace.sshCommand
+      )?.trim();
+      if (!command) {
+        pushToast('No remote command configured for this workspace.', 'error');
+        return;
+      }
+      void navigator.clipboard
+        .writeText(command)
+        .then(() => {
+          pushToast('Remote command copied to clipboard.', 'info');
+        })
+        .catch((error) => {
+          pushToast(`Failed to copy remote command: ${String(error)}`, 'error');
+        });
+    },
+    [pushToast]
+  );
+
+  const onImportSession = useCallback((workspace: Workspace) => {
+    setImportSessionWorkspace(workspace);
+    setImportSessionError(null);
+  }, []);
+
+  const confirmImportSession = useCallback(
+    async (claudeSessionId: string) => {
+      if (!importSessionWorkspace) {
+        return;
+      }
+      setImportingSession(true);
+      setImportSessionError(null);
+      try {
+        const thread = await api.createThread(importSessionWorkspace.id, 'claude-code');
+        const importedThread = await api.setThreadClaudeSessionId(
+          importSessionWorkspace.id,
+          thread.id,
+          claudeSessionId
+        );
+        applyThreadUpdate(importedThread);
+        delete deletedThreadIdsRef.current[importedThread.id];
+        if (selectedWorkspaceIdRef.current !== importSessionWorkspace.id) {
+          setSelectedWorkspace(importSessionWorkspace.id);
+        }
+        setSelectedThread(importedThread.id);
+        setTerminalFocusRequestId((current) => current + 1);
+        await refreshThreadsForWorkspace(importSessionWorkspace.id);
+        setImportSessionWorkspace(null);
+        pushToast('Session imported — opening thread.', 'info');
+      } catch (error) {
+        setImportSessionError(String(error));
+      } finally {
+        setImportingSession(false);
+      }
+    },
+    [
+      applyThreadUpdate,
+      importSessionWorkspace,
+      pushToast,
+      refreshThreadsForWorkspace,
+      setSelectedThread,
+      setSelectedWorkspace
+    ]
+  );
+
   const installLatestUpdate = useCallback(async () => {
     if (installingUpdate) {
       return;
@@ -3227,6 +3318,9 @@ export default function App() {
           Boolean(unreadOutputByThread[threadId]) && hasUnseenThreadOutput(threadId)
         }
         getSearchTextForThread={getSearchTextForThread}
+        onCopyResumeCommand={copyResumeCommand}
+        onCopyWorkspaceCommand={copyWorkspaceCommand}
+        onImportSession={onImportSession}
       />
       <div
         className="sidebar-resizer"
@@ -3404,6 +3498,18 @@ export default function App() {
         onConfirmLocal={(path) => void confirmManualWorkspace(path)}
         onConfirmRdev={(command, displayName) => void confirmRdevWorkspace(command, displayName)}
         onConfirmSsh={(command, displayName) => void confirmSshWorkspace(command, displayName)}
+      />
+
+      <ImportSessionModal
+        open={Boolean(importSessionWorkspace)}
+        workspaceName={importSessionWorkspace?.name ?? ''}
+        error={importSessionError}
+        saving={importingSession}
+        onClose={() => {
+          setImportSessionWorkspace(null);
+          setImportSessionError(null);
+        }}
+        onConfirm={(claudeSessionId) => void confirmImportSession(claudeSessionId)}
       />
 
       {resumeFailureModal ? (

@@ -581,7 +581,8 @@ body.sidebar-resizing {
 .thread-search input,
 .workspace-row select,
 .settings-modal input,
-.add-workspace-modal input {
+.add-workspace-modal input,
+.import-session-modal input {
   width: 100%;
   border: 1px solid rgba(148, 163, 184, 0.34);
   border-radius: 11px;
@@ -593,10 +594,38 @@ body.sidebar-resizing {
   transition: border-color var(--motion-fast), background-color var(--motion-fast), box-shadow var(--motion-fast);
 }
 
+.import-session-modal .import-session-description {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0 0 16px;
+  line-height: 1.5;
+}
+
+.import-session-modal label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.import-session-modal input {
+  margin-bottom: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.import-session-modal input:focus {
+  outline: none;
+  border-color: rgba(123, 157, 255, 0.62);
+  box-shadow: 0 0 0 3px rgba(103, 131, 255, 0.16);
+}
+
 .thread-search input:focus,
 .workspace-row select:focus,
 .settings-modal input:focus,
-.add-workspace-modal input:focus {
+.add-workspace-modal input:focus,
+.import-session-modal input:focus {
   outline: none;
   border-color: rgba(123, 157, 255, 0.62);
   box-shadow: 0 0 0 3px rgba(103, 131, 255, 0.16);

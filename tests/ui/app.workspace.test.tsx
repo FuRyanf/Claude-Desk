@@ -110,6 +110,9 @@ const mocks = vi.hoisted(() => {
     clearThreadClaudeSession: vi.fn(async () => {
       throw new Error('not needed');
     }),
+    setThreadClaudeSessionId: vi.fn(async () => {
+      throw new Error('not needed');
+    }),
     setThreadSkills: vi.fn(async () => {
       throw new Error('not needed');
     }),
@@ -391,5 +394,73 @@ describe('Workspace add flow', () => {
 
     expect(mocks.api.addSshWorkspace).toHaveBeenCalledWith('ssh rfu@bloody-faraday', 'bloody-faraday');
     expect(await screen.findByRole('button', { name: /bloody-faraday/i })).toBeInTheDocument();
+  });
+
+  it('imports a Claude session into a new thread from workspace menu', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
+    const input = await screen.findByLabelText('Manual path');
+    await user.clear(input);
+    await user.type(input, '/tmp/workspace-added');
+    await user.click(screen.getByRole('button', { name: 'Add project' }));
+    const workspaceRow = await screen.findByRole('button', { name: /workspace-added/i });
+
+    const createdThread = {
+      id: 'thread-import',
+      workspaceId: 'ws-added',
+      agentId: 'claude-code',
+      fullAccess: false,
+      enabledSkills: [] as string[],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      title: 'New thread',
+      isArchived: false,
+      lastRunStatus: 'Idle' as const,
+      lastRunStartedAt: null,
+      lastRunEndedAt: null,
+      claudeSessionId: null,
+      lastResumeAt: null,
+      lastNewSessionAt: null
+    };
+    const importedThread = {
+      ...createdThread,
+      claudeSessionId: '123e4567-e89b-12d3-a456-426614174000'
+    };
+
+    mocks.api.createThread.mockResolvedValueOnce(createdThread);
+    mocks.api.setThreadClaudeSessionId.mockResolvedValueOnce(importedThread);
+
+    await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Import session…' }));
+    await user.type(
+      await screen.findByLabelText('Claude session ID'),
+      '123e4567-e89b-12d3-a456-426614174000'
+    );
+    await user.click(screen.getByRole('button', { name: 'Import' }));
+
+    await waitFor(() => {
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-added', 'claude-code');
+      expect(mocks.api.setThreadClaudeSessionId).toHaveBeenCalledWith(
+        'ws-added',
+        'thread-import',
+        '123e4567-e89b-12d3-a456-426614174000'
+      );
+    });
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-import' })
+      );
+    });
+
+    const setCallOrder = mocks.api.setThreadClaudeSessionId.mock.invocationCallOrder[0] ?? 0;
+    const startCallOrder = mocks.api.terminalStartSession.mock.invocationCallOrder.find(
+      (value: number) => value > 0
+    ) ?? 0;
+    expect(setCallOrder).toBeGreaterThan(0);
+    expect(startCallOrder).toBeGreaterThan(0);
+    expect(setCallOrder).toBeLessThan(startCallOrder);
   });
 });

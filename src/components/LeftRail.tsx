@@ -24,6 +24,9 @@ interface LeftRailProps {
   onReorderWorkspaces: (workspaceIds: string[]) => Promise<void>;
   onRemoveWorkspace: (workspace: Workspace) => Promise<void>;
   getSearchTextForThread?: (threadId: string) => string;
+  onCopyResumeCommand: (thread: ThreadMetadata) => void;
+  onCopyWorkspaceCommand: (workspace: Workspace) => void;
+  onImportSession: (workspace: Workspace) => void;
 }
 
 interface ThreadContextMenuState {
@@ -39,8 +42,8 @@ interface WorkspaceContextMenuState {
 }
 
 const CONTEXT_MENU_WIDTH = 220;
-const THREAD_CONTEXT_MENU_HEIGHT = 116;
-const WORKSPACE_CONTEXT_MENU_HEIGHT = 214;
+const THREAD_CONTEXT_MENU_HEIGHT = 152;
+const WORKSPACE_CONTEXT_MENU_HEIGHT = 250;
 const CONTEXT_MENU_MARGIN = 8;
 
 function isRemoteWorkspaceKind(kind: Workspace['kind']): boolean {
@@ -364,7 +367,10 @@ function LeftRailComponent({
   onSetWorkspaceGitPullOnMasterForNewThreads,
   onReorderWorkspaces,
   onRemoveWorkspace,
-  getSearchTextForThread
+  getSearchTextForThread,
+  onCopyResumeCommand,
+  onCopyWorkspaceCommand,
+  onImportSession
 }: LeftRailProps) {
   const [editingThreadId, setEditingThreadId] = React.useState<string | null>(null);
   const [editingValue, setEditingValue] = React.useState('');
@@ -753,6 +759,15 @@ function LeftRailComponent({
           </button>
           <button
             type="button"
+            onClick={() => {
+              onCopyResumeCommand(contextMenu.thread);
+              setContextMenu(null);
+            }}
+          >
+            Copy resume command
+          </button>
+          <button
+            type="button"
             className="danger"
             onClick={async () => {
               setContextMenu(null);
@@ -789,6 +804,17 @@ function LeftRailComponent({
           >
             {isRemoteWorkspaceKind(workspaceContextMenu.workspace.kind) ? 'Open remote shell' : 'Open terminal'}
           </button>
+          {isRemoteWorkspaceKind(workspaceContextMenu.workspace.kind) && (
+            <button
+              type="button"
+              onClick={() => {
+                onCopyWorkspaceCommand(workspaceContextMenu.workspace);
+                setWorkspaceContextMenu(null);
+              }}
+            >
+              Copy {workspaceContextMenu.workspace.kind === 'rdev' ? 'rdev' : 'SSH'} command
+            </button>
+          )}
           {workspaceContextMenu.workspace.kind === 'local' ? (
             <button
               type="button"
@@ -804,6 +830,16 @@ function LeftRailComponent({
                 : 'Enable git pull on master for new threads'}
             </button>
           ) : null}
+          <button
+            type="button"
+            onClick={() => {
+              const workspace = workspaceContextMenu.workspace;
+              setWorkspaceContextMenu(null);
+              onImportSession(workspace);
+            }}
+          >
+            Import session…
+          </button>
           <div className="thread-context-divider" />
           <button
             type="button"

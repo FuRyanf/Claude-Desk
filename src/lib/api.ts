@@ -71,6 +71,8 @@ export const api = {
     invoke<ThreadMetadata>('set_thread_full_access', { workspaceId, threadId, fullAccess }),
   clearThreadClaudeSession: (workspaceId: string, threadId: string) =>
     invoke<ThreadMetadata>('clear_thread_claude_session', { workspaceId, threadId }),
+  setThreadClaudeSessionId: (workspaceId: string, threadId: string, claudeSessionId: string) =>
+    invoke<ThreadMetadata>('set_thread_claude_session_id', { workspaceId, threadId, claudeSessionId }),
   setThreadSkills: (workspaceId: string, threadId: string, enabledSkills: string[]) =>
     invoke<ThreadMetadata>('set_thread_skills', { workspaceId, threadId, enabledSkills }),
   setThreadAgent: (workspaceId: string, threadId: string, agentId: string) =>
