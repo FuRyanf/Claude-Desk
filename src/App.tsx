@@ -632,6 +632,8 @@ export default function App() {
   const lastTerminalLogByThreadRef = useRef<Record<string, string>>({});
   const workingStopTimerByThreadRef = useRef<Record<string, number>>({});
   const pendingTerminalChunksByThreadRef = useRef<Record<string, string>>({});
+  const terminalLogByteCountByThreadRef = useRef<Record<string, number>>({});
+  const terminalLogGenerationByThreadRef = useRef<Record<string, number>>({});
   const terminalLogFlushHandleRef = useRef<number | null>(null);
   const terminalLogFlushUsesAnimationFrameRef = useRef(false);
   const draftAttachmentsByThreadRef = useRef<Record<string, string[]>>({});
@@ -701,6 +703,18 @@ export default function App() {
     }
     return lastTerminalLogByThread[selectedThreadId] ?? '';
   }, [lastTerminalLogByThread, selectedThreadId]);
+  const selectedTerminalContentByteCount = useMemo(() => {
+    if (!selectedThreadId) {
+      return 0;
+    }
+    return terminalLogByteCountByThreadRef.current[selectedThreadId] ?? selectedTerminalContent.length;
+  }, [selectedTerminalContent, selectedThreadId]);
+  const selectedTerminalContentGeneration = useMemo(() => {
+    if (!selectedThreadId) {
+      return 0;
+    }
+    return terminalLogGenerationByThreadRef.current[selectedThreadId] ?? 0;
+  }, [selectedTerminalContent, selectedThreadId]);
   const hasSelectedTerminalContent = selectedTerminalContent.length > 0;
 
   const selectedThreadDraftAttachments = useMemo(() => {
@@ -919,13 +933,72 @@ export default function App() {
   }, [refreshAppUpdateInfo]);
 
   const updateTerminalLogMap = useCallback(
-    (updater: (current: Record<string, string>) => Record<string, string>): Record<string, string> => {
+    (
+      updater: (current: Record<string, string>) => Record<string, string>,
+      options?: {
+        mode?: 'snapshot' | 'append';
+        appendBytesByThread?: Record<string, number>;
+      }
+    ): Record<string, string> => {
+      const mode = options?.mode ?? 'snapshot';
+      const appendBytesByThread = options?.appendBytesByThread ?? {};
       const current = lastTerminalLogByThreadRef.current;
       const next = updater(current);
       if (next === current) {
+        if (mode === 'append' && Object.keys(appendBytesByThread).length > 0) {
+          const nextByteCounts = { ...terminalLogByteCountByThreadRef.current };
+          let changed = false;
+          for (const [threadId, appendedBytes] of Object.entries(appendBytesByThread)) {
+            if (appendedBytes <= 0) {
+              continue;
+            }
+            const previous = nextByteCounts[threadId] ?? (current[threadId] ?? '').length;
+            const updated = previous + appendedBytes;
+            if (updated === previous) {
+              continue;
+            }
+            nextByteCounts[threadId] = updated;
+            changed = true;
+          }
+          if (changed) {
+            terminalLogByteCountByThreadRef.current = nextByteCounts;
+          }
+        }
         return current;
       }
+
+      const nextByteCounts = { ...terminalLogByteCountByThreadRef.current };
+      const nextGenerations = { ...terminalLogGenerationByThreadRef.current };
+      const threadIds = new Set([...Object.keys(current), ...Object.keys(next)]);
+      for (const threadId of threadIds) {
+        const previousText = current[threadId];
+        const nextText = next[threadId];
+        if ((previousText ?? '') === (nextText ?? '')) {
+          continue;
+        }
+
+        if (mode === 'append') {
+          const appendedBytes = appendBytesByThread[threadId] ?? 0;
+          const previousCount = nextByteCounts[threadId] ?? (previousText ?? '').length;
+          nextByteCounts[threadId] = previousCount + appendedBytes;
+          if (!(threadId in nextGenerations)) {
+            nextGenerations[threadId] = 0;
+          }
+          continue;
+        }
+
+        if (typeof nextText === 'string') {
+          nextByteCounts[threadId] = nextText.length;
+          nextGenerations[threadId] = (nextGenerations[threadId] ?? 0) + 1;
+        } else {
+          delete nextByteCounts[threadId];
+          delete nextGenerations[threadId];
+        }
+      }
+
       lastTerminalLogByThreadRef.current = next;
+      terminalLogByteCountByThreadRef.current = nextByteCounts;
+      terminalLogGenerationByThreadRef.current = nextGenerations;
       setLastTerminalLogByThread(next);
       return next;
     },
@@ -940,6 +1013,13 @@ export default function App() {
     }
 
     pendingTerminalChunksByThreadRef.current = {};
+    const appendBytesByThread: Record<string, number> = {};
+    for (const [threadId, chunk] of entries) {
+      if (!chunk) {
+        continue;
+      }
+      appendBytesByThread[threadId] = (appendBytesByThread[threadId] ?? 0) + chunk.length;
+    }
     updateTerminalLogMap((current) => {
       let next = current;
       for (const [threadId, chunk] of entries) {
@@ -958,7 +1038,7 @@ export default function App() {
         next[threadId] = clamped;
       }
       return next;
-    });
+    }, { mode: 'append', appendBytesByThread });
   }, [updateTerminalLogMap]);
 
   const cancelScheduledTerminalLogFlush = useCallback(() => {
@@ -3192,6 +3272,8 @@ export default function App() {
             <TerminalPanel
               sessionId={selectedSessionId}
               content={selectedTerminalContent}
+              contentByteCount={selectedTerminalContentByteCount}
+              contentGeneration={selectedTerminalContentGeneration}
               contentLimitChars={TERMINAL_LOG_BUFFER_CHARS}
               readOnly={false}
               inputEnabled={Boolean(selectedSessionId) && isSelectedThreadReady && !isSelectedThreadStarting}

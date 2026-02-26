@@ -27,7 +27,7 @@ export interface TerminalWriteQueueStats {
   maxFlushDelayMs: number;
 }
 
-const DEFAULT_MAX_BATCH_BYTES = 48 * 1024;
+const DEFAULT_MAX_BATCH_BYTES = 16 * 1024;
 const DEFAULT_MAX_FLUSH_DELAY_MS = 48;
 
 function defaultScheduleFlush(flush: () => void): number {

@@ -42,6 +42,41 @@ describe('resolveTerminalContentUpdate', () => {
     });
   });
 
+  it('uses byte-cursor append fast path when generation is stable', () => {
+    expect(
+      resolveTerminalContentUpdate({
+        rendered: 'suffix-before',
+        content: 'before-and-after',
+        sessionId: 'session-1',
+        readOnly: false,
+        contentByteCount: 104,
+        renderedByteCount: 96,
+        contentGeneration: 7,
+        renderedGeneration: 7
+      })
+    ).toEqual({
+      kind: 'append',
+      delta: 'nd-after'
+    });
+  });
+
+  it('does not use byte-cursor append when generation changed', () => {
+    expect(
+      resolveTerminalContentUpdate({
+        rendered: 'suffix-before',
+        content: 'before-and-after',
+        sessionId: 'session-1',
+        readOnly: false,
+        contentByteCount: 104,
+        renderedByteCount: 96,
+        contentGeneration: 8,
+        renderedGeneration: 7
+      })
+    ).toEqual({
+      kind: 'reset'
+    });
+  });
+
   it('avoids reset loops across many clamp rollovers in long streams', () => {
     const limit = 64;
     const chunks = ['--tick1--', '--tick2--', '--tick3--', '--tick4--', '--tick5--'];

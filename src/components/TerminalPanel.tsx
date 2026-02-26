@@ -15,8 +15,8 @@ import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
 
 const INPUT_FLUSH_MS = 8;
 const INPUT_CHUNK_SIZE = 4 * 1024;
-const OUTPUT_BATCH_BYTES = 48 * 1024;
-const OUTPUT_BATCH_BYTES_INTERACTIVE = 12 * 1024;
+const OUTPUT_BATCH_BYTES = 16 * 1024;
+const OUTPUT_BATCH_BYTES_INTERACTIVE = 8 * 1024;
 const OUTPUT_MAX_FLUSH_DELAY_MS = 48;
 const OUTPUT_QUEUE_WARN_PENDING_BYTES = 128 * 1024;
 const OUTPUT_QUEUE_WARN_LATENCY_MS = 96;
@@ -25,6 +25,8 @@ const OUTPUT_QUEUE_WARN_COOLDOWN_MS = 2_000;
 interface TerminalPanelProps {
   sessionId?: string | null;
   content: string;
+  contentByteCount?: number;
+  contentGeneration?: number;
   contentLimitChars?: number;
   readOnly?: boolean;
   inputEnabled?: boolean;
@@ -38,6 +40,8 @@ interface TerminalPanelProps {
 export function TerminalPanel({
   sessionId = null,
   content,
+  contentByteCount,
+  contentGeneration,
   contentLimitChars,
   readOnly = false,
   inputEnabled = true,
@@ -53,6 +57,8 @@ export function TerminalPanel({
   const terminalRef = useRef<Terminal | null>(null);
   const contentRef = useRef(content);
   const renderedContentRef = useRef(content);
+  const renderedByteCountRef = useRef(contentByteCount ?? content.length);
+  const renderedGenerationRef = useRef(contentGeneration ?? 0);
   const onDataRef = useRef(onData);
   const onResizeRef = useRef(onResize);
   const onFocusChangeRef = useRef(onFocusChange);
@@ -300,6 +306,8 @@ export function TerminalPanel({
         writeQueueRef.current.flushImmediate();
       }
       renderedContentRef.current = contentRef.current;
+      renderedByteCountRef.current = contentByteCount ?? contentRef.current.length;
+      renderedGenerationRef.current = contentGeneration ?? 0;
 
       const onDataDisposable = term.onData((data) => {
         if (readOnlyRef.current || !inputEnabledRef.current) {
@@ -451,6 +459,8 @@ export function TerminalPanel({
 
     resetTerminalContent(contentRef.current);
     renderedContentRef.current = contentRef.current;
+    renderedByteCountRef.current = contentByteCount ?? contentRef.current.length;
+    renderedGenerationRef.current = contentGeneration ?? 0;
     scheduleTerminalRefresh(term);
   }, [clearPendingWrites, resetTerminalContent, scheduleTerminalRefresh, sessionId]);
 
@@ -466,7 +476,11 @@ export function TerminalPanel({
       content,
       sessionId,
       readOnly,
-      contentLimitChars
+      contentLimitChars,
+      contentByteCount,
+      renderedByteCount: renderedByteCountRef.current,
+      contentGeneration,
+      renderedGeneration: renderedGenerationRef.current
     });
 
     if (nextUpdate.kind === 'none') {
@@ -475,6 +489,8 @@ export function TerminalPanel({
         // (e.g. prepended snapshot history before already-rendered live tail). This prevents
         // repeated reset classifications on subsequent appends.
         renderedContentRef.current = content;
+        renderedByteCountRef.current = contentByteCount ?? content.length;
+        renderedGenerationRef.current = contentGeneration ?? renderedGenerationRef.current;
       }
       return;
     }
@@ -484,6 +500,8 @@ export function TerminalPanel({
         queueWrite(nextUpdate.delta);
       }
       renderedContentRef.current = content;
+      renderedByteCountRef.current = contentByteCount ?? content.length;
+      renderedGenerationRef.current = contentGeneration ?? renderedGenerationRef.current;
       if (shouldAutoFollow(followStateRef.current)) {
         scrollToBottomSoon(term);
       }
@@ -498,9 +516,13 @@ export function TerminalPanel({
 
     resetTerminalContent(content);
     renderedContentRef.current = content;
+    renderedByteCountRef.current = contentByteCount ?? content.length;
+    renderedGenerationRef.current = contentGeneration ?? renderedGenerationRef.current;
     scheduleTerminalRefresh(term);
   }, [
     content,
+    contentByteCount,
+    contentGeneration,
     contentLimitChars,
     readOnly,
     resetTerminalContent,

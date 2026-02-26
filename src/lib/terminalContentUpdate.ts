@@ -13,6 +13,10 @@ interface ResolveTerminalContentUpdateParams {
   sessionId: string | null | undefined;
   readOnly: boolean;
   contentLimitChars?: number;
+  contentByteCount?: number;
+  renderedByteCount?: number;
+  contentGeneration?: number;
+  renderedGeneration?: number;
 }
 
 export function resolveTerminalContentUpdate({
@@ -20,13 +24,37 @@ export function resolveTerminalContentUpdate({
   content,
   sessionId,
   readOnly,
-  contentLimitChars
+  contentLimitChars,
+  contentByteCount,
+  renderedByteCount,
+  contentGeneration,
+  renderedGeneration
 }: ResolveTerminalContentUpdateParams): TerminalContentUpdate {
   if (content === rendered) {
     return { kind: 'none' };
   }
 
   const canApplyLiveDelta = !readOnly && Boolean(sessionId);
+  const canUseByteCursor =
+    canApplyLiveDelta &&
+    typeof contentByteCount === 'number' &&
+    typeof renderedByteCount === 'number' &&
+    typeof contentGeneration === 'number' &&
+    typeof renderedGeneration === 'number' &&
+    Number.isFinite(contentByteCount) &&
+    Number.isFinite(renderedByteCount) &&
+    contentGeneration === renderedGeneration;
+
+  if (canUseByteCursor) {
+    const byteDelta = contentByteCount - renderedByteCount;
+    if (byteDelta > 0 && byteDelta <= content.length) {
+      return {
+        kind: 'append',
+        delta: content.slice(content.length - byteDelta)
+      };
+    }
+  }
+
   if (canApplyLiveDelta && content.length > rendered.length && content.startsWith(rendered)) {
     return {
       kind: 'append',
