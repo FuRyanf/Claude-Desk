@@ -117,4 +117,41 @@ describe('TerminalWriteQueue', () => {
     expect(writes.join('')).toBe('AAABBBCCC');
     vi.useRealTimers();
   });
+
+  it('resolves whenIdle after queued async writes complete', async () => {
+    vi.useFakeTimers();
+    const queue = new TerminalWriteQueue({
+      maxBatchBytes: 16,
+      scheduleFlush: (flush) => window.setTimeout(flush, 0),
+      cancelFlush: (id) => window.clearTimeout(id)
+    });
+
+    const writes: string[] = [];
+    queue.setSink({
+      write: (chunk, done) => {
+        writes.push(chunk);
+        window.setTimeout(done, 10);
+      }
+    });
+
+    queue.enqueue('A');
+    queue.enqueue('B');
+    const idlePromise = queue.whenIdle();
+
+    vi.advanceTimersByTime(9);
+    await Promise.resolve();
+    expect(writes).toEqual(['AB']);
+
+    let settled = false;
+    void idlePromise.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    vi.advanceTimersByTime(1);
+    await Promise.resolve();
+    expect(settled).toBe(true);
+    vi.useRealTimers();
+  });
 });

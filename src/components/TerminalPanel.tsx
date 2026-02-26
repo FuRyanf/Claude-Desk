@@ -79,6 +79,8 @@ export function TerminalPanel({
   const refreshFrameRef = useRef<number | null>(null);
   const previousFocusRequestRef = useRef(focusRequestId);
   const lastQueueWarningAtRef = useRef(0);
+  const bulkWritingRef = useRef(false);
+  const bulkWriteEpochRef = useRef(0);
 
   const scrollToBottomSoon = useCallback((term: Terminal) => {
     if (!shouldAutoFollow(followStateRef.current)) {
@@ -182,18 +184,31 @@ export function TerminalPanel({
         return;
       }
 
-      const shouldFollowOutput = shouldAutoFollow(followStateRef.current);
+      const bulkWriteEpoch = bulkWriteEpochRef.current + 1;
+      bulkWriteEpochRef.current = bulkWriteEpoch;
+      bulkWritingRef.current = true;
       clearPendingWrites();
       term.reset();
       if (nextContent.length > 0) {
         queueWrite(nextContent);
         writeQueueRef.current.flushImmediate();
       }
-      if (shouldFollowOutput) {
+
+      void writeQueueRef.current.whenIdle().then(() => {
+        if (terminalRef.current !== term) {
+          return;
+        }
+        if (bulkWriteEpochRef.current !== bulkWriteEpoch) {
+          return;
+        }
+        bulkWritingRef.current = false;
+        followStateRef.current = createFollowState();
+        setFollowOutputPaused(false);
         scrollToBottomSoon(term);
-      }
+        scheduleTerminalRefresh(term);
+      });
     },
-    [clearPendingWrites, queueWrite, scrollToBottomSoon]
+    [clearPendingWrites, queueWrite, scheduleTerminalRefresh, scrollToBottomSoon]
   );
 
   useEffect(() => {
@@ -331,6 +346,14 @@ export function TerminalPanel({
       });
 
       const onScrollDisposable = term.onScroll((viewportY) => {
+        if (bulkWritingRef.current) {
+          followStateRef.current = {
+            ...followStateRef.current,
+            viewportY,
+            baseY: term.buffer.active.baseY
+          };
+          return;
+        }
         const next = handleTerminalScroll(followStateRef.current, {
           viewportY,
           baseY: term.buffer.active.baseY
@@ -373,6 +396,8 @@ export function TerminalPanel({
         fitAddon.dispose();
         writeQueueRef.current.setSink(null);
         writeQueueRef.current.clear();
+        bulkWritingRef.current = false;
+        bulkWriteEpochRef.current += 1;
         term.dispose();
         terminalRef.current = null;
         followStateRef.current = createFollowState();

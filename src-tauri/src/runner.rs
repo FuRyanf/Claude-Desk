@@ -846,11 +846,9 @@ pub async fn terminal_start_session(
         .claude_session_id
         .clone()
         .filter(|session_id| is_uuid_like(session_id));
-    let mut recovered_from_logs = false;
     if launch_session_id.is_none() {
         if let Some(recovered) = recover_session_id_from_logs(&workspace_id, &thread_id) {
             launch_session_id = Some(recovered);
-            recovered_from_logs = true;
         }
     }
     let generated_session_id = if launch_session_id.is_none() {
@@ -861,16 +859,12 @@ pub async fn terminal_start_session(
     };
     thread.claude_session_id = launch_session_id.clone();
 
-    let has_prior_launch = thread.last_new_session_at.is_some() || thread.last_resume_at.is_some();
     let session_mode = if generated_session_id {
         thread.last_new_session_at = Some(started_at);
         TerminalSessionMode::New
-    } else if recovered_from_logs || has_prior_launch {
+    } else {
         thread.last_resume_at = Some(started_at);
         TerminalSessionMode::Resumed
-    } else {
-        thread.last_new_session_at = Some(started_at);
-        TerminalSessionMode::New
     };
     let launch_session_id =
         launch_session_id.ok_or_else(|| anyhow!("Missing Claude session id"))?;

@@ -97,6 +97,8 @@ export class TerminalWriteQueue {
 
   private epoch = 0;
 
+  private idleResolvers: Array<() => void> = [];
+
   constructor(options: TerminalWriteQueueOptions = {}) {
     this.maxBatchBytes = options.maxBatchBytes ?? DEFAULT_MAX_BATCH_BYTES;
     this.maxFlushDelayMs = options.maxFlushDelayMs ?? DEFAULT_MAX_FLUSH_DELAY_MS;
@@ -155,6 +157,7 @@ export class TerminalWriteQueue {
       this.cancelTimer(this.delayedFlushGuardId);
       this.delayedFlushGuardId = null;
     }
+    this.resolveIdleWaiters();
   }
 
   flushImmediate() {
@@ -167,6 +170,15 @@ export class TerminalWriteQueue {
       this.delayedFlushGuardId = null;
     }
     this.drain();
+  }
+
+  whenIdle(): Promise<void> {
+    if (!this.writing && this.pendingChunks.length === 0) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.idleResolvers.push(resolve);
+    });
   }
 
   getStats(): TerminalWriteQueueStats {
@@ -222,6 +234,7 @@ export class TerminalWriteQueue {
       return;
     }
     if (this.pendingChunks.length === 0) {
+      this.resolveIdleWaiters();
       return;
     }
 
@@ -248,8 +261,23 @@ export class TerminalWriteQueue {
       if (this.pendingChunks.length > 0) {
         this.scheduleDrain();
         this.scheduleDelayedFlushGuard();
+        return;
       }
+      this.resolveIdleWaiters();
     });
+  }
+
+  private resolveIdleWaiters() {
+    if (this.writing || this.pendingChunks.length > 0) {
+      return;
+    }
+    if (this.idleResolvers.length === 0) {
+      return;
+    }
+    const resolvers = this.idleResolvers.splice(0, this.idleResolvers.length);
+    for (const resolve of resolvers) {
+      resolve();
+    }
   }
 
   private takeBatch(): string {
