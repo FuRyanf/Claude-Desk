@@ -5,6 +5,8 @@ export type TerminalContentUpdate =
   | { kind: 'append'; delta: string }
   | { kind: 'reset' };
 
+const PREPENDED_HISTORY_SUFFIX_MIN_CHARS = 32;
+
 interface ResolveTerminalContentUpdateParams {
   rendered: string;
   content: string;
@@ -32,11 +34,28 @@ export function resolveTerminalContentUpdate({
     };
   }
 
+  if (
+    canApplyLiveDelta &&
+    content.length > rendered.length &&
+    rendered.length >= PREPENDED_HISTORY_SUFFIX_MIN_CHARS &&
+    /[\r\n]/.test(rendered) &&
+    content.endsWith(rendered)
+  ) {
+    // Snapshot refresh appended history before an already-rendered live tail.
+    // Avoid destructive reset and keep the live terminal buffer authoritative.
+    return { kind: 'none' };
+  }
+
   const limit = contentLimitChars ?? 0;
+  if (canApplyLiveDelta && limit > 0 && rendered.length > content.length && rendered.endsWith(content)) {
+    // Clamp trimmed older prefix text from cache; terminal already contains this tail.
+    return { kind: 'none' };
+  }
+
   if (canApplyLiveDelta && limit > 0 && rendered.length >= limit && content.length === limit) {
-    const overlap = findSuffixPrefixOverlap(rendered, content);
-    if (overlap > 0) {
-      const delta = content.slice(overlap);
+    const limitOverlap = findSuffixPrefixOverlap(rendered, content);
+    if (limitOverlap > 0) {
+      const delta = content.slice(limitOverlap);
       if (delta.length > 0) {
         return {
           kind: 'append',

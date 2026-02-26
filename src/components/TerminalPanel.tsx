@@ -8,6 +8,7 @@ import {
   createFollowState,
   handleTerminalScroll,
   jumpToLatest as jumpFollowStateToLatest,
+  pauseFollowByUser,
   shouldAutoFollow
 } from '../lib/terminalFollowState';
 import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
@@ -89,13 +90,13 @@ export function TerminalPanel({
     });
   }, []);
 
-  const resumeFollowOutput = useCallback(() => {
-    const current = followStateRef.current;
-    followStateRef.current = {
-      ...current,
-      mode: 'following'
-    };
-    setFollowOutputPaused((current) => (current ? false : current));
+  const pauseFollowOutput = useCallback(() => {
+    const next = pauseFollowByUser(followStateRef.current);
+    if (next === followStateRef.current) {
+      return;
+    }
+    followStateRef.current = next;
+    setFollowOutputPaused(true);
   }, []);
 
   const scheduleTerminalRefresh = useCallback((term: Terminal) => {
@@ -330,6 +331,13 @@ export function TerminalPanel({
         setFollowOutputPaused(next.mode === 'pausedByUser');
       });
 
+      const onWheel = (event: WheelEvent) => {
+        if (event.deltaY < 0) {
+          pauseFollowOutput();
+        }
+      };
+      host.addEventListener('wheel', onWheel, { passive: true });
+
       const onFocusIn = () => onFocusChangeRef.current?.(true);
       const onFocusOut = () => onFocusChangeRef.current?.(false);
       host.addEventListener('focusin', onFocusIn);
@@ -350,6 +358,7 @@ export function TerminalPanel({
         observer.disconnect();
         onDataDisposable.dispose();
         onScrollDisposable.dispose();
+        host.removeEventListener('wheel', onWheel);
         host.removeEventListener('focusin', onFocusIn);
         host.removeEventListener('focusout', onFocusOut);
         flushOutgoingInput();
@@ -381,6 +390,7 @@ export function TerminalPanel({
     fallback,
     flushOutgoingInput,
     maybeLogQueueHealth,
+    pauseFollowOutput,
     queueWrite,
     scrollToBottomSoon,
     scheduleOutgoingInputFlush
@@ -407,6 +417,9 @@ export function TerminalPanel({
       scrollToBottomSoon(term);
       window.setTimeout(() => {
         if (terminalRef.current !== term) {
+          return;
+        }
+        if (!shouldAutoFollow(followStateRef.current)) {
           return;
         }
         term.scrollToBottom();
@@ -457,6 +470,12 @@ export function TerminalPanel({
     });
 
     if (nextUpdate.kind === 'none') {
+      if (content !== rendered) {
+        // Keep the logical rendered anchor in sync when we intentionally skip destructive resets
+        // (e.g. prepended snapshot history before already-rendered live tail). This prevents
+        // repeated reset classifications on subsequent appends.
+        renderedContentRef.current = content;
+      }
       return;
     }
 
@@ -468,6 +487,12 @@ export function TerminalPanel({
       if (shouldAutoFollow(followStateRef.current)) {
         scrollToBottomSoon(term);
       }
+      return;
+    }
+
+    if (sessionId && !readOnly && content.length < rendered.length) {
+      // Ignore regressive snapshots while a live session is active.
+      // Allow resets for divergent/superset content so renderedContentRef can recover.
       return;
     }
 
@@ -495,10 +520,12 @@ export function TerminalPanel({
       return;
     }
     term.focus();
-    resumeFollowOutput();
-    scrollToBottomSoon(term);
+    if (shouldAutoFollow(followStateRef.current)) {
+      scrollToBottomSoon(term);
+    }
+    setFollowOutputPaused(followStateRef.current.mode === 'pausedByUser');
     scheduleTerminalRefresh(term);
-  }, [focusRequestId, resumeFollowOutput, scheduleTerminalRefresh, scrollToBottomSoon]);
+  }, [focusRequestId, scheduleTerminalRefresh, scrollToBottomSoon]);
 
   const jumpToLatest = useCallback(() => {
     const term = terminalRef.current;

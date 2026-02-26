@@ -701,6 +701,7 @@ export default function App() {
     }
     return lastTerminalLogByThread[selectedThreadId] ?? '';
   }, [lastTerminalLogByThread, selectedThreadId]);
+  const hasSelectedTerminalContent = selectedTerminalContent.length > 0;
 
   const selectedThreadDraftAttachments = useMemo(() => {
     if (!selectedThreadId) {
@@ -1302,6 +1303,18 @@ export default function App() {
             if (!snapshot) {
               return;
             }
+            if (activeRunsByThreadRef.current[threadId]?.sessionId !== sessionId) {
+              return;
+            }
+            if (selectedThreadIdRef.current !== threadId) {
+              return;
+            }
+            if (liveDataSeenBySessionRef.current[sessionId]) {
+              return;
+            }
+            if (pendingSnapshotBySessionRef.current[sessionId]?.threadId === threadId) {
+              return;
+            }
 
             updateTerminalLogMap((current) => {
               const existing = current[threadId] ?? '';
@@ -1357,6 +1370,7 @@ export default function App() {
         if (snapshot && snapshot.length > 0) {
           let settledSnapshot = snapshot;
           let stableReads = 0;
+          let divergentReads = 0;
           for (let settleAttempt = 0; settleAttempt < 6; settleAttempt += 1) {
             if (!isHydrationPending()) {
               return;
@@ -1379,6 +1393,14 @@ export default function App() {
               if (candidate.length >= settledSnapshot.length || candidate.includes(settledSnapshot)) {
                 settledSnapshot = candidate;
                 stableReads = 0;
+                divergentReads = 0;
+                continue;
+              }
+              divergentReads += 1;
+              if (divergentReads >= 2) {
+                settledSnapshot = candidate;
+                stableReads = 0;
+                divergentReads = 0;
                 continue;
               }
             }
@@ -1475,15 +1497,19 @@ export default function App() {
 
       const existing = activeRunsByThreadRef.current[thread.id]?.sessionId ?? null;
       if (existing) {
+        const pendingHydration =
+          pendingSnapshotBySessionRef.current[existing]?.threadId === thread.id;
         if (!runLifecycleByThreadRef.current[thread.id]) {
           runLifecycleByThreadRef.current[thread.id] = createRunLifecycleState();
         }
-        setStartingByThread((current) => removeThreadFlag(current, thread.id));
+        if (!pendingHydration || hasCachedTerminalLog(thread.id)) {
+          setStartingByThread((current) => removeThreadFlag(current, thread.id));
+        }
         if (hasCachedTerminalLog(thread.id)) {
           runLifecycleByThreadRef.current[thread.id] = markRunReady(runLifecycleByThreadRef.current[thread.id]);
           setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
         } else {
-          setReadyByThread((current) => removeThreadFlag(current, thread.id));
+          setReadyByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
           if (!pendingSnapshotBySessionRef.current[existing]) {
             void hydrateSessionSnapshot(thread.id, existing, 8, 150);
           }
@@ -2435,7 +2461,9 @@ export default function App() {
           current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
         );
       } else {
-        setReadyByThread((current) => removeThreadFlag(current, selectedThread.id));
+        setReadyByThread((current) =>
+          current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
+        );
         if (!pendingSnapshotBySessionRef.current[existingSessionId]) {
           void hydrateSessionSnapshot(selectedThread.id, existingSessionId, 3, 100);
         }
@@ -3167,7 +3195,11 @@ export default function App() {
               contentLimitChars={TERMINAL_LOG_BUFFER_CHARS}
               readOnly={false}
               inputEnabled={Boolean(selectedSessionId) && isSelectedThreadReady && !isSelectedThreadStarting}
-              overlayMessage={isSelectedThreadStarting || !selectedSessionId ? 'Starting Claude session...' : undefined}
+              overlayMessage={
+                !selectedSessionId || (isSelectedThreadStarting && !hasSelectedTerminalContent)
+                  ? 'Starting Claude session...'
+                  : undefined
+              }
               focusRequestId={terminalFocusRequestId}
               onData={(data) => {
                 if (!selectedThread) {

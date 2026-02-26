@@ -56,13 +56,6 @@ export function handleTerminalScroll(state: TerminalFollowState, event: Terminal
     return next;
   }
 
-  if (atBottom) {
-    return {
-      ...next,
-      mode: 'following'
-    };
-  }
-
   return next;
 }
 

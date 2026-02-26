@@ -74,4 +74,78 @@ describe('resolveTerminalContentUpdate', () => {
       kind: 'reset'
     });
   });
+
+  it('keeps live render when snapshot prepends older history before rendered tail', () => {
+    const liveTail = 'chunk A output\r\nchunk B output\r\n';
+    const fullSnapshot = `session startup preamble\r\n\x1b[32mclaude>\x1b[0m ${liveTail}`;
+    expect(
+      resolveTerminalContentUpdate({
+        rendered: liveTail,
+        content: fullSnapshot,
+        sessionId: 'session-1',
+        readOnly: false,
+        contentLimitChars: 280_000
+      })
+    ).toEqual({ kind: 'none' });
+  });
+
+  it('does not suppress reset for short suffix coincidences', () => {
+    expect(
+      resolveTerminalContentUpdate({
+        rendered: '\r\n',
+        content: 'header...\r\n',
+        sessionId: 'session-1',
+        readOnly: false,
+        contentLimitChars: 280_000
+      })
+    ).toEqual({ kind: 'reset' });
+  });
+
+  it('does not apply append deltas from incidental overlap outside clamp mode', () => {
+    expect(
+      resolveTerminalContentUpdate({
+        rendered: 'line end\r\n',
+        content: '\r\nnew unrelated payload',
+        sessionId: 'session-1',
+        readOnly: false,
+        contentLimitChars: 280_000
+      })
+    ).toEqual({ kind: 'reset' });
+  });
+
+  it('returns none when clamped cache drops only older prefix text', () => {
+    const rendered = '0123456789abcdef';
+    const content = '89abcdef';
+    expect(
+      resolveTerminalContentUpdate({
+        rendered,
+        content,
+        sessionId: 'session-1',
+        readOnly: false,
+        contentLimitChars: 8
+      })
+    ).toEqual({ kind: 'none' });
+  });
+
+  it('returns reset when sessionId is null regardless of content relationship', () => {
+    expect(
+      resolveTerminalContentUpdate({
+        rendered: 'abc',
+        content: 'abcdef',
+        sessionId: null,
+        readOnly: false
+      })
+    ).toEqual({ kind: 'reset' });
+  });
+
+  it('returns reset when readOnly is true regardless of content relationship', () => {
+    expect(
+      resolveTerminalContentUpdate({
+        rendered: 'abc',
+        content: 'abcdef',
+        sessionId: 'session-1',
+        readOnly: true
+      })
+    ).toEqual({ kind: 'reset' });
+  });
 });

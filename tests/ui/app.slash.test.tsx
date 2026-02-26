@@ -195,9 +195,16 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }));
 
 vi.mock('../../src/components/TerminalPanel', () => ({
-  TerminalPanel: (props: { content?: string; onData?: (data: string) => void }) => (
+  TerminalPanel: (props: {
+    content?: string;
+    onData?: (data: string) => void;
+    inputEnabled?: boolean;
+    overlayMessage?: string;
+  }) => (
     <section className="terminal-panel" data-testid="terminal-panel-mock">
       <pre data-testid="terminal-content-mock">{props.content ?? ''}</pre>
+      <output data-testid="terminal-input-enabled">{String(Boolean(props.inputEnabled))}</output>
+      <output data-testid="terminal-overlay">{props.overlayMessage ?? ''}</output>
       <button type="button" onClick={() => props.onData?.('   First prompt title line\r')}>
         send-first-prompt
       </button>
@@ -280,6 +287,11 @@ describe('Sidebar behavior', () => {
     act(() => {
       mocks.emitTerminalData({ sessionId: 'session-thread-1', data: '\n> Try "create a test"\n' });
     });
+    await waitFor(() => {
+      const rendered = screen.getByTestId('terminal-content-mock').textContent ?? '';
+      expect(rendered).toContain('Try "create a test"');
+      expect(screen.getByTestId('terminal-overlay').textContent).toBe('');
+    });
 
     act(() => {
       releaseSnapshotReads?.();
@@ -289,6 +301,40 @@ describe('Sidebar behavior', () => {
       const rendered = screen.getByTestId('terminal-content-mock').textContent ?? '';
       expect(rendered).toContain('Claude Code banner');
       expect(rendered).toContain('Try "create a test"');
+    });
+  });
+
+  it('keeps input enabled when switching back to an existing session while hydration is pending', async () => {
+    const user = userEvent.setup();
+    let releaseSnapshotReads: (() => void) | null = null;
+    const snapshotReady = new Promise<void>((resolve) => {
+      releaseSnapshotReads = resolve;
+    });
+    mocks.api.terminalReadOutput.mockImplementation(async () => {
+      await snapshotReady;
+      return '';
+    });
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /First thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-1' }));
+    });
+
+    fireEvent.click(screen.getByTestId('workspace-new-thread-ws-1'));
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-2' }));
+    });
+
+    await user.click(screen.getByRole('button', { name: /First thread/i }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('terminal-input-enabled').textContent).toBe('true');
+    });
+
+    act(() => {
+      releaseSnapshotReads?.();
     });
   });
 
