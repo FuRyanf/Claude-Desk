@@ -1031,7 +1031,7 @@ pub async fn terminal_start_session(
     let mut saw_ssh_connection_start = false;
     let mut should_capture_session_id = false;
     std::thread::spawn(move || {
-        let mut buffer = [0u8; 4096];
+        let mut buffer = [0u8; 32_768];
         let mut utf8_carry = Vec::<u8>::new();
         let mut session_id_parse_buffer = String::new();
         let mut chunk_sequence: u64 = 0;

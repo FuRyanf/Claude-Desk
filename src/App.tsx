@@ -61,6 +61,7 @@ const SIDEBAR_WIDTH_MAX = 460;
 const TERMINAL_LOG_BUFFER_CHARS = 280_000;
 const SNAPSHOT_BUFFER_MAX_CHARS = TERMINAL_LOG_BUFFER_CHARS;
 const TERMINAL_LOG_FLUSH_INTERVAL_MS = 16;
+const TERMINAL_LOG_FLUSH_SAFETY_MS = 48;
 const TERMINAL_DATA_LISTENER_READY_TIMEOUT_MS = 800;
 const SESSION_SNAPSHOT_REFRESH_DELAYS_MS = [320, 1100];
 const CLAUDE_IN_PLACE_RESTART_DELAY_MS = 120;
@@ -641,6 +642,7 @@ export default function App() {
   const terminalLogGenerationByThreadRef = useRef<Record<string, number>>({});
   const terminalLogFlushHandleRef = useRef<number | null>(null);
   const terminalLogFlushUsesAnimationFrameRef = useRef(false);
+  const terminalLogFlushSafetyTimerRef = useRef<number | null>(null);
   const draftAttachmentsByThreadRef = useRef<Record<string, string[]>>({});
   const inputBufferByThreadRef = useRef<Record<string, string>>({});
   const inputControlCarryByThreadRef = useRef<Record<string, string>>({});
@@ -1055,15 +1057,18 @@ export default function App() {
 
   const cancelScheduledTerminalLogFlush = useCallback(() => {
     const handle = terminalLogFlushHandleRef.current;
-    if (handle === null) {
-      return;
+    if (handle !== null) {
+      terminalLogFlushHandleRef.current = null;
+      if (terminalLogFlushUsesAnimationFrameRef.current && typeof window.cancelAnimationFrame === 'function') {
+        window.cancelAnimationFrame(handle);
+      } else {
+        window.clearTimeout(handle);
+      }
     }
-    terminalLogFlushHandleRef.current = null;
-    if (terminalLogFlushUsesAnimationFrameRef.current && typeof window.cancelAnimationFrame === 'function') {
-      window.cancelAnimationFrame(handle);
-      return;
+    if (terminalLogFlushSafetyTimerRef.current !== null) {
+      window.clearTimeout(terminalLogFlushSafetyTimerRef.current);
+      terminalLogFlushSafetyTimerRef.current = null;
     }
-    window.clearTimeout(handle);
   }, []);
 
   const clearThreadWorkingStopTimer = useCallback((threadId: string) => {
@@ -1186,6 +1191,25 @@ export default function App() {
   );
 
   const scheduleTerminalLogFlush = useCallback(() => {
+    // Safety timer: fires at most TERMINAL_LOG_FLUSH_SAFETY_MS after the first enqueue,
+    // regardless of rAF throttling (which macOS/WKWebView suppresses under high CPU load).
+    // This caps byteDelta so the byte-cursor fast path in resolveTerminalContentUpdate
+    // stays valid even during heavy build output.
+    if (terminalLogFlushSafetyTimerRef.current === null) {
+      terminalLogFlushSafetyTimerRef.current = window.setTimeout(() => {
+        terminalLogFlushSafetyTimerRef.current = null;
+        if (terminalLogFlushHandleRef.current !== null) {
+          if (terminalLogFlushUsesAnimationFrameRef.current && typeof window.cancelAnimationFrame === 'function') {
+            window.cancelAnimationFrame(terminalLogFlushHandleRef.current);
+          } else {
+            window.clearTimeout(terminalLogFlushHandleRef.current);
+          }
+          terminalLogFlushHandleRef.current = null;
+        }
+        flushPendingTerminalLogChunks();
+      }, TERMINAL_LOG_FLUSH_SAFETY_MS);
+    }
+
     if (terminalLogFlushHandleRef.current !== null) {
       return;
     }
@@ -1193,6 +1217,10 @@ export default function App() {
       terminalLogFlushUsesAnimationFrameRef.current = true;
       terminalLogFlushHandleRef.current = window.requestAnimationFrame(() => {
         terminalLogFlushHandleRef.current = null;
+        if (terminalLogFlushSafetyTimerRef.current !== null) {
+          window.clearTimeout(terminalLogFlushSafetyTimerRef.current);
+          terminalLogFlushSafetyTimerRef.current = null;
+        }
         flushPendingTerminalLogChunks();
       });
       return;
@@ -1200,6 +1228,10 @@ export default function App() {
     terminalLogFlushUsesAnimationFrameRef.current = false;
     terminalLogFlushHandleRef.current = window.setTimeout(() => {
       terminalLogFlushHandleRef.current = null;
+      if (terminalLogFlushSafetyTimerRef.current !== null) {
+        window.clearTimeout(terminalLogFlushSafetyTimerRef.current);
+        terminalLogFlushSafetyTimerRef.current = null;
+      }
       flushPendingTerminalLogChunks();
     }, TERMINAL_LOG_FLUSH_INTERVAL_MS);
   }, [flushPendingTerminalLogChunks]);

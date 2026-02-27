@@ -80,7 +80,19 @@ export function resolveTerminalContentUpdate({
     return { kind: 'none' };
   }
 
-  if (canApplyLiveDelta && limit > 0 && rendered.length >= limit && content.length === limit) {
+  // KMP suffix-prefix scan to find the delta when both strings are at the buffer limit.
+  // Skip for large strings: O(n) on 280KB blocks the main thread for ~50-100ms, which
+  // throttles rAF further and causes the terminal to appear stuck during high-output builds.
+  // At the limit, fall straight to reset — cheaper than a blocking KMP + reset.
+  const KMP_SIZE_LIMIT = 32_000;
+  if (
+    canApplyLiveDelta &&
+    limit > 0 &&
+    rendered.length >= limit &&
+    content.length === limit &&
+    rendered.length <= KMP_SIZE_LIMIT &&
+    content.length <= KMP_SIZE_LIMIT
+  ) {
     const limitOverlap = findSuffixPrefixOverlap(rendered, content);
     if (limitOverlap > 0) {
       const delta = content.slice(limitOverlap);
