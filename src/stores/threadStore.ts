@@ -11,28 +11,30 @@ function parseIsoTimestampMs(value?: string | null): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function threadActivityTimestampMs(thread: ThreadMetadata): number {
+  return Math.max(
+    parseIsoTimestampMs(thread.updatedAt),
+    parseIsoTimestampMs(thread.lastRunEndedAt),
+    parseIsoTimestampMs(thread.lastRunStartedAt),
+    parseIsoTimestampMs(thread.createdAt)
+  );
+}
+
 function sortThreads(threads: ThreadMetadata[], lastUserInputAtByThread: Record<string, number>): ThreadMetadata[] {
   return [...threads].sort((a, b) => {
-    const aLastInput = lastUserInputAtByThread[a.id];
-    const bLastInput = lastUserInputAtByThread[b.id];
-    const aHasInput = Number.isFinite(aLastInput);
-    const bHasInput = Number.isFinite(bLastInput);
+    const aActivity = threadActivityTimestampMs(a);
+    const bActivity = threadActivityTimestampMs(b);
+    const aInputOverride = Number.isFinite(lastUserInputAtByThread[a.id]) ? lastUserInputAtByThread[a.id] : 0;
+    const bInputOverride = Number.isFinite(lastUserInputAtByThread[b.id]) ? lastUserInputAtByThread[b.id] : 0;
+    const aSortTimestamp = Math.max(aActivity, aInputOverride);
+    const bSortTimestamp = Math.max(bActivity, bInputOverride);
 
-    if (aHasInput || bHasInput) {
-      if (aHasInput && !bHasInput) {
-        return -1;
-      }
-      if (!aHasInput && bHasInput) {
-        return 1;
-      }
-      if (aLastInput !== bLastInput) {
-        return bLastInput - aLastInput;
-      }
+    if (aSortTimestamp !== bSortTimestamp) {
+      return bSortTimestamp - aSortTimestamp;
     }
 
-    const createdDelta = parseIsoTimestampMs(b.createdAt) - parseIsoTimestampMs(a.createdAt);
-    if (createdDelta !== 0) {
-      return createdDelta;
+    if (aActivity !== bActivity) {
+      return bActivity - aActivity;
     }
 
     return a.id.localeCompare(b.id);
@@ -87,7 +89,7 @@ export interface ThreadStore {
   threadLastOutputAt: (threadId?: string) => number | null;
   subscribeThreadOutput: (listener: (threadId: string) => void) => () => void;
   markThreadUserInput: (workspaceId: string, threadId: string, timestampMs?: number) => void;
-  threadLastUserInputAt: (threadId?: string) => number | null;
+  getThreadDisplayTimestampMs: (thread: ThreadMetadata) => number;
 }
 
 export function useThreadStore(): ThreadStore {
@@ -192,12 +194,16 @@ export function useThreadStore(): ThreadStore {
   const setThreadRunState = useCallback(
     (threadId: string, status: RunStatus, startedAt?: string | null, endedAt?: string | null) => {
       setThreadsByWorkspace((current) => {
+        let anyChanged = false;
         const next: Record<string, ThreadMetadata[]> = {};
         for (const [workspaceId, threads] of Object.entries(current)) {
-          next[workspaceId] = threads.map((thread) => {
+          let workspaceChanged = false;
+          const updatedThreads = threads.map((thread) => {
             if (thread.id !== threadId) {
               return thread;
             }
+            workspaceChanged = true;
+            anyChanged = true;
 
             return {
               ...thread,
@@ -207,6 +213,12 @@ export function useThreadStore(): ThreadStore {
               updatedAt: new Date().toISOString()
             };
           });
+          next[workspaceId] = workspaceChanged
+            ? sortThreads(updatedThreads, lastUserInputAtByThreadRef.current)
+            : updatedThreads;
+        }
+        if (!anyChanged) {
+          return current;
         }
         return next;
       });
@@ -279,13 +291,6 @@ export function useThreadStore(): ThreadStore {
     });
   }, []);
 
-  const threadLastUserInputAt = useCallback((threadId?: string) => {
-    if (!threadId) {
-      return null;
-    }
-    return lastUserInputAtByThreadRef.current[threadId] ?? null;
-  }, []);
-
   return useMemo(
     () => ({
       threadsByWorkspace,
@@ -306,7 +311,16 @@ export function useThreadStore(): ThreadStore {
       threadLastOutputAt,
       subscribeThreadOutput,
       markThreadUserInput,
-      threadLastUserInputAt
+      getThreadDisplayTimestampMs: (thread: ThreadMetadata): number => {
+        const activityMs = Math.max(
+          parseIsoTimestampMs(thread.updatedAt),
+          parseIsoTimestampMs(thread.lastRunEndedAt),
+          parseIsoTimestampMs(thread.lastRunStartedAt),
+          parseIsoTimestampMs(thread.createdAt)
+        );
+        const inputOverride = lastUserInputAtByThreadRef.current[thread.id] ?? 0;
+        return Math.max(activityMs, inputOverride);
+      }
     }),
     [
       applyThreadUpdate,
@@ -324,7 +338,6 @@ export function useThreadStore(): ThreadStore {
       subscribeThreadOutput,
       markThreadUserInput,
       threadLastOutputAt,
-      threadLastUserInputAt,
       threadsByWorkspace
     ]
   );

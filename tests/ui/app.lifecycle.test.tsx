@@ -19,6 +19,8 @@ const mocks = vi.hoisted(() => {
   let terminalDataHandler: ((
     event: { sessionId: string; threadId?: string; data: string; sequence?: number }
   ) => void) | null = null;
+  let terminalExitHandler: ((event: { sessionId: string; code?: number | null; signal?: string | null }) => void) | null =
+    null;
   const baseThreads = [
     {
       id: 'thread-1',
@@ -234,6 +236,7 @@ const mocks = vi.hoisted(() => {
     api.terminalReadOutput.mockReset();
     api.terminalReadOutput.mockImplementation(terminalReadOutputImpl);
     terminalDataHandler = null;
+    terminalExitHandler = null;
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -261,7 +264,19 @@ const mocks = vi.hoisted(() => {
         };
       }
     ),
-    onTerminalExit: vi.fn(async () => () => undefined),
+    emitTerminalExit: (event: { sessionId: string; code?: number | null; signal?: string | null }) => {
+      terminalExitHandler?.(event);
+    },
+    onTerminalExit: vi.fn(
+      async (handler: (event: { sessionId: string; code?: number | null; signal?: string | null }) => void) => {
+        terminalExitHandler = handler;
+        return () => {
+          if (terminalExitHandler === handler) {
+            terminalExitHandler = null;
+          }
+        };
+      }
+    ),
     onThreadUpdated: vi.fn(async () => () => undefined)
   };
 });
@@ -568,6 +583,92 @@ describe('Thread lifecycle integration', () => {
       window.setTimeout(() => resolve(), 180);
     });
     expect(mocks.api.terminalStartSession.mock.calls.length).toBe(startCallsBefore);
+  });
+
+  it('stops retrying selected remote sessions after three failed exits', async () => {
+    const remoteWorkspace = {
+      id: 'ws-ssh-loop',
+      name: 'bloody-faraday',
+      path: 'ssh-workspace-loop',
+      kind: 'ssh' as const,
+      rdevSshCommand: null,
+      sshCommand: 'ssh rfu@bloody-faraday',
+      gitPullOnMasterForNewThreads: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    const remoteThread = {
+      id: 'thread-ssh-loop',
+      workspaceId: remoteWorkspace.id,
+      agentId: 'claude-code',
+      fullAccess: false,
+      enabledSkills: [] as string[],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      title: 'Looping remote thread',
+      isArchived: false,
+      lastRunStatus: 'Idle' as const,
+      lastRunStartedAt: null,
+      lastRunEndedAt: null,
+      claudeSessionId: null,
+      lastResumeAt: null,
+      lastNewSessionAt: null
+    };
+
+    mocks.api.listWorkspaces.mockResolvedValueOnce([remoteWorkspace]);
+    mocks.api.listThreads.mockImplementation(async (workspaceId: string) =>
+      workspaceId === remoteWorkspace.id ? [remoteThread] : []
+    );
+
+    let startAttempt = 0;
+    mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => {
+      startAttempt += 1;
+      return {
+        sessionId: `session-fail-${startAttempt}`,
+        sessionMode: 'new' as const,
+        resumeSessionId: null,
+        thread: {
+          ...remoteThread,
+          id: params.threadId
+        }
+      };
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      mocks.emitTerminalExit({ sessionId: 'session-fail-1', code: 1, signal: null });
+    });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(2);
+    });
+
+    act(() => {
+      mocks.emitTerminalExit({ sessionId: 'session-fail-2', code: 1, signal: null });
+    });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(3);
+    });
+
+    act(() => {
+      mocks.emitTerminalExit({ sessionId: 'session-fail-3', code: 1, signal: null });
+    });
+    await new Promise<void>((resolve) => {
+      window.setTimeout(() => resolve(), 180);
+    });
+    expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(3);
+
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    await new Promise<void>((resolve) => {
+      window.setTimeout(() => resolve(), 180);
+    });
+    expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(3);
   });
 
   it('keeps the previous thread session running and starts the next one when switching threads', async () => {

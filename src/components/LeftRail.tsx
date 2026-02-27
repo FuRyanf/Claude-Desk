@@ -8,9 +8,9 @@ interface LeftRailProps {
   selectedWorkspaceId?: string;
   selectedThreadId?: string;
   threadSearch: string;
-  threadLastUserInputAt: (threadId?: string) => number | null;
   isThreadWorking?: (threadId: string) => boolean;
   hasUnreadThreadOutput?: (threadId: string) => boolean;
+  getThreadDisplayTimestampMs?: (thread: ThreadMetadata) => number;
   onOpenWorkspacePicker: () => void;
   onOpenSettings: () => void;
   onNewThreadInWorkspace: (workspaceId: string) => Promise<void>;
@@ -130,12 +130,30 @@ function TrashIcon() {
   );
 }
 
-function formatRecencyShort(lastUserInputAt: number | null, nowMs: number): string | null {
-  if (!lastUserInputAt) {
+function parseTimestampMs(value?: string | null): number {
+  if (!value) {
+    return 0;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function threadRecencyTimestampMs(thread: ThreadMetadata): number | null {
+  const timestamp = Math.max(
+    parseTimestampMs(thread.updatedAt),
+    parseTimestampMs(thread.lastRunEndedAt),
+    parseTimestampMs(thread.lastRunStartedAt),
+    parseTimestampMs(thread.createdAt)
+  );
+  return timestamp > 0 ? timestamp : null;
+}
+
+function formatRecencyShort(activityTimestampMs: number | null, nowMs: number): string | null {
+  if (!activityTimestampMs) {
     return null;
   }
 
-  const diffMs = Math.max(0, nowMs - lastUserInputAt);
+  const diffMs = Math.max(0, nowMs - activityTimestampMs);
   if (diffMs < 60_000) {
     return null;
   }
@@ -352,9 +370,9 @@ function LeftRailComponent({
   selectedWorkspaceId,
   selectedThreadId,
   threadSearch,
-  threadLastUserInputAt,
   isThreadWorking,
   hasUnreadThreadOutput,
+  getThreadDisplayTimestampMs,
   onOpenWorkspacePicker,
   onOpenSettings,
   onNewThreadInWorkspace,
@@ -384,6 +402,7 @@ function LeftRailComponent({
   renderCountRef.current += 1;
 
   const query = threadSearch.trim().toLowerCase();
+  const nowMs = Date.now();
 
   React.useEffect(() => {
     if (!contextMenu && !workspaceContextMenu) {
@@ -718,7 +737,12 @@ function LeftRailComponent({
                                 key={thread.id}
                                 thread={thread}
                                 active={thread.id === selectedThreadId}
-                                relativeTime={formatRecencyShort(threadLastUserInputAt(thread.id), Date.now())}
+                                relativeTime={formatRecencyShort(
+                                  getThreadDisplayTimestampMs
+                                    ? getThreadDisplayTimestampMs(thread) || null
+                                    : threadRecencyTimestampMs(thread),
+                                  nowMs
+                                )}
                                 isWorking={Boolean(isThreadWorking?.(thread.id))}
                                 hasUnreadOutput={Boolean(hasUnreadThreadOutput?.(thread.id))}
                                 isEditing={editingThreadId === thread.id}

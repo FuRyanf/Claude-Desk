@@ -570,8 +570,7 @@ export default function App() {
     setSelectedThread,
     setThreadRunState,
     applyThreadUpdate,
-    markThreadUserInput,
-    threadLastUserInputAt
+    markThreadUserInput
   } = threadStore;
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -659,8 +658,11 @@ export default function App() {
   const terminalDataListenerReadyPromiseRef = useRef<Promise<void> | null>(null);
   const latestOutputSequenceByThreadRef = useRef<Record<string, number>>({});
   const seenOutputSequenceByThreadRef = useRef<Record<string, number>>({});
+  const lastReadAtMsByThreadRef = useRef<Record<string, number>>({});
+  const lastMeaningfulOutputAtMsByThreadRef = useRef<Record<string, number>>({});
   const lastMeaningfulOutputByThreadRef = useRef<Record<string, string>>({});
   const runLifecycleByThreadRef = useRef<Record<string, TerminalRunLifecycleState>>({});
+  const sessionFailCountByThreadRef = useRef<Record<string, number>>({});
   const outputSequenceCounterRef = useRef(0);
   const terminalDataEventHandlerRef = useRef<(event: TerminalDataEvent) => void>(() => undefined);
   const terminalExitEventHandlerRef = useRef<(event: TerminalExitEvent) => void>(() => undefined);
@@ -1103,9 +1105,13 @@ export default function App() {
     }
 
     lastMeaningfulOutputByThreadRef.current[threadId] = normalized;
+    lastMeaningfulOutputAtMsByThreadRef.current[threadId] = Date.now();
+    return true;
+  }, []);
+
+  const advanceThreadUnreadCursor = useCallback((threadId: string) => {
     outputSequenceCounterRef.current += 1;
     latestOutputSequenceByThreadRef.current[threadId] = outputSequenceCounterRef.current;
-    return true;
   }, []);
 
   const markThreadOutputSeen = useCallback((threadId: string) => {
@@ -1119,6 +1125,7 @@ export default function App() {
   }, []);
 
   const clearThreadUnread = useCallback((threadId: string) => {
+    lastReadAtMsByThreadRef.current[threadId] = Date.now();
     markThreadOutputSeen(threadId);
     setUnreadOutputByThread((current) => removeThreadFlag(current, threadId));
   }, [markThreadOutputSeen]);
@@ -1138,18 +1145,31 @@ export default function App() {
     });
   }, [hasUnseenThreadOutput]);
 
+  const hasUnseenMeaningfulOutputSinceRead = useCallback((threadId: string) => {
+    const lastReadAt = lastReadAtMsByThreadRef.current[threadId] ?? 0;
+    const lastMeaningfulOutputAt = lastMeaningfulOutputAtMsByThreadRef.current[threadId] ?? 0;
+    return lastMeaningfulOutputAt > lastReadAt;
+  }, []);
+
   const scheduleThreadWorkingStop = useCallback(
     (threadId: string, delayMs = THREAD_WORKING_IDLE_TIMEOUT_MS) => {
       clearThreadWorkingStopTimer(threadId);
       workingStopTimerByThreadRef.current[threadId] = window.setTimeout(() => {
         delete workingStopTimerByThreadRef.current[threadId];
         stopThreadWorking(threadId);
-        if (selectedThreadIdRef.current !== threadId) {
+        if (selectedThreadIdRef.current !== threadId && hasUnseenMeaningfulOutputSinceRead(threadId)) {
+          advanceThreadUnreadCursor(threadId);
           markThreadUnread(threadId);
         }
       }, delayMs);
     },
-    [clearThreadWorkingStopTimer, markThreadUnread, stopThreadWorking]
+    [
+      advanceThreadUnreadCursor,
+      clearThreadWorkingStopTimer,
+      hasUnseenMeaningfulOutputSinceRead,
+      markThreadUnread,
+      stopThreadWorking
+    ]
   );
 
   const scheduleTerminalLogFlush = useCallback(() => {
@@ -1765,6 +1785,9 @@ export default function App() {
     if (!thread || deletedThreadIdsRef.current[thread.id] || startingSessionByThreadRef.current[thread.id]) {
       return;
     }
+    if ((sessionFailCountByThreadRef.current[thread.id] ?? 0) >= 3) {
+      return;
+    }
 
     autoRecoverInFlightRef.current = true;
     let sessionId = activeRunsByThreadRef.current[thread.id]?.sessionId ?? null;
@@ -2216,6 +2239,9 @@ export default function App() {
       delete outputControlCarryByThreadRef.current[threadId];
       delete latestOutputSequenceByThreadRef.current[threadId];
       delete seenOutputSequenceByThreadRef.current[threadId];
+      delete lastReadAtMsByThreadRef.current[threadId];
+      delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
+      delete sessionFailCountByThreadRef.current[threadId];
       delete runLifecycleByThreadRef.current[threadId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
@@ -2550,6 +2576,10 @@ export default function App() {
     if (!selectedThread) {
       return;
     }
+    if ((sessionFailCountByThreadRef.current[selectedThread.id] ?? 0) >= 3) {
+      setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
+      return;
+    }
     const existingSessionId = activeRunsByThreadRef.current[selectedThread.id]?.sessionId ?? null;
     if (existingSessionId) {
       setStartingByThread((current) => removeThreadFlag(current, selectedThread.id));
@@ -2673,14 +2703,17 @@ export default function App() {
           clearThreadUnread(threadId);
         }
         if (workingByThreadRef.current[threadId]) {
-          if (hasMeaningfulOutput) {
-            scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
-          } else {
+          scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
+          if (!hasMeaningfulOutput) {
             maybeResolveStuckStreaming();
           }
-        } else if (!isSelectedThread && hasMeaningfulOutput) {
-          markThreadUnread(threadId);
-        } else {
+        } else if (!isSelectedThread && hasMeaningfulOutput && activeRunsByThreadRef.current[threadId]) {
+          // Session still alive but working timer expired (e.g. Claude was thinking quietly).
+          // Re-enter the working state so the green spinner stays on rather than flipping to blue.
+          clearThreadWorkingStopTimer(threadId);
+          startThreadWorking(threadId);
+          scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
+        } else if (isSelectedThread) {
           clearThreadUnread(threadId);
         }
         return;
@@ -2692,13 +2725,15 @@ export default function App() {
         clearThreadUnread(threadId);
       }
       if (workingByThreadRef.current[threadId]) {
-        if (hasMeaningfulOutput) {
-          scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
-        } else {
+        scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
+        if (!hasMeaningfulOutput) {
           maybeResolveStuckStreaming();
         }
-      } else if (!isSelectedThread && hasMeaningfulOutput) {
-        markThreadUnread(threadId);
+      } else if (!isSelectedThread && hasMeaningfulOutput && activeRunsByThreadRef.current[threadId]) {
+        // Session still alive but working timer expired — re-enter working state.
+        clearThreadWorkingStopTimer(threadId);
+        startThreadWorking(threadId);
+        scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
       }
       appendTerminalLogChunk(threadId, event.data);
     },
@@ -2707,8 +2742,8 @@ export default function App() {
       clearSessionSnapshotRefreshTimers,
       clearThreadWorkingStopTimer,
       clearThreadUnread,
-      markThreadUnread,
       noteThreadOutput,
+      startThreadWorking,
       stopThreadWorking,
       scheduleThreadWorkingStop
     ]
@@ -2736,7 +2771,18 @@ export default function App() {
 
       const endedAt = new Date().toISOString();
       setThreadRunState(endedThreadId, exitStatus, null, endedAt);
-      if (exitStatus === 'Succeeded' && selectedThreadIdRef.current !== endedThreadId) {
+      if (exitStatus === 'Succeeded') {
+        sessionFailCountByThreadRef.current[endedThreadId] = 0;
+      } else {
+        sessionFailCountByThreadRef.current[endedThreadId] =
+          (sessionFailCountByThreadRef.current[endedThreadId] ?? 0) + 1;
+      }
+      if (
+        exitStatus === 'Succeeded' &&
+        selectedThreadIdRef.current !== endedThreadId &&
+        hasUnseenMeaningfulOutputSinceRead(endedThreadId)
+      ) {
+        advanceThreadUnreadCursor(endedThreadId);
         markThreadUnread(endedThreadId);
       }
 
@@ -2780,7 +2826,9 @@ export default function App() {
         .catch(() => undefined);
     },
     [
+      advanceThreadUnreadCursor,
       finishSessionBinding,
+      hasUnseenMeaningfulOutputSinceRead,
       refreshThreadsForWorkspace,
       setThreadRunState,
       stopThreadWorking,
@@ -3221,6 +3269,9 @@ export default function App() {
         delete outputControlCarryByThreadRef.current[threadId];
         delete latestOutputSequenceByThreadRef.current[threadId];
         delete seenOutputSequenceByThreadRef.current[threadId];
+        delete lastReadAtMsByThreadRef.current[threadId];
+        delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
+        delete sessionFailCountByThreadRef.current[threadId];
         delete runLifecycleByThreadRef.current[threadId];
       }
       updateTerminalLogMap((current) => {
@@ -3324,11 +3375,11 @@ export default function App() {
         onSetWorkspaceGitPullOnMasterForNewThreads={onSetWorkspaceGitPullOnMasterForNewThreads}
         onReorderWorkspaces={onReorderWorkspaces}
         onRemoveWorkspace={onRemoveWorkspace}
-        threadLastUserInputAt={threadLastUserInputAt}
         isThreadWorking={runStore.isThreadWorking}
         hasUnreadThreadOutput={(threadId) =>
           Boolean(unreadOutputByThread[threadId]) && hasUnseenThreadOutput(threadId)
         }
+        getThreadDisplayTimestampMs={threadStore.getThreadDisplayTimestampMs}
         getSearchTextForThread={getSearchTextForThread}
         onCopyResumeCommand={copyResumeCommand}
         onCopyWorkspaceCommand={copyWorkspaceCommand}
@@ -3417,6 +3468,7 @@ export default function App() {
 
                 if (submittedLines.length > 0) {
                   markThreadUserInput(selectedThread.workspaceId, selectedThread.id);
+                  sessionFailCountByThreadRef.current[selectedThread.id] = 0;
                   clearThreadUnread(selectedThread.id);
                 }
 

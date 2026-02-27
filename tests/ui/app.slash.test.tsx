@@ -510,6 +510,10 @@ describe('Sidebar behavior', () => {
       });
 
       await user.click(screen.getByRole('button', { name: 'send-first-prompt' }));
+      act(() => {
+        nowMs += 10;
+        mocks.emitTerminalData({ sessionId: 'session-thread-1', data: 'working...\n' });
+      });
       await waitFor(() => {
         expect(screen.getByTestId('thread-running-thread-1')).toBeInTheDocument();
       });
