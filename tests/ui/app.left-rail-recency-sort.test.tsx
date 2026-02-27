@@ -253,7 +253,7 @@ describe('Left rail recency and sorting semantics', () => {
     expect(screen.queryByTestId('header-output-age')).not.toBeInTheDocument();
   });
 
-  it('uses persisted lastRunStartedAt for recency display with minute-level values', async () => {
+  it('uses persisted lastRunEndedAt for recency display with minute-level values', async () => {
     const baseMs = Date.parse('2026-02-22T10:00:00.000Z');
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(baseMs);
@@ -271,8 +271,8 @@ describe('Left rail recency and sorting semantics', () => {
           title: 'Older thread',
           isArchived: false,
           lastRunStatus: 'Idle',
-          lastRunStartedAt: new Date(baseMs - 3_600_000).toISOString(),
-          lastRunEndedAt: null,
+          lastRunStartedAt: null,
+          lastRunEndedAt: new Date(baseMs - 3_600_000).toISOString(),
           claudeSessionId: null,
           lastResumeAt: null,
           lastNewSessionAt: null
@@ -288,8 +288,8 @@ describe('Left rail recency and sorting semantics', () => {
           title: 'Newer thread',
           isArchived: false,
           lastRunStatus: 'Idle',
-          lastRunStartedAt: new Date(baseMs - 30_000).toISOString(),
-          lastRunEndedAt: null,
+          lastRunStartedAt: null,
+          lastRunEndedAt: new Date(baseMs - 30_000).toISOString(),
           claudeSessionId: null,
           lastResumeAt: null,
           lastNewSessionAt: null
@@ -313,7 +313,7 @@ describe('Left rail recency and sorting semantics', () => {
       expect(screen.queryByTestId('thread-recency-thread-newer')).not.toBeInTheDocument();
 
       // Advance the fake clock by 60s to fire LeftRail's setInterval, updating its nowMs state.
-      // After this, Date.now() ≈ baseMs + 60_000, so the "Newer thread" (updated at baseMs - 30_000)
+      // After this, Date.now() ≈ baseMs + 60_000, so the "Newer thread" (lastRunEndedAt = baseMs - 30_000)
       // is ~90s old → formatRecencyShort returns "1m".
       await act(async () => { vi.advanceTimersByTime(60_000); });
 

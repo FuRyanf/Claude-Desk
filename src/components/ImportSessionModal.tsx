@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 interface ImportSessionModalProps {
   open: boolean;
   workspaceName: string;
@@ -34,7 +36,7 @@ export function ImportSessionModal({
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     const trimmed = sessionId.trim();
-    if (!trimmed) {
+    if (!trimmed || !UUID_RE.test(trimmed)) {
       return;
     }
     onConfirm(trimmed);
@@ -71,7 +73,7 @@ export function ImportSessionModal({
             <button type="button" onClick={onClose} disabled={saving}>
               Cancel
             </button>
-            <button type="submit" disabled={saving || !sessionId.trim()}>
+            <button type="submit" disabled={saving || !UUID_RE.test(sessionId.trim())}>
               {saving ? 'Importing…' : 'Import'}
             </button>
           </div>

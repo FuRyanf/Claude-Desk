@@ -12,10 +12,11 @@ function parseIsoTimestampMs(value?: string | null): number {
 }
 
 function threadActivityTimestampMs(thread: ThreadMetadata): number {
+  // Only use lastRunEndedAt (Claude finished) and createdAt (new-thread fallback).
+  // updatedAt and lastRunStartedAt are set on every session start (every click), so
+  // including them would bump sort order on mere thread selection with no real work done.
   return Math.max(
-    parseIsoTimestampMs(thread.updatedAt),
     parseIsoTimestampMs(thread.lastRunEndedAt),
-    parseIsoTimestampMs(thread.lastRunStartedAt),
     parseIsoTimestampMs(thread.createdAt)
   );
 }
@@ -312,14 +313,13 @@ export function useThreadStore(): ThreadStore {
       subscribeThreadOutput,
       markThreadUserInput,
       getThreadDisplayTimestampMs: (thread: ThreadMetadata): number => {
-        const activityMs = Math.max(
-          parseIsoTimestampMs(thread.updatedAt),
-          parseIsoTimestampMs(thread.lastRunEndedAt),
-          parseIsoTimestampMs(thread.lastRunStartedAt),
-          parseIsoTimestampMs(thread.createdAt)
-        );
+        // Exclude updatedAt/lastRunStartedAt — both update on every session open (every click).
+        // Include createdAt so threads with no completed run still show an age label after restart
+        // (in-memory lastUserInputAt is lost on restart, so createdAt is the only persistent fallback).
+        const lastRunEndedMs = parseIsoTimestampMs(thread.lastRunEndedAt);
+        const createdAtMs = parseIsoTimestampMs(thread.createdAt);
         const inputOverride = lastUserInputAtByThreadRef.current[thread.id] ?? 0;
-        return Math.max(activityMs, inputOverride);
+        return Math.max(lastRunEndedMs, createdAtMs, inputOverride);
       }
     }),
     [

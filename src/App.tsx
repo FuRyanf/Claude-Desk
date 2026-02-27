@@ -661,6 +661,8 @@ export default function App() {
   const lastReadAtMsByThreadRef = useRef<Record<string, number>>({});
   const lastMeaningfulOutputAtMsByThreadRef = useRef<Record<string, number>>({});
   const lastMeaningfulOutputByThreadRef = useRef<Record<string, string>>({});
+  const lastSessionStartAtMsByThreadRef = useRef<Record<string, number>>({});
+  const lastUserInputAtMsByThreadRef = useRef<Record<string, number>>({});
   const runLifecycleByThreadRef = useRef<Record<string, TerminalRunLifecycleState>>({});
   const sessionFailCountByThreadRef = useRef<Record<string, number>>({});
   const outputSequenceCounterRef = useRef(0);
@@ -767,6 +769,8 @@ export default function App() {
         }
       };
       runStore.bindSession(threadId, sessionId, startedAt);
+      lastSessionStartAtMsByThreadRef.current[threadId] = Date.now();
+      delete lastUserInputAtMsByThreadRef.current[threadId];
       delete lastMeaningfulOutputByThreadRef.current[threadId];
       delete outputControlCarryByThreadRef.current[threadId];
       delete liveDataSeenBySessionRef.current[sessionId];
@@ -1145,11 +1149,20 @@ export default function App() {
     });
   }, [hasUnseenThreadOutput]);
 
+  // Returns true only if the user sent at least one message in the current session
+  // (i.e. after the most recent session bind). Prevents Claude's startup prompt from
+  // being treated as unread output on non-selected threads.
+  const hasUserSentMessageInCurrentSession = useCallback((threadId: string) => {
+    const sessionStart = lastSessionStartAtMsByThreadRef.current[threadId] ?? 0;
+    const lastUserInput = lastUserInputAtMsByThreadRef.current[threadId] ?? 0;
+    return lastUserInput > sessionStart;
+  }, []);
+
   const hasUnseenMeaningfulOutputSinceRead = useCallback((threadId: string) => {
     const lastReadAt = lastReadAtMsByThreadRef.current[threadId] ?? 0;
     const lastMeaningfulOutputAt = lastMeaningfulOutputAtMsByThreadRef.current[threadId] ?? 0;
-    return lastMeaningfulOutputAt > lastReadAt;
-  }, []);
+    return lastMeaningfulOutputAt > lastReadAt && hasUserSentMessageInCurrentSession(threadId);
+  }, [hasUserSentMessageInCurrentSession]);
 
   const scheduleThreadWorkingStop = useCallback(
     (threadId: string, delayMs = THREAD_WORKING_IDLE_TIMEOUT_MS) => {
@@ -1299,6 +1312,7 @@ export default function App() {
       return;
     }
     delete pendingInputByThreadRef.current[threadId];
+    lastUserInputAtMsByThreadRef.current[threadId] = Date.now();
     await api.terminalWrite(sessionId, pending);
   }, []);
 
@@ -2236,6 +2250,7 @@ export default function App() {
       });
       }
       delete inputBufferByThreadRef.current[threadId];
+      delete inputControlCarryByThreadRef.current[threadId];
       delete threadTitleInitializedRef.current[threadId];
       delete pendingTerminalChunksByThreadRef.current[threadId];
       delete outputControlCarryByThreadRef.current[threadId];
@@ -2244,8 +2259,16 @@ export default function App() {
       delete lastReadAtMsByThreadRef.current[threadId];
       delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
       delete lastMeaningfulOutputByThreadRef.current[threadId];
+      delete lastSessionStartAtMsByThreadRef.current[threadId];
+      delete lastUserInputAtMsByThreadRef.current[threadId];
       delete sessionFailCountByThreadRef.current[threadId];
       delete runLifecycleByThreadRef.current[threadId];
+      updateTerminalLogMap((current) => {
+        if (!(threadId in current)) return current;
+        const next = { ...current };
+        delete next[threadId];
+        return next;
+      });
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
 
@@ -2266,7 +2289,8 @@ export default function App() {
       clearThreadUnread,
       clearThreadWorkingStopTimer,
       stopThreadWorking,
-      setSelectedThread
+      setSelectedThread,
+      updateTerminalLogMap
     ]
   );
 
@@ -2710,7 +2734,7 @@ export default function App() {
           if (!hasMeaningfulOutput) {
             maybeResolveStuckStreaming();
           }
-        } else if (!isSelectedThread && hasMeaningfulOutput && activeRunsByThreadRef.current[threadId]) {
+        } else if (!isSelectedThread && hasMeaningfulOutput && activeRunsByThreadRef.current[threadId] && hasUserSentMessageInCurrentSession(threadId)) {
           // Session still alive but working timer expired (e.g. Claude was thinking quietly).
           // Re-enter the working state so the green spinner stays on rather than flipping to blue.
           clearThreadWorkingStopTimer(threadId);
@@ -2730,7 +2754,7 @@ export default function App() {
         if (!hasMeaningfulOutput) {
           maybeResolveStuckStreaming();
         }
-      } else if (!isSelectedThread && hasMeaningfulOutput && activeRunsByThreadRef.current[threadId]) {
+      } else if (!isSelectedThread && hasMeaningfulOutput && activeRunsByThreadRef.current[threadId] && hasUserSentMessageInCurrentSession(threadId)) {
         // Session still alive but working timer expired — re-enter working state.
         clearThreadWorkingStopTimer(threadId);
         startThreadWorking(threadId);
@@ -2743,6 +2767,7 @@ export default function App() {
       clearSessionSnapshotRefreshTimers,
       clearThreadWorkingStopTimer,
       clearThreadUnread,
+      hasUserSentMessageInCurrentSession,
       noteThreadOutput,
       startThreadWorking,
       stopThreadWorking,
@@ -3273,6 +3298,8 @@ export default function App() {
         delete lastReadAtMsByThreadRef.current[threadId];
         delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
         delete lastMeaningfulOutputByThreadRef.current[threadId];
+        delete lastSessionStartAtMsByThreadRef.current[threadId];
+        delete lastUserInputAtMsByThreadRef.current[threadId];
         delete sessionFailCountByThreadRef.current[threadId];
         delete runLifecycleByThreadRef.current[threadId];
       }
@@ -3470,6 +3497,7 @@ export default function App() {
 
                 if (submittedLines.length > 0) {
                   markThreadUserInput(selectedThread.workspaceId, selectedThread.id);
+                  lastUserInputAtMsByThreadRef.current[selectedThread.id] = Date.now();
                   sessionFailCountByThreadRef.current[selectedThread.id] = 0;
                   clearThreadUnread(selectedThread.id);
                 }
