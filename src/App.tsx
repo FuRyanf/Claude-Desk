@@ -3534,37 +3534,85 @@ export default function App() {
                   clearThreadUnread(selectedThread.id);
                 }
 
-                let outboundData = data;
                 if (submittedLines.length > 0) {
                   const attachmentDraft = draftAttachmentsByThreadRef.current[selectedThread.id] ?? [];
-                  if (attachmentDraft.length > 0) {
-                    outboundData = `${buildAttachmentPrompt(attachmentDraft)}\r${data}`;
-                    clearAttachmentDraftForThread(selectedThread.id);
-                  }
+                  clearAttachmentDraftForThread(selectedThread.id);
+
+                  // Determine the live session id now (before any async work).
+                  const sessionId = (!isSelectedThreadStarting && selectedSessionId)
+                    ? runStore.sessionForThread(selectedThread.id)
+                    : null;
+
+                  // Split attachments into images (clipboard-paste route) and
+                  // non-images (text-prompt route).  Images only use the
+                  // clipboard route when a live session already exists; when no
+                  // session is available yet we fall back to text for everything.
+                  const imagePaths = sessionId
+                    ? attachmentDraft.filter(isImageAttachmentPath)
+                    : [];
+                  const nonImagePaths = sessionId
+                    ? attachmentDraft.filter((p) => !isImageAttachmentPath(p))
+                    : attachmentDraft;
+
+                  // Build the text-path prompt (non-images only, plus any image
+                  // fallbacks collected after clipboard failures).
+                  const fallbackImagePaths: string[] = [];
+
+                  void (async () => {
+                    // 1. Clipboard-paste each image sequentially.
+                    for (const imgPath of imagePaths) {
+                      try {
+                        await api.writeImageToClipboard(imgPath);
+                        await api.terminalWrite(sessionId!, '\x16');
+                      } catch {
+                        // Clipboard write failed — include path in text prompt.
+                        fallbackImagePaths.push(imgPath);
+                      }
+                    }
+
+                    // 2. Build the combined text prompt for non-image paths and
+                    //    any images that failed the clipboard route.
+                    const textPaths = [...nonImagePaths, ...fallbackImagePaths];
+                    const textPrompt = textPaths.length > 0
+                      ? `${buildAttachmentPrompt(textPaths)}\r`
+                      : '';
+                    const outboundData = `${textPrompt}${data}`;
+
+                    if (isSelectedThreadStarting || !selectedSessionId) {
+                      pendingInputByThreadRef.current[selectedThread.id] =
+                        `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
+                      void ensureSessionForThread(selectedThread);
+                      return;
+                    }
+
+                    if (sessionId) {
+                      clearThreadWorkingStopTimer(selectedThread.id);
+                      startThreadWorking(selectedThread.id);
+                      scheduleThreadWorkingStop(selectedThread.id, THREAD_WORKING_STUCK_TIMEOUT_MS);
+                      void api.terminalWrite(sessionId, outboundData);
+                      return;
+                    }
+
+                    // Session vanished between the start of onData and now.
+                    pendingInputByThreadRef.current[selectedThread.id] =
+                      `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
+                    void ensureSessionForThread(selectedThread);
+                  })();
+
+                  return;
                 }
 
+                // No submitted lines — just forward raw keystrokes.
+                const outboundData = data;
+
                 if (isSelectedThreadStarting || !selectedSessionId) {
-                  if (submittedLines.length > 0) {
-                    pendingInputByThreadRef.current[selectedThread.id] = `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
-                    void ensureSessionForThread(selectedThread);
-                  }
                   return;
                 }
 
                 const sessionId = runStore.sessionForThread(selectedThread.id);
                 if (sessionId) {
-                  if (submittedLines.length > 0) {
-                    clearThreadWorkingStopTimer(selectedThread.id);
-                    startThreadWorking(selectedThread.id);
-                    scheduleThreadWorkingStop(selectedThread.id, THREAD_WORKING_STUCK_TIMEOUT_MS);
-                  }
                   void api.terminalWrite(sessionId, outboundData);
                   return;
-                }
-
-                if (submittedLines.length > 0) {
-                  pendingInputByThreadRef.current[selectedThread.id] = `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
-                  void ensureSessionForThread(selectedThread);
                 }
               }}
               onResize={(cols, rows) => {

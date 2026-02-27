@@ -537,6 +537,21 @@ fn copy_terminal_env_diagnostics(workspace_path: String) -> Result<String, Strin
     runner::copy_terminal_env_diagnostics(workspace_path).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn write_image_to_clipboard(path: String) -> Result<(), String> {
+    let img = image::open(&path).map_err(|error| error.to_string())?;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let pixels = rgba.into_raw();
+    let img_data = arboard::ImageData {
+        width: width as usize,
+        height: height as usize,
+        bytes: std::borrow::Cow::Owned(pixels),
+    };
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+    clipboard.set_image(img_data).map_err(|error| error.to_string())
+}
+
 fn main() {
     let _ = storage::ensure_base_dirs();
 
@@ -600,7 +615,8 @@ fn main() {
             open_in_finder,
             open_in_terminal,
             open_terminal_command,
-            copy_terminal_env_diagnostics
+            copy_terminal_env_diagnostics,
+            write_image_to_clipboard
         ])
         .run(tauri::generate_context!())
         .expect("error while running Claude Desk");

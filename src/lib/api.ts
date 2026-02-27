@@ -118,7 +118,9 @@ export const api = {
   openInTerminal: (path: string) => invoke<void>('open_in_terminal', { path }),
   openTerminalCommand: (command: string) => invoke<void>('open_terminal_command', { command }),
   copyTerminalEnvDiagnostics: (workspacePath: string) =>
-    invoke<string>('copy_terminal_env_diagnostics', { workspacePath })
+    invoke<string>('copy_terminal_env_diagnostics', { workspacePath }),
+  writeImageToClipboard: (path: string) =>
+    invoke<void>('write_image_to_clipboard', { path })
 };
 
 export const onRunStream = async (
