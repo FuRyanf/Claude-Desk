@@ -10,7 +10,7 @@ interface LeftRailProps {
   threadSearch: string;
   isThreadWorking?: (threadId: string) => boolean;
   hasUnreadThreadOutput?: (threadId: string) => boolean;
-  getThreadDisplayTimestampMs?: (thread: ThreadMetadata) => number;
+  getThreadDisplayTimestampMs: (thread: ThreadMetadata) => number;
   onOpenWorkspacePicker: () => void;
   onOpenSettings: () => void;
   onNewThreadInWorkspace: (workspaceId: string) => Promise<void>;
@@ -130,23 +130,7 @@ function TrashIcon() {
   );
 }
 
-function parseTimestampMs(value?: string | null): number {
-  if (!value) {
-    return 0;
-  }
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
 
-function threadRecencyTimestampMs(thread: ThreadMetadata): number | null {
-  const timestamp = Math.max(
-    parseTimestampMs(thread.updatedAt),
-    parseTimestampMs(thread.lastRunEndedAt),
-    parseTimestampMs(thread.lastRunStartedAt),
-    parseTimestampMs(thread.createdAt)
-  );
-  return timestamp > 0 ? timestamp : null;
-}
 
 function formatRecencyShort(activityTimestampMs: number | null, nowMs: number): string | null {
   if (!activityTimestampMs) {
@@ -402,7 +386,11 @@ function LeftRailComponent({
   renderCountRef.current += 1;
 
   const query = threadSearch.trim().toLowerCase();
-  const nowMs = Date.now();
+  const [nowMs, setNowMs] = React.useState(Date.now());
+  React.useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   React.useEffect(() => {
     if (!contextMenu && !workspaceContextMenu) {
@@ -738,9 +726,7 @@ function LeftRailComponent({
                                 thread={thread}
                                 active={thread.id === selectedThreadId}
                                 relativeTime={formatRecencyShort(
-                                  getThreadDisplayTimestampMs
-                                    ? getThreadDisplayTimestampMs(thread) || null
-                                    : threadRecencyTimestampMs(thread),
+                                  getThreadDisplayTimestampMs(thread) || null,
                                   nowMs
                                 )}
                                 isWorking={Boolean(isThreadWorking?.(thread.id))}

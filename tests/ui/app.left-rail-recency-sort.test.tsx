@@ -255,10 +255,10 @@ describe('Left rail recency and sorting semantics', () => {
 
   it('uses persisted lastRunStartedAt for recency display with minute-level values', async () => {
     const baseMs = Date.parse('2026-02-22T10:00:00.000Z');
-    let nowMs = baseMs;
-    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(baseMs);
     try {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
       const customThreads = [
         {
           id: 'thread-older',
@@ -311,13 +311,17 @@ describe('Left rail recency and sorting semantics', () => {
       await screen.findByRole('button', { name: /Newer thread/i });
       expect(getThreadOrder()).toEqual(['Newer thread', 'Older thread']);
       expect(screen.queryByTestId('thread-recency-thread-newer')).not.toBeInTheDocument();
-      nowMs = baseMs + 61_000;
+
+      // Advance the fake clock by 60s to fire LeftRail's setInterval, updating its nowMs state.
+      // After this, Date.now() ≈ baseMs + 60_000, so the "Newer thread" (updated at baseMs - 30_000)
+      // is ~90s old → formatRecencyShort returns "1m".
+      await act(async () => { vi.advanceTimersByTime(60_000); });
 
       await user.click(screen.getByRole('button', { name: /Older thread/i }));
       await user.click(screen.getByRole('button', { name: /Newer thread/i }));
       expect(screen.getByTestId('thread-recency-thread-newer')).toHaveTextContent('1m');
     } finally {
-      nowSpy.mockRestore();
+      vi.useRealTimers();
     }
   });
 

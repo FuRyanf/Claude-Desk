@@ -1706,6 +1706,8 @@ export default function App() {
         return sessionId;
       })()
         .catch((error) => {
+          sessionFailCountByThreadRef.current[thread.id] =
+            (sessionFailCountByThreadRef.current[thread.id] ?? 0) + 1;
           setStartingByThread((current) => removeThreadFlag(current, thread.id));
           throw error;
         })
@@ -2241,6 +2243,7 @@ export default function App() {
       delete seenOutputSequenceByThreadRef.current[threadId];
       delete lastReadAtMsByThreadRef.current[threadId];
       delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
+      delete lastMeaningfulOutputByThreadRef.current[threadId];
       delete sessionFailCountByThreadRef.current[threadId];
       delete runLifecycleByThreadRef.current[threadId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
@@ -2713,8 +2716,6 @@ export default function App() {
           clearThreadWorkingStopTimer(threadId);
           startThreadWorking(threadId);
           scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
-        } else if (isSelectedThread) {
-          clearThreadUnread(threadId);
         }
         return;
       }
@@ -3271,6 +3272,7 @@ export default function App() {
         delete seenOutputSequenceByThreadRef.current[threadId];
         delete lastReadAtMsByThreadRef.current[threadId];
         delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
+        delete lastMeaningfulOutputByThreadRef.current[threadId];
         delete sessionFailCountByThreadRef.current[threadId];
         delete runLifecycleByThreadRef.current[threadId];
       }
