@@ -3543,40 +3543,12 @@ export default function App() {
                     ? runStore.sessionForThread(selectedThread.id)
                     : null;
 
-                  // Split attachments into images (clipboard-paste route) and
-                  // non-images (text-prompt route).  Images only use the
-                  // clipboard route when a live session already exists; when no
-                  // session is available yet we fall back to text for everything.
-                  const imagePaths = sessionId
-                    ? attachmentDraft.filter(isImageAttachmentPath)
-                    : [];
-                  const nonImagePaths = sessionId
-                    ? attachmentDraft.filter((p) => !isImageAttachmentPath(p))
-                    : attachmentDraft;
-
-                  // Build the text-path prompt (non-images only, plus any image
-                  // fallbacks collected after clipboard failures).
-                  const fallbackImagePaths: string[] = [];
+                  const attachmentPrompt = attachmentDraft.length > 0
+                    ? `${buildAttachmentPrompt(attachmentDraft)}\r`
+                    : '';
 
                   void (async () => {
-                    // 1. Clipboard-paste each image sequentially.
-                    for (const imgPath of imagePaths) {
-                      try {
-                        await api.writeImageToClipboard(imgPath);
-                        await api.terminalWrite(sessionId!, '\x16');
-                      } catch {
-                        // Clipboard write failed — include path in text prompt.
-                        fallbackImagePaths.push(imgPath);
-                      }
-                    }
-
-                    // 2. Build the combined text prompt for non-image paths and
-                    //    any images that failed the clipboard route.
-                    const textPaths = [...nonImagePaths, ...fallbackImagePaths];
-                    const textPrompt = textPaths.length > 0
-                      ? `${buildAttachmentPrompt(textPaths)}\r`
-                      : '';
-                    const outboundData = `${textPrompt}${data}`;
+                    const outboundData = `${attachmentPrompt}${data}`;
 
                     if (isSelectedThreadStarting || !selectedSessionId) {
                       pendingInputByThreadRef.current[selectedThread.id] =

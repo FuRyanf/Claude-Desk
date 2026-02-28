@@ -81,6 +81,7 @@ export function TerminalPanel({
   const lastQueueWarningAtRef = useRef(0);
   const bulkWritingRef = useRef(false);
   const bulkWriteEpochRef = useRef(0);
+  const isWritingRef = useRef(false);
 
   const scrollToBottomSoon = useCallback((term: Terminal) => {
     if (!shouldAutoFollow(followStateRef.current)) {
@@ -293,7 +294,9 @@ export function TerminalPanel({
       terminalRef.current = term;
       writeQueueRef.current.setSink({
         write: (chunk, done) => {
+          isWritingRef.current = true;
           term.write(chunk, () => {
+            isWritingRef.current = false;
             if (terminalRef.current === term && shouldAutoFollow(followStateRef.current)) {
               term.scrollToBottom();
             }
@@ -363,7 +366,7 @@ export function TerminalPanel({
       });
 
       const onScrollDisposable = term.onScroll((viewportY) => {
-        if (bulkWritingRef.current) {
+        if (bulkWritingRef.current || isWritingRef.current) {
           followStateRef.current = {
             ...followStateRef.current,
             viewportY,
@@ -414,6 +417,7 @@ export function TerminalPanel({
         writeQueueRef.current.setSink(null);
         writeQueueRef.current.clear();
         bulkWritingRef.current = false;
+        isWritingRef.current = false;
         bulkWriteEpochRef.current += 1;
         term.dispose();
         terminalRef.current = null;
