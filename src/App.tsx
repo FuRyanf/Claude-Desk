@@ -1510,7 +1510,10 @@ export default function App() {
           return;
         }
         const liveSessionId = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
-        if (!liveSessionId || liveSessionId !== sessionId) {
+        // Only abort when a *different* session has taken over this thread.
+        // A null liveSessionId means activeRunsByThreadRef was temporarily overwritten with stale
+        // React state (line 760) before setActiveRunsByThread committed — continue polling.
+        if (liveSessionId !== null && liveSessionId !== sessionId) {
           delete pendingSnapshotBySessionRef.current[sessionId];
           return;
         }

@@ -38,25 +38,14 @@ export function pauseFollowByUser(state: TerminalFollowState): TerminalFollowSta
 }
 
 export function handleTerminalScroll(state: TerminalFollowState, event: TerminalScrollEvent): TerminalFollowState {
-  const next = {
+  // Only updates coordinates — pausedByUser transitions are controlled exclusively by
+  // explicit user gestures (wheel, scrollbar drag, PageUp) detected in TerminalPanel.
+  // This prevents xterm's deferred rAF viewport updates from causing false pauses.
+  return {
     ...state,
     viewportY: event.viewportY,
     baseY: event.baseY
   };
-  const atBottom = event.viewportY >= Math.max(0, event.baseY);
-  const viewportMoved = event.viewportY !== state.viewportY;
-
-  if (state.mode === 'following') {
-    if (!atBottom && viewportMoved) {
-      return {
-        ...next,
-        mode: 'pausedByUser'
-      };
-    }
-    return next;
-  }
-
-  return next;
 }
 
 export function jumpToLatest(state: TerminalFollowState, event: JumpToLatestEvent): TerminalFollowState {

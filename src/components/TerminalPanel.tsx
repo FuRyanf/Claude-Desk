@@ -79,9 +79,11 @@ export function TerminalPanel({
   const refreshFrameRef = useRef<number | null>(null);
   const previousFocusRequestRef = useRef(focusRequestId);
   const lastQueueWarningAtRef = useRef(0);
+  const fitAddonRef = useRef<FitAddon | null>(null);
   const bulkWritingRef = useRef(false);
   const bulkWriteEpochRef = useRef(0);
   const isWritingRef = useRef(false);
+  const userScrollIntentRef = useRef(false);
 
   const scrollToBottomSoon = useCallback((term: Terminal) => {
     if (!shouldAutoFollow(followStateRef.current)) {
@@ -272,6 +274,7 @@ export function TerminalPanel({
         disableStdin: readOnly || !inputEnabled
       });
       const fitAddon = new FitAddon();
+      fitAddonRef.current = fitAddon;
       term.loadAddon(fitAddon);
       term.open(host);
       term.attachCustomKeyEventHandler((event) => {
@@ -288,6 +291,9 @@ export function TerminalPanel({
             scheduleOutgoingInputFlush();
           }
           return false;
+        }
+        if (event.type === 'keydown' && event.key === 'PageUp') {
+          pauseFollowOutput();
         }
         return true;
       });
@@ -330,6 +336,12 @@ export function TerminalPanel({
           fitAndNotify();
         });
       }
+      window.setTimeout(() => {
+        if (terminalRef.current !== term) {
+          return;
+        }
+        fitAndNotify();
+      }, 100);
 
       if (contentRef.current.length > 0) {
         followStateRef.current = {
@@ -366,20 +378,14 @@ export function TerminalPanel({
       });
 
       const onScrollDisposable = term.onScroll((viewportY) => {
-        if (bulkWritingRef.current || isWritingRef.current) {
-          followStateRef.current = {
-            ...followStateRef.current,
-            viewportY,
-            baseY: term.buffer.active.baseY
-          };
-          return;
+        const baseY = term.buffer.active.baseY;
+        const prev = followStateRef.current;
+        followStateRef.current = handleTerminalScroll(prev, { viewportY, baseY });
+        // Pause follow for scrollbar drag; wheel and PageUp are handled by their own listeners.
+        if (userScrollIntentRef.current && viewportY < baseY) {
+          pauseFollowOutput();
+          userScrollIntentRef.current = false;
         }
-        const next = handleTerminalScroll(followStateRef.current, {
-          viewportY,
-          baseY: term.buffer.active.baseY
-        });
-        followStateRef.current = next;
-        setFollowOutputPaused(next.mode === 'pausedByUser');
       });
 
       const onWheel = (event: WheelEvent) => {
@@ -388,6 +394,28 @@ export function TerminalPanel({
         }
       };
       host.addEventListener('wheel', onWheel, { passive: true });
+
+      const viewport = host.querySelector('.xterm-viewport') as HTMLElement | null;
+      const onViewportPointerDown = (e: PointerEvent) => {
+        // Only set scroll intent when the click lands in the native scrollbar area.
+        // el.clientWidth excludes the permanent scrollbar gutter; clicks beyond it are on the track.
+        // On macOS overlay-scrollbar mode offsetWidth === clientWidth (no gutter), so the check
+        // is skipped — trackpad wheel events already handle pause in that case.
+        const el = e.currentTarget as HTMLElement;
+        const hasVisibleScrollbar = el.offsetWidth > el.clientWidth;
+        if (hasVisibleScrollbar && e.clientX > el.getBoundingClientRect().left + el.clientWidth) {
+          userScrollIntentRef.current = true;
+        }
+      };
+      const clearViewportScrollIntent = () => {
+        userScrollIntentRef.current = false;
+      };
+      if (viewport) {
+        viewport.addEventListener('pointerdown', onViewportPointerDown);
+        viewport.addEventListener('pointerup', clearViewportScrollIntent);
+        viewport.addEventListener('pointercancel', clearViewportScrollIntent);
+        viewport.addEventListener('pointerleave', clearViewportScrollIntent);
+      }
 
       const onFocusIn = () => onFocusChangeRef.current?.(true);
       const onFocusOut = () => onFocusChangeRef.current?.(false);
@@ -412,7 +440,15 @@ export function TerminalPanel({
         host.removeEventListener('wheel', onWheel);
         host.removeEventListener('focusin', onFocusIn);
         host.removeEventListener('focusout', onFocusOut);
+        if (viewport) {
+          viewport.removeEventListener('pointerdown', onViewportPointerDown);
+          viewport.removeEventListener('pointerup', clearViewportScrollIntent);
+          viewport.removeEventListener('pointercancel', clearViewportScrollIntent);
+          viewport.removeEventListener('pointerleave', clearViewportScrollIntent);
+        }
+        userScrollIntentRef.current = false;
         flushOutgoingInput();
+        fitAddonRef.current = null;
         fitAddon.dispose();
         writeQueueRef.current.setSink(null);
         writeQueueRef.current.clear();
@@ -588,6 +624,15 @@ export function TerminalPanel({
       return;
     }
     term.focus();
+    window.requestAnimationFrame(() => {
+      const fitAddon = fitAddonRef.current;
+      if (!terminalRef.current || !fitAddon) {
+        return;
+      }
+      fitAddon.fit();
+      onResizeRef.current?.(terminalRef.current.cols, terminalRef.current.rows);
+      scheduleTerminalRefresh(terminalRef.current);
+    });
     if (shouldAutoFollow(followStateRef.current)) {
       scrollToBottomSoon(term);
     }

@@ -4,39 +4,43 @@ import {
   createFollowState,
   handleTerminalScroll,
   jumpToLatest,
+  pauseFollowByUser,
   shouldAutoFollow
 } from '../../src/lib/terminalFollowState';
 
 describe('terminal follow state', () => {
-  it('pauses follow mode when viewport moves off-bottom during active streaming', () => {
+  it('updates coordinates without changing mode — pausedByUser requires explicit user gesture', () => {
+    // handleTerminalScroll is purely a coordinate tracker.
+    // A viewport moving off-bottom via a system scroll (write rAF, programmatic scroll) must NOT
+    // pause follow; only explicit user gestures wired in TerminalPanel do that.
     let state = createFollowState();
     state = handleTerminalScroll(state, { viewportY: 120, baseY: 120 });
     state = handleTerminalScroll(state, { viewportY: 90, baseY: 120 });
 
-    expect(state.mode).toBe('pausedByUser');
-    expect(shouldAutoFollow(state)).toBe(false);
+    expect(state.mode).toBe('following');
+    expect(state.viewportY).toBe(90);
+    expect(state.baseY).toBe(120);
+    expect(shouldAutoFollow(state)).toBe(true);
   });
 
   it('stays paused on at-bottom scroll events until user explicitly jumps to latest', () => {
     let state = createFollowState();
-    state = handleTerminalScroll(state, { viewportY: 50, baseY: 200 }); // scroll up → paused
+    // Simulate explicit user gesture pausing (wheel/PageUp/scrollbar drag detected in TerminalPanel).
+    state = pauseFollowByUser(state);
     expect(state.mode).toBe('pausedByUser');
 
-    // Programmatic or incidental at-bottom events should not auto-resume.
+    // System scroll to bottom should not auto-resume.
     state = handleTerminalScroll(state, { viewportY: 200, baseY: 200 });
     expect(state.mode).toBe('pausedByUser');
     expect(shouldAutoFollow(state)).toBe(false);
   });
 
   it('stays paused when buffer grows but viewport stays at same relative offset', () => {
-    // A resize or buffer growth that keeps the viewport at the same relative distance from
-    // the bottom should not resume follow. viewportY and baseY advance together.
     let state = createFollowState();
-    state = handleTerminalScroll(state, { viewportY: 100, baseY: 200 }); // 100 lines from bottom → paused
+    state = pauseFollowByUser(state);
     expect(state.mode).toBe('pausedByUser');
 
-    // Buffer grows by 10 lines; viewport stays at same position (viewportY unchanged)
-    // baseY increases but viewportY < baseY so still not at bottom
+    // Buffer grows by 10 lines; viewport stays at same position.
     state = handleTerminalScroll(state, { viewportY: 100, baseY: 210 });
     expect(state.mode).toBe('pausedByUser');
     expect(shouldAutoFollow(state)).toBe(false);
@@ -44,7 +48,7 @@ describe('terminal follow state', () => {
 
   it('stays paused through high-rate stream growth until user explicitly jumps to latest', () => {
     let state = createFollowState();
-    state = handleTerminalScroll(state, { viewportY: 80, baseY: 120 });
+    state = pauseFollowByUser(state);
     expect(state.mode).toBe('pausedByUser');
 
     for (let baseY = 121; baseY <= 260; baseY += 1) {
