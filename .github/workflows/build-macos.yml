@@ -111,29 +111,15 @@ jobs:
           echo "Stamping version: ${VERSION}"
 
           # Update tauri.conf.json (controls app bundle version + CARGO_PKG_VERSION via tauri-build)
-          python3 - "$VERSION" <<'PYEOF'
-import json, sys
-path = 'src-tauri/tauri.conf.json'
-with open(path) as f:
-    cfg = json.load(f)
-cfg['version'] = sys.argv[1]
-with open(path, 'w') as f:
-    json.dump(cfg, f, indent=2)
-    f.write('\n')
-PYEOF
+          node -e "const fs=require('fs'); const p='src-tauri/tauri.conf.json'; const cfg=JSON.parse(fs.readFileSync(p,'utf8')); cfg.version=process.argv[1]; fs.writeFileSync(p, JSON.stringify(cfg, null, 2)+'\n');" "$VERSION"
 
           # Update Cargo.toml (controls CARGO_PKG_VERSION fallback in current_build_version())
           sed -i '' "s/^version = \"[0-9][0-9.]*\"/version = \"${VERSION}\"/" src-tauri/Cargo.toml
 
           # Update package.json (keeps frontend version in sync)
-          node -e "
-const fs = require('fs');
-const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-pkg.version = process.argv[1];
-fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-" "$VERSION"
+          node -e "const fs=require('fs'); const p='package.json'; const pkg=JSON.parse(fs.readFileSync(p,'utf8')); pkg.version=process.argv[1]; fs.writeFileSync(p, JSON.stringify(pkg, null, 2)+'\n');" "$VERSION"
 
-          echo "tauri.conf.json: $(python3 -c \"import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])\")"
+          echo "tauri.conf.json: $(node -e \"console.log(JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).version)\")"
           echo "Cargo.toml:      $(grep '^version' src-tauri/Cargo.toml | head -1)"
           echo "package.json:    $(node -e \"console.log(require('./package.json').version)\")"
 
