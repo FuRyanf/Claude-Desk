@@ -335,6 +335,17 @@ export function TerminalPanel({
           }
           fitAndNotify();
         });
+        // Explicitly wait for SF Mono so xterm's char-measure element gets correct metrics.
+        // fonts.ready can resolve before the specific font is measurable on cold start.
+        void (document as Document & { fonts?: { load: (font: string) => Promise<unknown> } }).fonts
+          ?.load('13px "SF Mono"')
+          .catch(() => {})
+          .then(() => {
+            if (terminalRef.current !== term) {
+              return;
+            }
+            fitAndNotify();
+          });
       }
       window.setTimeout(() => {
         if (terminalRef.current !== term) {
@@ -342,6 +353,13 @@ export function TerminalPanel({
         }
         fitAndNotify();
       }, 100);
+      // Second deferred fit for slow Tauri window-restore on first launch.
+      window.setTimeout(() => {
+        if (terminalRef.current !== term) {
+          return;
+        }
+        fitAndNotify();
+      }, 500);
 
       if (contentRef.current.length > 0) {
         followStateRef.current = {
@@ -424,7 +442,7 @@ export function TerminalPanel({
 
       const observer = new ResizeObserver(() => {
         if (resizeFrameRef.current !== null) {
-          return;
+          window.cancelAnimationFrame(resizeFrameRef.current);
         }
         resizeFrameRef.current = window.requestAnimationFrame(() => {
           resizeFrameRef.current = null;
