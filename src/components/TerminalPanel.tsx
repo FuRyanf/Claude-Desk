@@ -671,6 +671,10 @@ export function TerminalPanel({
     scheduleTerminalRefresh(term);
   }, [scheduleTerminalRefresh, scrollToBottomSoon]);
 
+  const restoreHistory = useCallback(() => {
+    resetTerminalContent(contentRef.current);
+  }, [resetTerminalContent]);
+
   if (fallback) {
     return (
       <section className="terminal-panel">
@@ -683,11 +687,23 @@ export function TerminalPanel({
   return (
     <section className="terminal-panel">
       <div ref={hostRef} className="terminal-host" />
-      {followOutputPaused ? (
-        <button type="button" className="terminal-follow-button" onClick={jumpToLatest}>
-          Jump to latest
-        </button>
-      ) : null}
+      <div className="terminal-controls">
+        {followOutputPaused ? (
+          <button type="button" className="terminal-follow-button" onClick={jumpToLatest}>
+            Jump to latest
+          </button>
+        ) : null}
+        {content.length > 0 ? (
+          <button
+            type="button"
+            className="terminal-refresh-button"
+            onClick={restoreHistory}
+            title="Terminal display look off? Click to replay the full session history from the log — your Claude session keeps running."
+          >
+            ↺
+          </button>
+        ) : null}
+      </div>
       {overlayMessage ? <div className="terminal-overlay">{overlayMessage}</div> : null}
     </section>
   );
