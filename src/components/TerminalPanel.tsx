@@ -672,8 +672,15 @@ export function TerminalPanel({
   }, [scheduleTerminalRefresh, scrollToBottomSoon]);
 
   const restoreHistory = useCallback(() => {
-    resetTerminalContent(contentRef.current);
-  }, [resetTerminalContent]);
+    const snapshot = contentRef.current;
+    resetTerminalContent(snapshot);
+    // Sync the rendered anchor so the content effect sees content === rendered
+    // on the next render and doesn't immediately cancel the in-progress write
+    // with another resetTerminalContent call.
+    renderedContentRef.current = snapshot;
+    renderedByteCountRef.current = contentByteCount ?? snapshot.length;
+    renderedGenerationRef.current = contentGeneration ?? renderedGenerationRef.current;
+  }, [contentByteCount, contentGeneration, resetTerminalContent]);
 
   if (fallback) {
     return (
