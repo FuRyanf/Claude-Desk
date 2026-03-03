@@ -597,9 +597,9 @@ export function BottomBar({
           className="fix-display-button"
           data-testid="fix-display-button"
           onClick={onFixDisplay}
-          title="Terminal display look off? Click to refit the layout — your Claude session keeps running."
+          title="Terminal display look misaligned or have a blank gap? Clicking slightly resizes the window height to refit the layout. If it still looks off, try dragging any window edge."
         >
-          Fix display
+          Display issue
         </button>
         <button
           type="button"

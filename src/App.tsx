@@ -3472,19 +3472,27 @@ export default function App() {
       }
       const nudgePx = Math.max(FIX_DISPLAY_WINDOW_NUDGE_MIN_PX, Math.ceil(scaleFactor));
 
-      const candidateWidths = [width + nudgePx, width - nudgePx].filter(
-        (candidateWidth, index, list) =>
-          candidateWidth > 1 && candidateWidth !== width && list.indexOf(candidateWidth) === index
+      // Nudge HEIGHT — the blank gap at the bottom is a row-count issue (too few rows
+      // because the terminal was sized when the container height was wrong).  A height
+      // nudge forces a vertical reflow: the flex container redistributes its height,
+      // the terminal host div changes height, ResizeObserver fires, fitAddon.fit()
+      // re-computes rows from the container's actual current height, and term.resize()
+      // fires with the correct row count — identical to what a manual window drag does.
+      // A width-only nudge does NOT force a height reflow on flex column children, so
+      // it cannot fix a row misalignment even if it triggers the ResizeObserver.
+      const candidateHeights = [height + nudgePx, height - nudgePx].filter(
+        (candidateHeight, index, list) =>
+          candidateHeight > 1 && candidateHeight !== height && list.indexOf(candidateHeight) === index
       );
 
       let nudged = false;
-      for (const candidateWidth of candidateWidths) {
+      for (const candidateHeight of candidateHeights) {
         try {
-          await appWindow.setSize(new PhysicalSize(candidateWidth, height));
+          await appWindow.setSize(new PhysicalSize(width, candidateHeight));
           nudged = true;
           break;
         } catch {
-          // If one direction is constrained (near max/min bounds), try the other.
+          // If one direction is constrained (near min/max bounds), try the other.
         }
       }
       if (!nudged) {

@@ -701,17 +701,21 @@ export function TerminalPanel({
     }
     handledFixDisplayRequestRef.current = fixDisplayRequestId;
 
-    const runManualRefit = (forceNudge: boolean) => {
+    const runManualRefit = (withColNudge: boolean) => {
       const liveTerm = terminalRef.current;
       const liveFitAddon = fitAddonRef.current;
       if (!liveTerm || !liveFitAddon) {
         return;
       }
 
-      if (forceNudge && liveTerm.cols > 1) {
-        // Nudge BEFORE fit — forces xterm through a real resize() →
-        // _updateDimensions() path so stale char metrics are refreshed.
-        // fitAddon.fit() then uses the corrected metrics to compute cols/rows.
+      if (withColNudge && liveTerm.cols > 1) {
+        // term.resize() calls _afterResize() → _charSizeService.measure(), which
+        // re-reads character metrics from the DOM.  This is a real fallback for
+        // stale char metrics (wrong cellHeight → too-few rows → blank gap), and is
+        // the only fallback available when the window nudge is skipped (fullscreen,
+        // maximised, or non-resizable windows).  After the nudge the restored cols
+        // value matches what fitAddon.fit() would propose if only row-count was
+        // wrong, so fit still fires a term.resize() for the correct row count.
         const cols = liveTerm.cols;
         const rows = liveTerm.rows;
         liveTerm.resize(cols + 1, rows);
@@ -726,10 +730,10 @@ export function TerminalPanel({
       scheduleTerminalRefresh(liveTerm);
     };
 
-    // Refit terminal dimensions from DOM — same path as ResizeObserver/window resize.
-    // This corrects xterm col/row misalignment and notifies the PTY (SIGWINCH).
-    // A brief one-column nudge mimics the manual resize workaround that users report fixes
-    // renderer misalignment when a no-op fit would otherwise leave the display unchanged.
+    // First pass: col nudge refreshes char metrics (via _afterResize →
+    // _charSizeService.measure()), then fit re-computes rows with correct metrics.
+    // Second pass on the next frame catches any layout settling after the async
+    // window height nudge (in nudgeWindowForFixDisplay) fires its ResizeObserver.
     runManualRefit(true);
     window.requestAnimationFrame(() => {
       if (handledFixDisplayRequestRef.current !== fixDisplayRequestId) {
