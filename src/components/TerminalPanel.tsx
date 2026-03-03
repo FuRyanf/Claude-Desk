@@ -674,14 +674,44 @@ export function TerminalPanel({
       return;
     }
     handledFixDisplayRequestRef.current = fixDisplayRequestId;
+
+    const runManualRefit = (forceNudge: boolean) => {
+      const liveTerm = terminalRef.current;
+      const liveFitAddon = fitAddonRef.current;
+      if (!liveTerm || !liveFitAddon) {
+        return;
+      }
+      liveFitAddon.fit();
+      const targetCols = liveTerm.cols;
+      const targetRows = liveTerm.rows;
+
+      if (forceNudge && targetCols > 1) {
+        const nudgedCols = targetCols < 400 ? targetCols + 1 : targetCols - 1;
+        if (nudgedCols !== targetCols) {
+          // Force a renderer reflow even when fit resolves to the same grid.
+          liveTerm.resize(nudgedCols, targetRows);
+          liveTerm.resize(targetCols, targetRows);
+        }
+      }
+
+      onResizeRef.current?.(liveTerm.cols, liveTerm.rows);
+      if (shouldAutoFollow(followStateRef.current)) {
+        scrollToBottomSoon(liveTerm);
+      }
+      scheduleTerminalRefresh(liveTerm);
+    };
+
     // Refit terminal dimensions from DOM — same path as ResizeObserver/window resize.
     // This corrects xterm col/row misalignment and notifies the PTY (SIGWINCH).
-    fitAddon.fit();
-    onResizeRef.current?.(term.cols, term.rows);
-    if (shouldAutoFollow(followStateRef.current)) {
-      scrollToBottomSoon(term);
-    }
-    scheduleTerminalRefresh(term);
+    // A brief one-column nudge mimics the manual resize workaround that users report fixes
+    // renderer misalignment when a no-op fit would otherwise leave the display unchanged.
+    runManualRefit(true);
+    window.requestAnimationFrame(() => {
+      if (handledFixDisplayRequestRef.current !== fixDisplayRequestId) {
+        return;
+      }
+      runManualRefit(false);
+    });
   }, [fixDisplayRequestId, scheduleTerminalRefresh, scrollToBottomSoon, terminalReadyVersion]);
 
   const jumpToLatest = useCallback(() => {

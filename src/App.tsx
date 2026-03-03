@@ -73,6 +73,9 @@ const THREAD_WORKING_IDLE_TIMEOUT_MS = 1200;
 const THREAD_WORKING_STUCK_TIMEOUT_MS = 15_000;
 const MAX_ATTACHMENT_DRAFTS = 24;
 const MAX_ATTACHMENTS_PER_MESSAGE = 12;
+const FIX_DISPLAY_FEEDBACK_MS = 960;
+const FIX_DISPLAY_WINDOW_NUDGE_DELAY_MS = 16;
+const FIX_DISPLAY_WINDOW_NUDGE_MIN_PX = 2;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
 
@@ -600,6 +603,7 @@ export default function App() {
   const [blockingError, setBlockingError] = useState<string | null>(null);
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
   const [fixDisplayRequestId, setFixDisplayRequestId] = useState(0);
+  const [fixDisplayFeedbackActive, setFixDisplayFeedbackActive] = useState(false);
 
   const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
   const [addWorkspaceMode, setAddWorkspaceMode] = useState<'local' | 'rdev' | 'ssh'>('local');
@@ -685,6 +689,8 @@ export default function App() {
       }
     >
   >({});
+  const fixDisplayFeedbackTimerRef = useRef<number | null>(null);
+  const fixDisplayWindowNudgeInFlightRef = useRef(false);
 
   if (!terminalDataListenerReadyPromiseRef.current) {
     terminalDataListenerReadyPromiseRef.current = new Promise<void>((resolve) => {
@@ -3411,6 +3417,97 @@ export default function App() {
     return lastTerminalLogByThreadRef.current[threadId] ?? '';
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (fixDisplayFeedbackTimerRef.current !== null) {
+        window.clearTimeout(fixDisplayFeedbackTimerRef.current);
+        fixDisplayFeedbackTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const triggerFixDisplayFeedback = useCallback(() => {
+    setFixDisplayFeedbackActive(true);
+    if (fixDisplayFeedbackTimerRef.current !== null) {
+      window.clearTimeout(fixDisplayFeedbackTimerRef.current);
+    }
+    fixDisplayFeedbackTimerRef.current = window.setTimeout(() => {
+      setFixDisplayFeedbackActive(false);
+      fixDisplayFeedbackTimerRef.current = null;
+    }, FIX_DISPLAY_FEEDBACK_MS);
+  }, []);
+
+  const nudgeWindowForFixDisplay = useCallback(async () => {
+    if (fixDisplayWindowNudgeInFlightRef.current || typeof window === 'undefined') {
+      return;
+    }
+
+    const tauriWindow = window as unknown as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown };
+    if (!tauriWindow.__TAURI__ && !tauriWindow.__TAURI_INTERNALS__) {
+      return;
+    }
+
+    fixDisplayWindowNudgeInFlightRef.current = true;
+    try {
+      const [{ getCurrentWindow }, { PhysicalSize }] = await Promise.all([
+        import('@tauri-apps/api/window'),
+        import('@tauri-apps/api/dpi')
+      ]);
+      const appWindow = getCurrentWindow();
+      const [isFullscreen, isMaximized, isResizable] = await Promise.all([
+        appWindow.isFullscreen().catch(() => false),
+        appWindow.isMaximized().catch(() => false),
+        appWindow.isResizable().catch(() => true)
+      ]);
+      if (isFullscreen || isMaximized || !isResizable) {
+        return;
+      }
+
+      const originalSize = await appWindow.innerSize();
+      const scaleFactor = await appWindow.scaleFactor().catch(() => 1);
+      const width = Math.floor(originalSize.width);
+      const height = Math.floor(originalSize.height);
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width < 2 || height < 2) {
+        return;
+      }
+      const nudgePx = Math.max(FIX_DISPLAY_WINDOW_NUDGE_MIN_PX, Math.ceil(scaleFactor));
+
+      const candidateWidths = [width + nudgePx, width - nudgePx].filter(
+        (candidateWidth, index, list) =>
+          candidateWidth > 1 && candidateWidth !== width && list.indexOf(candidateWidth) === index
+      );
+
+      let nudged = false;
+      for (const candidateWidth of candidateWidths) {
+        try {
+          await appWindow.setSize(new PhysicalSize(candidateWidth, height));
+          nudged = true;
+          break;
+        } catch {
+          // If one direction is constrained (near max/min bounds), try the other.
+        }
+      }
+      if (!nudged) {
+        return;
+      }
+
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, FIX_DISPLAY_WINDOW_NUDGE_DELAY_MS);
+      });
+      await appWindow.setSize(new PhysicalSize(width, height));
+    } catch {
+      // Ignore nudge failures; TerminalPanel still runs the refit path.
+    } finally {
+      fixDisplayWindowNudgeInFlightRef.current = false;
+    }
+  }, []);
+
+  const onFixDisplay = useCallback(() => {
+    setFixDisplayRequestId((n) => n + 1);
+    triggerFixDisplayFeedback();
+    void nudgeWindowForFixDisplay();
+  }, [nudgeWindowForFixDisplay, triggerFixDisplayFeedback]);
+
   const appShellStyle = useMemo(
     () =>
       ({
@@ -3489,7 +3586,7 @@ export default function App() {
           </div>
         ) : null}
 
-        <section className="terminal-region">
+        <section className={fixDisplayFeedbackActive ? 'terminal-region fix-display-feedback-active' : 'terminal-region'}>
           {selectedThread ? (
             <TerminalPanel
               sessionId={selectedSessionId}
@@ -3617,7 +3714,7 @@ export default function App() {
           onRemoveAttachmentPath={removeSelectedThreadAttachmentPath}
           onClearAttachmentPaths={clearSelectedThreadAttachmentDraft}
           onToggleFullAccess={toggleFullAccess}
-          onFixDisplay={() => setFixDisplayRequestId((n) => n + 1)}
+          onFixDisplay={onFixDisplay}
           onLoadBranchSwitcher={onLoadBranchSwitcher}
           onCheckoutBranch={onCheckoutBranch}
         />

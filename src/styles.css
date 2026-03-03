@@ -1482,11 +1482,6 @@ body.sidebar-resizing {
   border-color: rgba(141, 160, 188, 0.34);
 }
 
-@keyframes fix-display-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.55; }
-}
-
 .fix-display-button {
   height: 32px;
   border-radius: 10px;
@@ -1500,19 +1495,16 @@ body.sidebar-resizing {
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
-  animation: fix-display-pulse 2.8s ease-in-out infinite;
   transition: border-color var(--motion-fast), background-color var(--motion-fast), color var(--motion-fast);
 }
 
 .fix-display-button:hover {
-  animation: none;
   border-color: rgba(122, 141, 169, 0.42);
   background: rgba(255, 255, 255, 0.74);
   color: #334155;
 }
 
 .fix-display-button:focus-visible {
-  animation: none;
   outline: 2px solid rgba(118, 142, 255, 0.56);
   outline-offset: 1px;
 }
@@ -1604,6 +1596,40 @@ body.sidebar-resizing {
   flex-direction: column;
   background: linear-gradient(180deg, rgba(6, 10, 23, 0.96), rgba(6, 10, 23, 0.98));
   padding: 10px 12px 12px;
+}
+
+@keyframes terminal-fix-feedback {
+  0%,
+  100% {
+    filter: none;
+  }
+  12% {
+    filter: brightness(1.24) saturate(1.08);
+  }
+  30% {
+    filter: brightness(0.94) saturate(0.98);
+  }
+  48% {
+    filter: brightness(1.16) saturate(1.04);
+  }
+  66% {
+    filter: brightness(0.97);
+  }
+}
+
+.terminal-region.fix-display-feedback-active .terminal-panel {
+  animation: terminal-fix-feedback 960ms ease-in-out 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-region.fix-display-feedback-active .terminal-panel {
+    animation: none;
+    box-shadow:
+      inset 0 0 0 1px rgba(173, 194, 233, 0.5),
+      inset 0 0 0 2px rgba(173, 194, 233, 0.22),
+      inset 0 1px 0 rgba(184, 202, 231, 0.08),
+      inset 0 0 0 1px rgba(11, 21, 42, 0.42);
+  }
 }
 
 .terminal-empty {
