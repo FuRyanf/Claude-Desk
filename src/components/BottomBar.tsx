@@ -19,6 +19,7 @@ interface BottomBarProps {
   onAddAttachmentPaths: (paths: string[]) => boolean;
   onRemoveAttachmentPath: (path: string) => void;
   onClearAttachmentPaths: () => void;
+  onFixDisplay: () => void;
   onToggleFullAccess: () => Promise<void>;
   onLoadBranchSwitcher: () => Promise<BranchSwitcherSnapshot>;
   onCheckoutBranch: (branchName: string) => Promise<boolean>;
@@ -126,6 +127,7 @@ export function BottomBar({
   onAddAttachmentPaths,
   onRemoveAttachmentPath,
   onClearAttachmentPaths,
+  onFixDisplay,
   onToggleFullAccess,
   onLoadBranchSwitcher,
   onCheckoutBranch
@@ -590,6 +592,15 @@ export function BottomBar({
       </div>
 
       <div className="bottom-bar-right">
+        <button
+          type="button"
+          className="fix-display-button"
+          data-testid="fix-display-button"
+          onClick={onFixDisplay}
+          title="Terminal display look off? Click to refit the layout — your Claude session keeps running."
+        >
+          Fix display
+        </button>
         <button
           type="button"
           className={selectedThread?.fullAccess ? 'full-access-toggle enabled' : 'full-access-toggle'}

@@ -599,6 +599,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [blockingError, setBlockingError] = useState<string | null>(null);
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
+  const [fixDisplayRequestId, setFixDisplayRequestId] = useState(0);
 
   const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
   const [addWorkspaceMode, setAddWorkspaceMode] = useState<'local' | 'rdev' | 'ssh'>('local');
@@ -3504,6 +3505,7 @@ export default function App() {
                   : undefined
               }
               focusRequestId={terminalFocusRequestId}
+              fixDisplayRequestId={fixDisplayRequestId}
               onData={(data) => {
                 if (!selectedThread) {
                   return;
@@ -3615,6 +3617,7 @@ export default function App() {
           onRemoveAttachmentPath={removeSelectedThreadAttachmentPath}
           onClearAttachmentPaths={clearSelectedThreadAttachmentDraft}
           onToggleFullAccess={toggleFullAccess}
+          onFixDisplay={() => setFixDisplayRequestId((n) => n + 1)}
           onLoadBranchSwitcher={onLoadBranchSwitcher}
           onCheckoutBranch={onCheckoutBranch}
         />

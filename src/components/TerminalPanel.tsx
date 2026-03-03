@@ -32,6 +32,7 @@ interface TerminalPanelProps {
   inputEnabled?: boolean;
   overlayMessage?: string;
   focusRequestId?: number;
+  fixDisplayRequestId?: number;
   onData?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
   onFocusChange?: (focused: boolean) => void;
@@ -47,12 +48,14 @@ export function TerminalPanel({
   inputEnabled = true,
   overlayMessage,
   focusRequestId = 0,
+  fixDisplayRequestId = 0,
   onData,
   onResize,
   onFocusChange
 }: TerminalPanelProps) {
   const [fallback, setFallback] = useState(() => import.meta.env.MODE === 'test');
   const [followOutputPaused, setFollowOutputPaused] = useState(false);
+  const [terminalReadyVersion, setTerminalReadyVersion] = useState(0);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const contentRef = useRef(content);
@@ -78,6 +81,7 @@ export function TerminalPanel({
   const resizeFrameRef = useRef<number | null>(null);
   const refreshFrameRef = useRef<number | null>(null);
   const previousFocusRequestRef = useRef(focusRequestId);
+  const handledFixDisplayRequestRef = useRef(0);
   const lastQueueWarningAtRef = useRef(0);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const bulkWritingRef = useRef(false);
@@ -298,6 +302,7 @@ export function TerminalPanel({
         return true;
       });
       terminalRef.current = term;
+      setTerminalReadyVersion((value) => value + 1);
       writeQueueRef.current.setSink({
         write: (chunk, done) => {
           isWritingRef.current = true;
@@ -658,6 +663,27 @@ export function TerminalPanel({
     scheduleTerminalRefresh(term);
   }, [focusRequestId, scheduleTerminalRefresh, scrollToBottomSoon]);
 
+  useEffect(() => {
+    if (fixDisplayRequestId <= handledFixDisplayRequestRef.current) {
+      return;
+    }
+    const term = terminalRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!term || !fitAddon) {
+      // Keep the request pending until terminal + fit addon are ready.
+      return;
+    }
+    handledFixDisplayRequestRef.current = fixDisplayRequestId;
+    // Refit terminal dimensions from DOM — same path as ResizeObserver/window resize.
+    // This corrects xterm col/row misalignment and notifies the PTY (SIGWINCH).
+    fitAddon.fit();
+    onResizeRef.current?.(term.cols, term.rows);
+    if (shouldAutoFollow(followStateRef.current)) {
+      scrollToBottomSoon(term);
+    }
+    scheduleTerminalRefresh(term);
+  }, [fixDisplayRequestId, scheduleTerminalRefresh, scrollToBottomSoon, terminalReadyVersion]);
+
   const jumpToLatest = useCallback(() => {
     const term = terminalRef.current;
     if (!term) {
@@ -671,17 +697,6 @@ export function TerminalPanel({
     scheduleTerminalRefresh(term);
   }, [scheduleTerminalRefresh, scrollToBottomSoon]);
 
-  const restoreHistory = useCallback(() => {
-    const snapshot = contentRef.current;
-    resetTerminalContent(snapshot);
-    // Sync the rendered anchor so the content effect sees content === rendered
-    // on the next render and doesn't immediately cancel the in-progress write
-    // with another resetTerminalContent call.
-    renderedContentRef.current = snapshot;
-    renderedByteCountRef.current = contentByteCount ?? snapshot.length;
-    renderedGenerationRef.current = contentGeneration ?? renderedGenerationRef.current;
-  }, [contentByteCount, contentGeneration, resetTerminalContent]);
-
   if (fallback) {
     return (
       <section className="terminal-panel">
@@ -694,23 +709,13 @@ export function TerminalPanel({
   return (
     <section className="terminal-panel">
       <div ref={hostRef} className="terminal-host" />
-      <div className="terminal-controls">
-        {followOutputPaused ? (
+      {followOutputPaused ? (
+        <div className="terminal-controls">
           <button type="button" className="terminal-follow-button" onClick={jumpToLatest}>
             Jump to latest
           </button>
-        ) : null}
-        {content.length > 0 ? (
-          <button
-            type="button"
-            className="terminal-refresh-button"
-            onClick={restoreHistory}
-            title="Terminal display look off? Click to replay the full session history from the log — your Claude session keeps running."
-          >
-            ↺
-          </button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       {overlayMessage ? <div className="terminal-overlay">{overlayMessage}</div> : null}
     </section>
   );
