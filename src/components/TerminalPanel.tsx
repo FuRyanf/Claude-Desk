@@ -326,19 +326,45 @@ export function TerminalPanel({
         }
         scheduleTerminalRefresh(term);
       };
+
+      // fitAddon.fit() short-circuits when the proposed cols/rows match the
+      // current grid — it skips term.resize(), so xterm never re-measures
+      // character metrics.  term.resize(same, same) also short-circuits.
+      // On cold start the initial measurement can use stale font metrics
+      // (before SF Mono is measurable) or stale container dimensions (before
+      // Tauri window-restore completes).  Later fits silently no-op because
+      // the grid "hasn't changed".
+      //
+      // A one-column nudge forces xterm through a real resize() →
+      // _renderService.handleResize() → _updateDimensions() path, which
+      // re-reads character metrics from the (now correct) char-measure
+      // element and recomputes css.cell.width/height.  This is the same
+      // mechanism that makes manual window resize fix the display.
+      const fitWithReflow = () => {
+        const cols = term.cols;
+        const rows = term.rows;
+        if (cols > 1) {
+          term.resize(cols + 1, rows);
+          term.resize(cols, rows);
+        }
+        fitAndNotify();
+      };
+
+      // Synchronous best-effort fit (renderer may not have dims yet — that's OK).
       fitAndNotify();
+      // Deferred fits use fitWithReflow to force correct metrics.
       window.requestAnimationFrame(() => {
         if (terminalRef.current !== term) {
           return;
         }
-        fitAndNotify();
+        fitWithReflow();
       });
       if ('fonts' in document) {
         void (document as Document & { fonts?: { ready: Promise<unknown> } }).fonts?.ready.then(() => {
           if (terminalRef.current !== term) {
             return;
           }
-          fitAndNotify();
+          fitWithReflow();
         });
         // Explicitly wait for SF Mono so xterm's char-measure element gets correct metrics.
         // fonts.ready can resolve before the specific font is measurable on cold start.
@@ -349,21 +375,21 @@ export function TerminalPanel({
             if (terminalRef.current !== term) {
               return;
             }
-            fitAndNotify();
+            fitWithReflow();
           });
       }
       window.setTimeout(() => {
         if (terminalRef.current !== term) {
           return;
         }
-        fitAndNotify();
+        fitWithReflow();
       }, 100);
       // Second deferred fit for slow Tauri window-restore on first launch.
       window.setTimeout(() => {
         if (terminalRef.current !== term) {
           return;
         }
-        fitAndNotify();
+        fitWithReflow();
       }, 500);
 
       if (contentRef.current.length > 0) {
@@ -681,19 +707,18 @@ export function TerminalPanel({
       if (!liveTerm || !liveFitAddon) {
         return;
       }
-      liveFitAddon.fit();
-      const targetCols = liveTerm.cols;
-      const targetRows = liveTerm.rows;
 
-      if (forceNudge && targetCols > 1) {
-        const nudgedCols = targetCols < 400 ? targetCols + 1 : targetCols - 1;
-        if (nudgedCols !== targetCols) {
-          // Force a renderer reflow even when fit resolves to the same grid.
-          liveTerm.resize(nudgedCols, targetRows);
-          liveTerm.resize(targetCols, targetRows);
-        }
+      if (forceNudge && liveTerm.cols > 1) {
+        // Nudge BEFORE fit — forces xterm through a real resize() →
+        // _updateDimensions() path so stale char metrics are refreshed.
+        // fitAddon.fit() then uses the corrected metrics to compute cols/rows.
+        const cols = liveTerm.cols;
+        const rows = liveTerm.rows;
+        liveTerm.resize(cols + 1, rows);
+        liveTerm.resize(cols, rows);
       }
 
+      liveFitAddon.fit();
       onResizeRef.current?.(liveTerm.cols, liveTerm.rows);
       if (shouldAutoFollow(followStateRef.current)) {
         scrollToBottomSoon(liveTerm);
