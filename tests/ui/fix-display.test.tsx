@@ -1,21 +1,12 @@
 /**
- * Regression tests for the "Fix display" button.
+ * Tests for the "Display issue?" button.
  *
- * Root cause: on cold start the xterm FitAddon may not have run with the
- * final DOM dimensions, leaving a blank gap at the bottom of the terminal.
- * A window resize fixes it because ResizeObserver → fitAddon.fit() →
- * onResize(cols, rows) → api.terminalResize() runs the correct reflow path.
- *
- * The "Fix display" button must trigger that same path via fixDisplayRequestId.
- *
- * Verification steps (manual):
- *   1. Open app on cold start — observe blank gap at bottom or input misalignment.
- *   2. Click "Fix display" in the bottom bar.
- *   3. Gap should close immediately (same result as dragging the window edge).
- *   4. Claude session continues uninterrupted.
+ * The button shows a semi-persistent inline tip telling users to drag
+ * a window edge to rerender the terminal.  It does not trigger any
+ * programmatic resize — it is purely informational.
  */
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -51,7 +42,6 @@ const mocks = vi.hoisted(() => {
   };
 
   let threadState = [{ ...baseThread }];
-  let lastFixDisplayRequestId = 0;
 
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
@@ -119,12 +109,12 @@ const mocks = vi.hoisted(() => {
     generateCommitMessage: vi.fn(async () => 'chore: update'),
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
+    openExternalUrl: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics')
   };
 
   const reset = () => {
     threadState = [{ ...baseThread }];
-    lastFixDisplayRequestId = 0;
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -135,10 +125,6 @@ const mocks = vi.hoisted(() => {
   return {
     api,
     reset,
-    recordFixDisplayRequestId: (value: number) => {
-      lastFixDisplayRequestId = value;
-    },
-    getLastFixDisplayRequestId: () => lastFixDisplayRequestId,
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
     onRunStream: vi.fn(async () => () => undefined),
@@ -164,22 +150,16 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }));
 
 vi.mock('../../src/components/TerminalPanel', () => ({
-  TerminalPanel: (props: { fixDisplayRequestId?: number }) => {
-    const value = props.fixDisplayRequestId ?? 0;
-    mocks.recordFixDisplayRequestId(value);
-    return (
-      <section data-testid="terminal-panel-mock">
-        <output data-testid="terminal-fix-display-request-id">{String(value)}</output>
-      </section>
-    );
-  }
+  TerminalPanel: () => (
+    <section data-testid="terminal-panel-mock" />
+  )
 }));
 
 import App from '../../src/App';
 
 // ── tests ────────────────────────────────────────────────────────────────────
 
-describe('"Fix display" button', () => {
+describe('"Display issue?" button', () => {
   beforeEach(() => {
     mocks.reset();
     window.localStorage.clear();
@@ -193,43 +173,81 @@ describe('"Fix display" button', () => {
 
   it('is always visible regardless of thread selection', async () => {
     render(<App />);
-    // Before any thread is selected the button should still be present
     await waitFor(() => {
       expect(screen.getByTestId('fix-display-button')).toBeInTheDocument();
     });
   });
 
-  it('clicking the button increments fixDisplayRequestId wiring into TerminalPanel', async () => {
+  it('clicking the button shows an inline tip message', async () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByRole('button', { name: /Test Thread/i });
-    await screen.findByTestId('terminal-fix-display-request-id');
 
-    await waitFor(() => {
-      expect(mocks.getLastFixDisplayRequestId()).toBe(0);
-    });
+    // Tip not visible initially
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
 
-    const btn = screen.getByTestId('fix-display-button');
-    await user.click(btn);
-    await waitFor(() => {
-      expect(mocks.getLastFixDisplayRequestId()).toBe(1);
-    });
-    await user.click(btn);
-    await waitFor(() => {
-      expect(mocks.getLastFixDisplayRequestId()).toBe(2);
-    });
+    await user.click(screen.getByTestId('fix-display-button'));
 
-    expect(screen.getByTestId('fix-display-button')).toBeInTheDocument();
+    // Tip appears
+    const tip = await screen.findByRole('status');
+    expect(tip).toBeInTheDocument();
+    expect(tip.textContent).toMatch(/drag/i);
   });
 
-  it('clicking the button is independent from Full Access and does not modify thread state', async () => {
+  it('clicking the button does not modify thread state', async () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByRole('button', { name: /Test Thread/i });
 
     await user.click(screen.getByTestId('fix-display-button'));
 
-    // Should not have touched setThreadFullAccess
     expect(mocks.api.setThreadFullAccess).not.toHaveBeenCalled();
+  });
+
+  it('clicking the button again hides the inline tip immediately', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('button', { name: /Test Thread/i });
+
+    await user.click(screen.getByTestId('fix-display-button'));
+    expect(screen.getByRole('status')).toBeInTheDocument();
+
+    await user.click(screen.getByTestId('fix-display-button'));
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('hides the inline tip after the timeout elapses', async () => {
+    render(<App />);
+    await screen.findByRole('button', { name: /Test Thread/i });
+
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        fireEvent.click(screen.getByTestId('fix-display-button'));
+      });
+      expect(screen.getByRole('status')).toBeInTheDocument();
+
+      act(() => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    } finally {
+      vi.runOnlyPendingTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('wiki button opens the wiki link', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('button', { name: /Test Thread/i });
+
+    const wikiButton = screen.getByRole('button', { name: 'Wiki' });
+    await user.click(wikiButton);
+
+    expect(screen.getByText(/react if you're loving it!/i)).toBeInTheDocument();
+    expect(mocks.api.openExternalUrl).toHaveBeenCalledWith(
+      'https://linkedin.atlassian.net/wiki/spaces/ENGS/pages/1388347470/Claude+Desk'
+    );
   });
 });

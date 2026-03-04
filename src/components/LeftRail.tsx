@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { api } from '../lib/api';
 import type { ThreadMetadata, Workspace } from '../types';
 
 interface LeftRailProps {
@@ -45,6 +46,7 @@ const CONTEXT_MENU_WIDTH = 220;
 const THREAD_CONTEXT_MENU_HEIGHT = 152;
 const WORKSPACE_CONTEXT_MENU_HEIGHT = 250;
 const CONTEXT_MENU_MARGIN = 8;
+const WIKI_URL = 'https://linkedin.atlassian.net/wiki/spaces/ENGS/pages/1388347470/Claude+Desk';
 
 function isRemoteWorkspaceKind(kind: Workspace['kind']): boolean {
   return kind === 'rdev' || kind === 'ssh';
@@ -129,8 +131,6 @@ function TrashIcon() {
     </svg>
   );
 }
-
-
 
 function formatRecencyShort(activityTimestampMs: number | null, nowMs: number): string | null {
   if (!activityTimestampMs) {
@@ -486,6 +486,12 @@ function LeftRailComponent({
     setEditingOriginal('');
   }, []);
 
+  const onOpenWiki = React.useCallback(() => {
+    void api.openExternalUrl(WIKI_URL).catch(() => {
+      window.open(WIKI_URL, '_blank', 'noopener,noreferrer');
+    });
+  }, []);
+
   return (
     <aside
       className="left-rail"
@@ -518,6 +524,19 @@ function LeftRailComponent({
               </span>
               <span>Add project</span>
             </button>
+            <div className="wiki-link-wrapper">
+              <button
+                type="button"
+                className="icon-ghost-button wiki-link-button"
+                onClick={onOpenWiki}
+                aria-describedby="wiki-hover-tip"
+              >
+                Wiki
+              </button>
+              <span id="wiki-hover-tip" className="wiki-hover-tip" role="tooltip">
+                React if you're loving it!
+              </span>
+            </div>
           </div>
         </div>
 

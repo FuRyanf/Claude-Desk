@@ -73,9 +73,6 @@ const THREAD_WORKING_IDLE_TIMEOUT_MS = 1200;
 const THREAD_WORKING_STUCK_TIMEOUT_MS = 15_000;
 const MAX_ATTACHMENT_DRAFTS = 24;
 const MAX_ATTACHMENTS_PER_MESSAGE = 12;
-const FIX_DISPLAY_FEEDBACK_MS = 960;
-const FIX_DISPLAY_WINDOW_NUDGE_DELAY_MS = 16;
-const FIX_DISPLAY_WINDOW_NUDGE_MIN_PX = 2;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
 
@@ -602,8 +599,6 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [blockingError, setBlockingError] = useState<string | null>(null);
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
-  const [fixDisplayRequestId, setFixDisplayRequestId] = useState(0);
-  const [fixDisplayFeedbackActive, setFixDisplayFeedbackActive] = useState(false);
 
   const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
   const [addWorkspaceMode, setAddWorkspaceMode] = useState<'local' | 'rdev' | 'ssh'>('local');
@@ -689,8 +684,6 @@ export default function App() {
       }
     >
   >({});
-  const fixDisplayFeedbackTimerRef = useRef<number | null>(null);
-  const fixDisplayWindowNudgeInFlightRef = useRef(false);
 
   if (!terminalDataListenerReadyPromiseRef.current) {
     terminalDataListenerReadyPromiseRef.current = new Promise<void>((resolve) => {
@@ -3417,104 +3410,6 @@ export default function App() {
     return lastTerminalLogByThreadRef.current[threadId] ?? '';
   }, []);
 
-  useEffect(() => {
-    return () => {
-      if (fixDisplayFeedbackTimerRef.current !== null) {
-        window.clearTimeout(fixDisplayFeedbackTimerRef.current);
-        fixDisplayFeedbackTimerRef.current = null;
-      }
-    };
-  }, []);
-
-  const triggerFixDisplayFeedback = useCallback(() => {
-    setFixDisplayFeedbackActive(true);
-    if (fixDisplayFeedbackTimerRef.current !== null) {
-      window.clearTimeout(fixDisplayFeedbackTimerRef.current);
-    }
-    fixDisplayFeedbackTimerRef.current = window.setTimeout(() => {
-      setFixDisplayFeedbackActive(false);
-      fixDisplayFeedbackTimerRef.current = null;
-    }, FIX_DISPLAY_FEEDBACK_MS);
-  }, []);
-
-  const nudgeWindowForFixDisplay = useCallback(async () => {
-    if (fixDisplayWindowNudgeInFlightRef.current || typeof window === 'undefined') {
-      return;
-    }
-
-    const tauriWindow = window as unknown as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown };
-    if (!tauriWindow.__TAURI__ && !tauriWindow.__TAURI_INTERNALS__) {
-      return;
-    }
-
-    fixDisplayWindowNudgeInFlightRef.current = true;
-    try {
-      const [{ getCurrentWindow }, { PhysicalSize }] = await Promise.all([
-        import('@tauri-apps/api/window'),
-        import('@tauri-apps/api/dpi')
-      ]);
-      const appWindow = getCurrentWindow();
-      const [isFullscreen, isMaximized, isResizable] = await Promise.all([
-        appWindow.isFullscreen().catch(() => false),
-        appWindow.isMaximized().catch(() => false),
-        appWindow.isResizable().catch(() => true)
-      ]);
-      if (isFullscreen || isMaximized || !isResizable) {
-        return;
-      }
-
-      const originalSize = await appWindow.innerSize();
-      const scaleFactor = await appWindow.scaleFactor().catch(() => 1);
-      const width = Math.floor(originalSize.width);
-      const height = Math.floor(originalSize.height);
-      if (!Number.isFinite(width) || !Number.isFinite(height) || width < 2 || height < 2) {
-        return;
-      }
-      const nudgePx = Math.max(FIX_DISPLAY_WINDOW_NUDGE_MIN_PX, Math.ceil(scaleFactor));
-
-      // Nudge HEIGHT — the blank gap at the bottom is a row-count issue (too few rows
-      // because the terminal was sized when the container height was wrong).  A height
-      // nudge forces a vertical reflow: the flex container redistributes its height,
-      // the terminal host div changes height, ResizeObserver fires, fitAddon.fit()
-      // re-computes rows from the container's actual current height, and term.resize()
-      // fires with the correct row count — identical to what a manual window drag does.
-      // A width-only nudge does NOT force a height reflow on flex column children, so
-      // it cannot fix a row misalignment even if it triggers the ResizeObserver.
-      const candidateHeights = [height + nudgePx, height - nudgePx].filter(
-        (candidateHeight, index, list) =>
-          candidateHeight > 1 && candidateHeight !== height && list.indexOf(candidateHeight) === index
-      );
-
-      let nudged = false;
-      for (const candidateHeight of candidateHeights) {
-        try {
-          await appWindow.setSize(new PhysicalSize(width, candidateHeight));
-          nudged = true;
-          break;
-        } catch {
-          // If one direction is constrained (near min/max bounds), try the other.
-        }
-      }
-      if (!nudged) {
-        return;
-      }
-
-      await new Promise<void>((resolve) => {
-        window.setTimeout(resolve, FIX_DISPLAY_WINDOW_NUDGE_DELAY_MS);
-      });
-      await appWindow.setSize(new PhysicalSize(width, height));
-    } catch {
-      // Ignore nudge failures; TerminalPanel still runs the refit path.
-    } finally {
-      fixDisplayWindowNudgeInFlightRef.current = false;
-    }
-  }, []);
-
-  const onFixDisplay = useCallback(() => {
-    setFixDisplayRequestId((n) => n + 1);
-    triggerFixDisplayFeedback();
-    void nudgeWindowForFixDisplay();
-  }, [nudgeWindowForFixDisplay, triggerFixDisplayFeedback]);
 
   const appShellStyle = useMemo(
     () =>
@@ -3594,7 +3489,7 @@ export default function App() {
           </div>
         ) : null}
 
-        <section className={fixDisplayFeedbackActive ? 'terminal-region fix-display-feedback-active' : 'terminal-region'}>
+        <section className="terminal-region">
           {selectedThread ? (
             <TerminalPanel
               sessionId={selectedSessionId}
@@ -3610,7 +3505,6 @@ export default function App() {
                   : undefined
               }
               focusRequestId={terminalFocusRequestId}
-              fixDisplayRequestId={fixDisplayRequestId}
               onData={(data) => {
                 if (!selectedThread) {
                   return;
@@ -3722,7 +3616,6 @@ export default function App() {
           onRemoveAttachmentPath={removeSelectedThreadAttachmentPath}
           onClearAttachmentPaths={clearSelectedThreadAttachmentDraft}
           onToggleFullAccess={toggleFullAccess}
-          onFixDisplay={onFixDisplay}
           onLoadBranchSwitcher={onLoadBranchSwitcher}
           onCheckoutBranch={onCheckoutBranch}
         />

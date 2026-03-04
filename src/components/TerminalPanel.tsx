@@ -34,7 +34,6 @@ interface TerminalPanelProps {
   inputEnabled?: boolean;
   overlayMessage?: string;
   focusRequestId?: number;
-  fixDisplayRequestId?: number;
   onData?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
   onFocusChange?: (focused: boolean) => void;
@@ -50,14 +49,12 @@ export function TerminalPanel({
   inputEnabled = true,
   overlayMessage,
   focusRequestId = 0,
-  fixDisplayRequestId = 0,
   onData,
   onResize,
   onFocusChange
 }: TerminalPanelProps) {
   const [fallback, setFallback] = useState(() => import.meta.env.MODE === 'test');
   const [followOutputPaused, setFollowOutputPaused] = useState(false);
-  const [terminalReadyVersion, setTerminalReadyVersion] = useState(0);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const contentRef = useRef(content);
@@ -83,7 +80,6 @@ export function TerminalPanel({
   const resizeFrameRef = useRef<number | null>(null);
   const refreshFrameRef = useRef<number | null>(null);
   const previousFocusRequestRef = useRef(focusRequestId);
-  const handledFixDisplayRequestRef = useRef(0);
   const lastQueueWarningAtRef = useRef(0);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const bulkWritingRef = useRef(false);
@@ -348,7 +344,6 @@ export function TerminalPanel({
         return true;
       });
       terminalRef.current = term;
-      setTerminalReadyVersion((value) => value + 1);
       writeQueueRef.current.setSink({
         write: (chunk, done) => {
           isWritingRef.current = true;
@@ -739,60 +734,6 @@ export function TerminalPanel({
     setFollowOutputPaused(followStateRef.current.mode === 'pausedByUser');
     scheduleTerminalRefresh(term);
   }, [focusRequestId, scheduleTerminalRefresh, scrollToBottomSoon]);
-
-  useEffect(() => {
-    if (fixDisplayRequestId <= handledFixDisplayRequestRef.current) {
-      return;
-    }
-    const term = terminalRef.current;
-    const fitAddon = fitAddonRef.current;
-    if (!term || !fitAddon) {
-      // Keep the request pending until terminal + fit addon are ready.
-      return;
-    }
-    handledFixDisplayRequestRef.current = fixDisplayRequestId;
-
-    const runManualRefit = (withColNudge: boolean) => {
-      const liveTerm = terminalRef.current;
-      const liveFitAddon = fitAddonRef.current;
-      if (!liveTerm || !liveFitAddon) {
-        return;
-      }
-
-      if (withColNudge && liveTerm.cols > 1) {
-        // term.resize() calls _afterResize() → _charSizeService.measure(), which
-        // re-reads character metrics from the DOM.  This is a real fallback for
-        // stale char metrics (wrong cellHeight → too-few rows → blank gap), and is
-        // the only fallback available when the window nudge is skipped (fullscreen,
-        // maximised, or non-resizable windows).  After the nudge the restored cols
-        // value matches what fitAddon.fit() would propose if only row-count was
-        // wrong, so fit still fires a term.resize() for the correct row count.
-        const cols = liveTerm.cols;
-        const rows = liveTerm.rows;
-        liveTerm.resize(cols + 1, rows);
-        liveTerm.resize(cols, rows);
-      }
-
-      liveFitAddon.fit();
-      onResizeRef.current?.(liveTerm.cols, liveTerm.rows);
-      if (shouldAutoFollow(followStateRef.current)) {
-        scrollToBottomSoon(liveTerm);
-      }
-      scheduleTerminalRefresh(liveTerm);
-    };
-
-    // First pass: col nudge refreshes char metrics (via _afterResize →
-    // _charSizeService.measure()), then fit re-computes rows with correct metrics.
-    // Second pass on the next frame catches any layout settling after the async
-    // window height nudge (in nudgeWindowForFixDisplay) fires its ResizeObserver.
-    runManualRefit(true);
-    window.requestAnimationFrame(() => {
-      if (handledFixDisplayRequestRef.current !== fixDisplayRequestId) {
-        return;
-      }
-      runManualRefit(false);
-    });
-  }, [fixDisplayRequestId, scheduleTerminalRefresh, scrollToBottomSoon, terminalReadyVersion]);
 
   const jumpToLatest = useCallback(() => {
     const term = terminalRef.current;

@@ -19,7 +19,6 @@ interface BottomBarProps {
   onAddAttachmentPaths: (paths: string[]) => boolean;
   onRemoveAttachmentPath: (path: string) => void;
   onClearAttachmentPaths: () => void;
-  onFixDisplay: () => void;
   onToggleFullAccess: () => Promise<void>;
   onLoadBranchSwitcher: () => Promise<BranchSwitcherSnapshot>;
   onCheckoutBranch: (branchName: string) => Promise<boolean>;
@@ -32,6 +31,8 @@ interface BranchPopoverPosition {
   top?: number;
   bottom?: number;
 }
+
+const DISPLAY_ISSUE_TIP_MS = 10_000;
 
 function decodeFileUriToPath(uri: string): string {
   const trimmed = uri.trim();
@@ -116,6 +117,58 @@ function BranchGlyph() {
   );
 }
 
+function DisplayIssueTip() {
+  const [showTip, setShowTip] = React.useState(false);
+  const timerRef = React.useRef<number | null>(null);
+
+  const clearTipTimer = React.useCallback(() => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  const handleClick = () => {
+    if (showTip) {
+      clearTipTimer();
+      setShowTip(false);
+      return;
+    }
+
+    setShowTip(true);
+    clearTipTimer();
+    timerRef.current = window.setTimeout(() => {
+      setShowTip(false);
+      timerRef.current = null;
+    }, DISPLAY_ISSUE_TIP_MS);
+  };
+
+  React.useEffect(() => {
+    return () => {
+      clearTipTimer();
+    };
+  }, [clearTipTimer]);
+
+  return (
+    <div className="display-issue-tip-wrapper">
+      <button
+        type="button"
+        className="fix-display-button"
+        data-testid="fix-display-button"
+        onClick={handleClick}
+        title="Having display issues? Click for a quick fix tip."
+      >
+        Display issue?
+      </button>
+      {showTip ? (
+        <div className="display-issue-tip" role="status">
+          Try slightly dragging a window edge to rerender the terminal.
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function BottomBar({
   workspace,
   selectedThread,
@@ -127,7 +180,6 @@ export function BottomBar({
   onAddAttachmentPaths,
   onRemoveAttachmentPath,
   onClearAttachmentPaths,
-  onFixDisplay,
   onToggleFullAccess,
   onLoadBranchSwitcher,
   onCheckoutBranch
@@ -592,15 +644,7 @@ export function BottomBar({
       </div>
 
       <div className="bottom-bar-right">
-        <button
-          type="button"
-          className="fix-display-button"
-          data-testid="fix-display-button"
-          onClick={onFixDisplay}
-          title="Terminal display look misaligned or have a blank gap? Clicking slightly resizes the window height to refit the layout. If it still looks off, try dragging any window edge."
-        >
-          Display issue
-        </button>
+        <DisplayIssueTip />
         <button
           type="button"
           className={selectedThread?.fullAccess ? 'full-access-toggle enabled' : 'full-access-toggle'}
