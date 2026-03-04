@@ -509,6 +509,26 @@ fn open_in_terminal(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+        return Err("Only http(s) URLs are allowed".to_string());
+    }
+
+    std::process::Command::new("open")
+        .arg(trimmed)
+        .status()
+        .map_err(|error| error.to_string())
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err("Failed to open URL".to_string())
+            }
+        })
+}
+
+#[tauri::command]
 fn open_terminal_command(command: String) -> Result<(), String> {
     let escaped = command
         .replace('\\', "\\\\")
@@ -614,6 +634,7 @@ fn main() {
             generate_commit_message,
             open_in_finder,
             open_in_terminal,
+            open_external_url,
             open_terminal_command,
             copy_terminal_env_diagnostics,
             write_image_to_clipboard

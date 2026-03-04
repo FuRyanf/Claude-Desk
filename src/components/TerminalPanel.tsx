@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import 'xterm/css/xterm.css';
 import { FitAddon } from 'xterm-addon-fit';
+import { WebLinksAddon } from 'xterm-addon-web-links';
 import { Terminal } from 'xterm';
+import { api } from '../lib/api';
 import { resolveTerminalContentUpdate } from '../lib/terminalContentUpdate';
 import {
   createFollowState,
@@ -88,17 +90,33 @@ export function TerminalPanel({
   const bulkWriteEpochRef = useRef(0);
   const isWritingRef = useRef(false);
   const userScrollIntentRef = useRef(false);
+  const scrollRafRef = useRef<number | null>(null);
+  const scrollPauseCooldownRef = useRef(0);
 
   const scrollToBottomSoon = useCallback((term: Terminal) => {
     if (!shouldAutoFollow(followStateRef.current)) {
       return;
     }
-    term.scrollToBottom();
-    window.requestAnimationFrame(() => {
+    // Skip if within the cooldown window after user paused scroll.
+    // This prevents a race where a write-batch completion fires scrollToBottom
+    // before the pause handler has propagated through React state.
+    if (Date.now() < scrollPauseCooldownRef.current) {
+      return;
+    }
+    // Coalesce rapid scroll requests into a single rAF to avoid fighting with
+    // user scroll gestures and reduce redundant work during burst output.
+    if (scrollRafRef.current !== null) {
+      return;
+    }
+    scrollRafRef.current = window.requestAnimationFrame(() => {
+      scrollRafRef.current = null;
       if (terminalRef.current !== term) {
         return;
       }
       if (!shouldAutoFollow(followStateRef.current)) {
+        return;
+      }
+      if (Date.now() < scrollPauseCooldownRef.current) {
         return;
       }
       term.scrollToBottom();
@@ -111,7 +129,34 @@ export function TerminalPanel({
       return;
     }
     followStateRef.current = next;
+    // Set a short cooldown so in-flight rAF scroll-to-bottom calls are suppressed.
+    // This closes the race window between the user's scroll gesture and pending
+    // write-batch completions that would snap the viewport back to the bottom.
+    scrollPauseCooldownRef.current = Date.now() + 150;
+    // Cancel any pending scroll-to-bottom rAF.
+    if (scrollRafRef.current !== null) {
+      window.cancelAnimationFrame(scrollRafRef.current);
+      scrollRafRef.current = null;
+    }
     setFollowOutputPaused(true);
+  }, []);
+
+  const openExternalLink = useCallback((_: MouseEvent, uri: string) => {
+    const target = uri.trim();
+    if (!target) {
+      return;
+    }
+    void api.openExternalUrl(target).catch(() => {
+      const newWindow = window.open(target, '_blank', 'noopener,noreferrer');
+      if (!newWindow) {
+        return;
+      }
+      try {
+        newWindow.opener = null;
+      } catch {
+        // no-op: some runtimes disallow setting opener
+      }
+    });
   }, []);
 
   const scheduleTerminalRefresh = useCallback((term: Terminal) => {
@@ -280,6 +325,7 @@ export function TerminalPanel({
       const fitAddon = new FitAddon();
       fitAddonRef.current = fitAddon;
       term.loadAddon(fitAddon);
+      term.loadAddon(new WebLinksAddon(openExternalLink));
       term.open(host);
       term.attachCustomKeyEventHandler((event) => {
         if (
@@ -309,7 +355,7 @@ export function TerminalPanel({
           term.write(chunk, () => {
             isWritingRef.current = false;
             if (terminalRef.current === term && shouldAutoFollow(followStateRef.current)) {
-              term.scrollToBottom();
+              scrollToBottomSoon(term);
             }
             scheduleTerminalRefresh(term);
             maybeLogQueueHealth();
@@ -520,6 +566,10 @@ export function TerminalPanel({
           window.cancelAnimationFrame(refreshFrameRef.current);
           refreshFrameRef.current = null;
         }
+        if (scrollRafRef.current !== null) {
+          window.cancelAnimationFrame(scrollRafRef.current);
+          scrollRafRef.current = null;
+        }
       };
     } catch {
       setFallback(true);
@@ -529,6 +579,7 @@ export function TerminalPanel({
     fallback,
     flushOutgoingInput,
     maybeLogQueueHealth,
+    openExternalLink,
     pauseFollowOutput,
     queueWrite,
     scrollToBottomSoon,
@@ -752,6 +803,8 @@ export function TerminalPanel({
       baseY: term.buffer.active.baseY
     });
     setFollowOutputPaused(false);
+    // Clear cooldown so the explicit user action isn't suppressed.
+    scrollPauseCooldownRef.current = 0;
     scrollToBottomSoon(term);
     scheduleTerminalRefresh(term);
   }, [scheduleTerminalRefresh, scrollToBottomSoon]);

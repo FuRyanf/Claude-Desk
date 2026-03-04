@@ -116,6 +116,7 @@ export const api = {
     invoke<string>('generate_commit_message', { workspacePath, fullAccess }),
   openInFinder: (path: string) => invoke<void>('open_in_finder', { path }),
   openInTerminal: (path: string) => invoke<void>('open_in_terminal', { path }),
+  openExternalUrl: (url: string) => invoke<void>('open_external_url', { url }),
   openTerminalCommand: (command: string) => invoke<void>('open_terminal_command', { command }),
   copyTerminalEnvDiagnostics: (workspacePath: string) =>
     invoke<string>('copy_terminal_env_diagnostics', { workspacePath }),
