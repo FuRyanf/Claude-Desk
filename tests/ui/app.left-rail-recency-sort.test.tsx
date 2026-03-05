@@ -651,6 +651,45 @@ describe('Left rail recency and sorting semantics', () => {
     expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
   });
 
+  it('does not re-mark unread on terminal exit after unread has already been cleared', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Newer thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+    });
+
+    await user.click(screen.getByRole('button', { name: 'submit-input' }));
+    await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+    });
+
+    await waitFor(
+      () => {
+        expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      },
+      { timeout: 2500 }
+    );
+
+    await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+    await waitFor(() => {
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: /Older thread/i }));
+    act(() => {
+      mocks.emitTerminalExit({ sessionId: 'session-thread-newer', code: 0, signal: null });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    });
+  });
+
   it('keeps unread cleared after relaunch when read state was persisted', async () => {
     const user = userEvent.setup();
     const view = render(<App />);

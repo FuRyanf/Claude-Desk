@@ -717,6 +717,7 @@ export default function App() {
   const lastMeaningfulOutputByThreadRef = useRef<Record<string, string>>({});
   const lastSessionStartAtMsByThreadRef = useRef<Record<string, number>>({});
   const lastUserInputAtMsByThreadRef = useRef<Record<string, number>>({});
+  const lastUserInputSequenceByThreadRef = useRef<Record<string, number>>({});
   const runLifecycleByThreadRef = useRef<Record<string, TerminalRunLifecycleState>>({});
   const sessionFailCountByThreadRef = useRef<Record<string, number>>({});
   const outputSequenceCounterRef = useRef(0);
@@ -833,6 +834,7 @@ export default function App() {
       runStore.bindSession(threadId, sessionId, startedAt);
       lastSessionStartAtMsByThreadRef.current[threadId] = Date.now();
       delete lastUserInputAtMsByThreadRef.current[threadId];
+      delete lastUserInputSequenceByThreadRef.current[threadId];
       delete lastMeaningfulOutputByThreadRef.current[threadId];
       delete outputControlCarryByThreadRef.current[threadId];
       delete liveDataSeenBySessionRef.current[sessionId];
@@ -1197,12 +1199,9 @@ export default function App() {
 
     lastMeaningfulOutputByThreadRef.current[threadId] = normalized;
     lastMeaningfulOutputAtMsByThreadRef.current[threadId] = Date.now();
-    return true;
-  }, []);
-
-  const advanceThreadUnreadCursor = useCallback((threadId: string) => {
     outputSequenceCounterRef.current += 1;
     latestOutputSequenceByThreadRef.current[threadId] = outputSequenceCounterRef.current;
+    return true;
   }, []);
 
   const markThreadOutputSeen = useCallback((threadId: string) => {
@@ -1250,11 +1249,14 @@ export default function App() {
   }, []);
 
   const hasUnseenMeaningfulOutputSinceRead = useCallback((threadId: string) => {
-    const lastReadAt = lastReadAtMsByThreadRef.current[threadId] ?? 0;
-    const lastUserInputAt = lastUserInputAtMsByThreadRef.current[threadId] ?? 0;
-    const lastMeaningfulOutputAt = lastMeaningfulOutputAtMsByThreadRef.current[threadId] ?? 0;
+    // Monotonic output sequence gate: unread is only possible when we have a
+    // newer meaningful-output sequence than both (a) last-read and (b) the
+    // most recent user-input baseline in the current session.
+    const latestOutputSeq = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
+    const seenOutputSeq = seenOutputSequenceByThreadRef.current[threadId] ?? 0;
+    const lastUserInputSeq = lastUserInputSequenceByThreadRef.current[threadId] ?? 0;
     return (
-      lastMeaningfulOutputAt > Math.max(lastReadAt, lastUserInputAt) &&
+      latestOutputSeq > Math.max(seenOutputSeq, lastUserInputSeq) &&
       hasUserSentMessageInCurrentSession(threadId)
     );
   }, [hasUserSentMessageInCurrentSession]);
@@ -1266,13 +1268,11 @@ export default function App() {
         delete workingStopTimerByThreadRef.current[threadId];
         stopThreadWorking(threadId);
         if (selectedThreadIdRef.current !== threadId && hasUnseenMeaningfulOutputSinceRead(threadId)) {
-          advanceThreadUnreadCursor(threadId);
           markThreadUnread(threadId);
         }
       }, delayMs);
     },
     [
-      advanceThreadUnreadCursor,
       clearThreadWorkingStopTimer,
       hasUnseenMeaningfulOutputSinceRead,
       markThreadUnread,
@@ -1435,8 +1435,10 @@ export default function App() {
     }
     delete pendingInputByThreadRef.current[threadId];
     lastUserInputAtMsByThreadRef.current[threadId] = Date.now();
+    lastUserInputSequenceByThreadRef.current[threadId] = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
+    clearThreadUnread(threadId);
     await api.terminalWrite(sessionId, pending);
-  }, []);
+  }, [clearThreadUnread]);
 
   const setAttachmentDraftForThread = useCallback((threadId: string, paths: string[]) => {
     setDraftAttachmentsByThread((current) => {
@@ -2387,6 +2389,7 @@ export default function App() {
       delete lastMeaningfulOutputByThreadRef.current[threadId];
       delete lastSessionStartAtMsByThreadRef.current[threadId];
       delete lastUserInputAtMsByThreadRef.current[threadId];
+      delete lastUserInputSequenceByThreadRef.current[threadId];
       delete sessionFailCountByThreadRef.current[threadId];
       delete runLifecycleByThreadRef.current[threadId];
       updateTerminalLogMap((current) => {
@@ -2934,7 +2937,6 @@ export default function App() {
         selectedThreadIdRef.current !== endedThreadId &&
         hasUnseenMeaningfulOutputSinceRead(endedThreadId)
       ) {
-        advanceThreadUnreadCursor(endedThreadId);
         markThreadUnread(endedThreadId);
       }
 
@@ -2978,7 +2980,6 @@ export default function App() {
         .catch(() => undefined);
     },
     [
-      advanceThreadUnreadCursor,
       finishSessionBinding,
       hasUnseenMeaningfulOutputSinceRead,
       refreshThreadsForWorkspace,
@@ -3428,6 +3429,7 @@ export default function App() {
         delete lastMeaningfulOutputByThreadRef.current[threadId];
         delete lastSessionStartAtMsByThreadRef.current[threadId];
         delete lastUserInputAtMsByThreadRef.current[threadId];
+        delete lastUserInputSequenceByThreadRef.current[threadId];
         delete sessionFailCountByThreadRef.current[threadId];
         delete runLifecycleByThreadRef.current[threadId];
       }
@@ -3628,6 +3630,8 @@ export default function App() {
                 if (submittedLines.length > 0) {
                   markThreadUserInput(selectedThread.workspaceId, selectedThread.id);
                   lastUserInputAtMsByThreadRef.current[selectedThread.id] = Date.now();
+                  lastUserInputSequenceByThreadRef.current[selectedThread.id] =
+                    latestOutputSequenceByThreadRef.current[selectedThread.id] ?? 0;
                   sessionFailCountByThreadRef.current[selectedThread.id] = 0;
                   clearThreadUnread(selectedThread.id);
                 }
