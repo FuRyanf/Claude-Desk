@@ -3,12 +3,63 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 import type { RunStatus, ThreadMetadata } from '../types';
 
+const LAST_USER_INPUT_AT_STORAGE_KEY = 'claude-desk:last-user-input-at';
+
 function parseIsoTimestampMs(value?: string | null): number {
   if (!value) {
     return 0;
   }
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseThreadTimestampMap(raw: string | null): Record<string, number> {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    const normalized: Record<string, number> = {};
+    for (const [threadId, value] of Object.entries(parsed)) {
+      if (!threadId) {
+        continue;
+      }
+      const timestamp = typeof value === 'number' ? value : Number(value);
+      if (!Number.isFinite(timestamp) || timestamp <= 0) {
+        continue;
+      }
+      normalized[threadId] = Math.trunc(timestamp);
+    }
+    return normalized;
+  } catch {
+    return {};
+  }
+}
+
+function loadThreadTimestampMap(storageKey: string): Record<string, number> {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  return parseThreadTimestampMap(window.localStorage.getItem(storageKey));
+}
+
+function persistThreadTimestampMap(storageKey: string, map: Record<string, number>) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const entries = Object.entries(map).filter(([, value]) => Number.isFinite(value) && value > 0);
+    if (entries.length === 0) {
+      window.localStorage.removeItem(storageKey);
+      return;
+    }
+    window.localStorage.setItem(storageKey, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // best effort
+  }
 }
 
 function threadActivityTimestampMs(thread: ThreadMetadata): number {
@@ -90,6 +141,7 @@ export interface ThreadStore {
   threadLastOutputAt: (threadId?: string) => number | null;
   subscribeThreadOutput: (listener: (threadId: string) => void) => () => void;
   markThreadUserInput: (workspaceId: string, threadId: string, timestampMs?: number) => void;
+  clearThreadUserInputTimestamps: (threadIds: string[]) => void;
   getThreadDisplayTimestampMs: (thread: ThreadMetadata) => number;
 }
 
@@ -100,7 +152,9 @@ export function useThreadStore(): ThreadStore {
   const listRequestIdByWorkspaceRef = useRef<Record<string, number>>({});
   const removedThreadIdsRef = useRef<Record<string, true>>({});
   const lastOutputAtByThreadRef = useRef<Record<string, number>>({});
-  const lastUserInputAtByThreadRef = useRef<Record<string, number>>({});
+  const lastUserInputAtByThreadRef = useRef<Record<string, number>>(
+    loadThreadTimestampMap(LAST_USER_INPUT_AT_STORAGE_KEY)
+  );
   const threadOutputListenersRef = useRef(new Set<(threadId: string) => void>());
 
   const listThreads = useCallback(async (workspaceId: string) => {
@@ -159,6 +213,7 @@ export function useThreadStore(): ThreadStore {
       const next = { ...lastUserInputAtByThreadRef.current };
       delete next[threadId];
       lastUserInputAtByThreadRef.current = next;
+      persistThreadTimestampMap(LAST_USER_INPUT_AT_STORAGE_KEY, next);
     }
   }, []);
 
@@ -182,6 +237,7 @@ export function useThreadStore(): ThreadStore {
       const next = { ...lastUserInputAtByThreadRef.current };
       delete next[threadId];
       lastUserInputAtByThreadRef.current = next;
+      persistThreadTimestampMap(LAST_USER_INPUT_AT_STORAGE_KEY, next);
     }
   }, []);
 
@@ -279,6 +335,7 @@ export function useThreadStore(): ThreadStore {
       [threadId]: timestampMs
     };
     lastUserInputAtByThreadRef.current = next;
+    persistThreadTimestampMap(LAST_USER_INPUT_AT_STORAGE_KEY, next);
 
     setThreadsByWorkspace((threadsCurrent) => {
       const workspaceThreads = threadsCurrent[workspaceId];
@@ -290,6 +347,35 @@ export function useThreadStore(): ThreadStore {
         [workspaceId]: sortThreads(workspaceThreads, next)
       };
     });
+  }, []);
+
+  const clearThreadUserInputTimestamps = useCallback((threadIds: string[]) => {
+    if (!threadIds || threadIds.length === 0) {
+      return;
+    }
+    let changed = false;
+    const next = { ...lastUserInputAtByThreadRef.current };
+    for (const threadId of threadIds) {
+      if (!threadId || !(threadId in next)) {
+        continue;
+      }
+      delete next[threadId];
+      changed = true;
+    }
+    if (!changed) {
+      return;
+    }
+    lastUserInputAtByThreadRef.current = next;
+    persistThreadTimestampMap(LAST_USER_INPUT_AT_STORAGE_KEY, next);
+  }, []);
+
+  const getThreadDisplayTimestampMs = useCallback((thread: ThreadMetadata): number => {
+    // Exclude updatedAt/lastRunStartedAt — both can change for non-activity metadata/session churn.
+    // lastUserInputAtByThreadRef is persisted in localStorage so recency survives app relaunch.
+    const lastRunEndedMs = parseIsoTimestampMs(thread.lastRunEndedAt);
+    const createdAtMs = parseIsoTimestampMs(thread.createdAt);
+    const inputOverride = lastUserInputAtByThreadRef.current[thread.id] ?? 0;
+    return Math.max(lastRunEndedMs, createdAtMs, inputOverride);
   }, []);
 
   return useMemo(
@@ -312,15 +398,8 @@ export function useThreadStore(): ThreadStore {
       threadLastOutputAt,
       subscribeThreadOutput,
       markThreadUserInput,
-      getThreadDisplayTimestampMs: (thread: ThreadMetadata): number => {
-        // Exclude updatedAt/lastRunStartedAt — both update on every session open (every click).
-        // Include createdAt so threads with no completed run still show an age label after restart
-        // (in-memory lastUserInputAt is lost on restart, so createdAt is the only persistent fallback).
-        const lastRunEndedMs = parseIsoTimestampMs(thread.lastRunEndedAt);
-        const createdAtMs = parseIsoTimestampMs(thread.createdAt);
-        const inputOverride = lastUserInputAtByThreadRef.current[thread.id] ?? 0;
-        return Math.max(lastRunEndedMs, createdAtMs, inputOverride);
-      }
+      clearThreadUserInputTimestamps,
+      getThreadDisplayTimestampMs
     }),
     [
       applyThreadUpdate,
@@ -337,6 +416,8 @@ export function useThreadStore(): ThreadStore {
       setThreadRunState,
       subscribeThreadOutput,
       markThreadUserInput,
+      clearThreadUserInputTimestamps,
+      getThreadDisplayTimestampMs,
       threadLastOutputAt,
       threadsByWorkspace
     ]

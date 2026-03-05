@@ -55,6 +55,7 @@ import type {
 
 const SELECTED_WORKSPACE_KEY = 'claude-desk:selected-workspace';
 const SIDEBAR_WIDTH_KEY = 'claude-desk:sidebar-width';
+const THREAD_LAST_READ_AT_KEY = 'claude-desk:last-read-at';
 const SIDEBAR_WIDTH_DEFAULT = 320;
 const SIDEBAR_WIDTH_MIN = 260;
 const SIDEBAR_WIDTH_MAX = 460;
@@ -88,6 +89,55 @@ function removeThreadFlag(map: Record<string, boolean>, threadId: string) {
   const next = { ...map };
   delete next[threadId];
   return next;
+}
+
+function parseThreadTimestampMap(raw: string | null): Record<string, number> {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    const normalized: Record<string, number> = {};
+    for (const [threadId, value] of Object.entries(parsed)) {
+      if (!threadId) {
+        continue;
+      }
+      const timestamp = typeof value === 'number' ? value : Number(value);
+      if (!Number.isFinite(timestamp) || timestamp <= 0) {
+        continue;
+      }
+      normalized[threadId] = Math.trunc(timestamp);
+    }
+    return normalized;
+  } catch {
+    return {};
+  }
+}
+
+function loadThreadTimestampMap(storageKey: string): Record<string, number> {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  return parseThreadTimestampMap(window.localStorage.getItem(storageKey));
+}
+
+function persistThreadTimestampMap(storageKey: string, map: Record<string, number>) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const entries = Object.entries(map).filter(([, value]) => Number.isFinite(value) && value > 0);
+    if (entries.length === 0) {
+      window.localStorage.removeItem(storageKey);
+      return;
+    }
+    window.localStorage.setItem(storageKey, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // best effort
+  }
 }
 
 function threadSelectionKey(workspaceId: string) {
@@ -571,7 +621,8 @@ export default function App() {
     setSelectedThread,
     setThreadRunState,
     applyThreadUpdate,
-    markThreadUserInput
+    markThreadUserInput,
+    clearThreadUserInputTimestamps
   } = threadStore;
 
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -660,7 +711,8 @@ export default function App() {
   const terminalDataListenerReadyPromiseRef = useRef<Promise<void> | null>(null);
   const latestOutputSequenceByThreadRef = useRef<Record<string, number>>({});
   const seenOutputSequenceByThreadRef = useRef<Record<string, number>>({});
-  const lastReadAtMsByThreadRef = useRef<Record<string, number>>({});
+  const lastReadAtMsByThreadRef = useRef<Record<string, number>>(loadThreadTimestampMap(THREAD_LAST_READ_AT_KEY));
+  const threadReadStateDirtyRef = useRef(false);
   const lastMeaningfulOutputAtMsByThreadRef = useRef<Record<string, number>>({});
   const lastMeaningfulOutputByThreadRef = useRef<Record<string, string>>({});
   const lastSessionStartAtMsByThreadRef = useRef<Record<string, number>>({});
@@ -755,6 +807,14 @@ export default function App() {
     await withTimeout(terminalDataListenerReadyPromiseRef.current, TERMINAL_DATA_LISTENER_READY_TIMEOUT_MS);
   }, []);
 
+  const flushThreadReadState = useCallback(() => {
+    if (!threadReadStateDirtyRef.current) {
+      return;
+    }
+    threadReadStateDirtyRef.current = false;
+    persistThreadTimestampMap(THREAD_LAST_READ_AT_KEY, lastReadAtMsByThreadRef.current);
+  }, []);
+
   selectedWorkspaceIdRef.current = selectedWorkspaceId;
   selectedThreadIdRef.current = selectedThreadId;
   activeRunsByThreadRef.current = runStore.activeRunsByThread;
@@ -837,6 +897,28 @@ export default function App() {
   useEffect(() => {
     lastTerminalLogByThreadRef.current = lastTerminalLogByThread;
   }, [lastTerminalLogByThread]);
+
+  useEffect(() => {
+    const onBeforeUnload = () => {
+      flushThreadReadState();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushThreadReadState();
+      }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    const id = window.setInterval(() => {
+      flushThreadReadState();
+    }, 400);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      flushThreadReadState();
+    };
+  }, [flushThreadReadState]);
 
   useEffect(() => {
     draftAttachmentsByThreadRef.current = draftAttachmentsByThread;
@@ -1133,11 +1215,15 @@ export default function App() {
     return latest > seen;
   }, []);
 
-  const clearThreadUnread = useCallback((threadId: string) => {
+  const clearThreadUnread = useCallback((threadId: string, persistNow = false) => {
     lastReadAtMsByThreadRef.current[threadId] = Date.now();
+    threadReadStateDirtyRef.current = true;
     markThreadOutputSeen(threadId);
     setUnreadOutputByThread((current) => removeThreadFlag(current, threadId));
-  }, [markThreadOutputSeen]);
+    if (persistNow) {
+      flushThreadReadState();
+    }
+  }, [flushThreadReadState, markThreadOutputSeen]);
 
   const markThreadUnread = useCallback((threadId: string) => {
     setUnreadOutputByThread((current) => {
@@ -1165,8 +1251,12 @@ export default function App() {
 
   const hasUnseenMeaningfulOutputSinceRead = useCallback((threadId: string) => {
     const lastReadAt = lastReadAtMsByThreadRef.current[threadId] ?? 0;
+    const lastUserInputAt = lastUserInputAtMsByThreadRef.current[threadId] ?? 0;
     const lastMeaningfulOutputAt = lastMeaningfulOutputAtMsByThreadRef.current[threadId] ?? 0;
-    return lastMeaningfulOutputAt > lastReadAt && hasUserSentMessageInCurrentSession(threadId);
+    return (
+      lastMeaningfulOutputAt > Math.max(lastReadAt, lastUserInputAt) &&
+      hasUserSentMessageInCurrentSession(threadId)
+    );
   }, [hasUserSentMessageInCurrentSession]);
 
   const scheduleThreadWorkingStop = useCallback(
@@ -2292,6 +2382,7 @@ export default function App() {
       delete latestOutputSequenceByThreadRef.current[threadId];
       delete seenOutputSequenceByThreadRef.current[threadId];
       delete lastReadAtMsByThreadRef.current[threadId];
+      threadReadStateDirtyRef.current = true;
       delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
       delete lastMeaningfulOutputByThreadRef.current[threadId];
       delete lastSessionStartAtMsByThreadRef.current[threadId];
@@ -2411,9 +2502,9 @@ export default function App() {
     async (workspaceId: string, threadId: string) => {
       const previousThreadId = selectedThreadIdRef.current;
       if (previousThreadId && previousThreadId !== threadId) {
-        clearThreadUnread(previousThreadId);
+        clearThreadUnread(previousThreadId, true);
       }
-      clearThreadUnread(threadId);
+      clearThreadUnread(threadId, true);
       if (selectedWorkspaceIdRef.current !== workspaceId) {
         setSelectedWorkspace(workspaceId);
       }
@@ -2584,7 +2675,7 @@ export default function App() {
     if (!selectedThreadId) {
       return;
     }
-    clearThreadUnread(selectedThreadId);
+    clearThreadUnread(selectedThreadId, true);
   }, [clearThreadUnread, selectedThreadId]);
 
   useEffect(() => {
@@ -3322,6 +3413,7 @@ export default function App() {
       }
 
       window.localStorage.removeItem(threadSelectionKey(workspace.id));
+      clearThreadUserInputTimestamps(threadIds);
       for (const threadId of threadIds) {
         delete inputBufferByThreadRef.current[threadId];
         delete inputControlCarryByThreadRef.current[threadId];
@@ -3331,6 +3423,7 @@ export default function App() {
         delete latestOutputSequenceByThreadRef.current[threadId];
         delete seenOutputSequenceByThreadRef.current[threadId];
         delete lastReadAtMsByThreadRef.current[threadId];
+        threadReadStateDirtyRef.current = true;
         delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
         delete lastMeaningfulOutputByThreadRef.current[threadId];
         delete lastSessionStartAtMsByThreadRef.current[threadId];
@@ -3395,6 +3488,7 @@ export default function App() {
       pushToast(`Removed project "${workspace.name}".`, 'info');
     },
     [
+      clearThreadUserInputTimestamps,
       invalidatePendingSessionStart,
       pushToast,
       refreshWorkspaces,

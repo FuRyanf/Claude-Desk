@@ -325,6 +325,27 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
+  it('restores persisted user-input recency after relaunch', async () => {
+    const nowMs = Date.parse('2026-02-22T10:00:00.000Z');
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(nowMs);
+    try {
+      window.localStorage.setItem(
+        'claude-desk:last-user-input-at',
+        JSON.stringify({
+          'thread-older': nowMs - 20_000
+        })
+      );
+
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Older thread/i });
+      expect(getThreadOrder()).toEqual(['Older thread', 'Newer thread']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not re-sort threads from output-only activity', async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -469,37 +490,42 @@ describe('Left rail recency and sorting semantics', () => {
   });
 
   it('does not resurface unread after the user reads output before idle timeout completes', async () => {
-    const user = userEvent.setup();
-    render(<App />);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
 
-    await screen.findByRole('button', { name: /Newer thread/i });
-    await waitFor(() => {
-      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
-    });
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
 
-    await user.click(screen.getByRole('button', { name: 'submit-input' }));
-    await waitFor(() => {
-      expect(screen.getByTestId('thread-running-thread-newer')).toBeInTheDocument();
-    });
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-running-thread-newer')).toBeInTheDocument();
+      });
 
-    await user.click(screen.getByRole('button', { name: /Older thread/i }));
-    await waitFor(() => {
-      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
-    });
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
+      });
 
-    act(() => {
-      mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
-    });
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+      });
 
-    await user.click(screen.getByRole('button', { name: /Newer thread/i }));
-    expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /Older thread/i }));
-    await new Promise<void>((resolve) => {
-      window.setTimeout(() => resolve(), 1400);
-    });
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
 
-    expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not mark unread when a run completes offscreen but no new output arrived after it was read', async () => {
@@ -622,6 +648,55 @@ describe('Left rail recency and sorting semantics', () => {
       window.setTimeout(() => resolve(), 80);
     });
 
+    expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+  });
+
+  it('keeps unread cleared after relaunch when read state was persisted', async () => {
+    const user = userEvent.setup();
+    const view = render(<App />);
+
+    await screen.findByRole('button', { name: /Newer thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+    });
+
+    await user.click(screen.getByRole('button', { name: 'submit-input' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('thread-running-thread-newer')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: /Older thread/i }));
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
+    });
+
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+    });
+
+    await waitFor(
+      () => {
+        expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      },
+      { timeout: 2500 }
+    );
+
+    await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+    await waitFor(() => {
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    });
+
+    await waitFor(() => {
+      const raw = window.localStorage.getItem('claude-desk:last-read-at') ?? '{}';
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      expect(typeof parsed['thread-newer']).toBe('number');
+    });
+
+    view.unmount();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Newer thread/i });
     expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
   });
 
