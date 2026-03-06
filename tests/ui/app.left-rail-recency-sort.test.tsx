@@ -690,6 +690,49 @@ describe('Left rail recency and sorting semantics', () => {
     });
   });
 
+  it('does not re-mark unread from shell prompt noise after the thread was already read', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: '/tmp/workspace % ' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps unread cleared after relaunch when read state was persisted', async () => {
     const user = userEvent.setup();
     const view = render(<App />);

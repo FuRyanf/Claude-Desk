@@ -508,6 +508,53 @@ function normalizeMeaningfulOutputText(chunk: string): string {
   return visibleText;
 }
 
+function looksLikeShellPromptText(chunk: string): boolean {
+  if (!chunk) {
+    return false;
+  }
+
+  const lines = stripAnsi(chunk)
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0 || lines.length > 2) {
+    return false;
+  }
+
+  const line = lines[lines.length - 1];
+  if (!/[#$%>]$/.test(line)) {
+    return false;
+  }
+
+  const withoutPrompt = line.slice(0, -1).trim();
+  if (!withoutPrompt) {
+    return true;
+  }
+
+  if (/[.?!]$/.test(withoutPrompt)) {
+    return false;
+  }
+
+  const tokens = withoutPrompt.split(/\s+/);
+  if (tokens.length > 4) {
+    return false;
+  }
+
+  const hasShellLikeToken = tokens.some((token) => /[@/~:[\]()\\]/.test(token));
+  if (!hasShellLikeToken && tokens.length !== 1) {
+    return false;
+  }
+
+  return tokens.every((token) => {
+    if (/^\[[^\]]+\]$/.test(token) || /^\([^)]+\)$/.test(token)) {
+      return true;
+    }
+    return /^[A-Za-z0-9._/+:-]+$/.test(token);
+  });
+}
+
 function mergeTerminalLogSnapshot(existing: string, incoming: string): string {
   if (!incoming) {
     return existing;
@@ -1197,6 +1244,11 @@ export default function App() {
       return false;
     }
 
+    const lifecycle = runLifecycleByThreadRef.current[threadId];
+    if (!workingByThreadRef.current[threadId] && lifecycle?.phase !== 'streaming' && looksLikeShellPromptText(normalized)) {
+      return false;
+    }
+
     lastMeaningfulOutputByThreadRef.current[threadId] = normalized;
     lastMeaningfulOutputAtMsByThreadRef.current[threadId] = Date.now();
     outputSequenceCounterRef.current += 1;
@@ -1208,12 +1260,6 @@ export default function App() {
     seenOutputSequenceByThreadRef.current[threadId] = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
   }, []);
 
-  const hasUnseenThreadOutput = useCallback((threadId: string) => {
-    const latest = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
-    const seen = seenOutputSequenceByThreadRef.current[threadId] ?? 0;
-    return latest > seen;
-  }, []);
-
   const clearThreadUnread = useCallback((threadId: string, persistNow = false) => {
     lastReadAtMsByThreadRef.current[threadId] = Date.now();
     threadReadStateDirtyRef.current = true;
@@ -1223,21 +1269,6 @@ export default function App() {
       flushThreadReadState();
     }
   }, [flushThreadReadState, markThreadOutputSeen]);
-
-  const markThreadUnread = useCallback((threadId: string) => {
-    setUnreadOutputByThread((current) => {
-      if (!hasUnseenThreadOutput(threadId)) {
-        return current;
-      }
-      if (current[threadId]) {
-        return current;
-      }
-      return {
-        ...current,
-        [threadId]: true
-      };
-    });
-  }, [hasUnseenThreadOutput]);
 
   // Returns true only if the user sent at least one message in the current session
   // (i.e. after the most recent session bind). Prevents Claude's startup prompt from
@@ -1260,6 +1291,21 @@ export default function App() {
       hasUserSentMessageInCurrentSession(threadId)
     );
   }, [hasUserSentMessageInCurrentSession]);
+
+  const markThreadUnread = useCallback((threadId: string) => {
+    setUnreadOutputByThread((current) => {
+      if (!hasUnseenMeaningfulOutputSinceRead(threadId)) {
+        return current;
+      }
+      if (current[threadId]) {
+        return current;
+      }
+      return {
+        ...current,
+        [threadId]: true
+      };
+    });
+  }, [hasUnseenMeaningfulOutputSinceRead]);
 
   const scheduleThreadWorkingStop = useCallback(
     (threadId: string, delayMs = THREAD_WORKING_IDLE_TIMEOUT_MS) => {
@@ -3538,7 +3584,7 @@ export default function App() {
         onRemoveWorkspace={onRemoveWorkspace}
         isThreadWorking={runStore.isThreadWorking}
         hasUnreadThreadOutput={(threadId) =>
-          Boolean(unreadOutputByThread[threadId]) && hasUnseenThreadOutput(threadId)
+          Boolean(unreadOutputByThread[threadId]) && hasUnseenMeaningfulOutputSinceRead(threadId)
         }
         getThreadDisplayTimestampMs={threadStore.getThreadDisplayTimestampMs}
         getSearchTextForThread={getSearchTextForThread}
