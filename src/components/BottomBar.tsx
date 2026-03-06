@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { createPortal } from 'react-dom';
+import { convertFileSrc } from '@tauri-apps/api/core';
 
 import type { GitBranchEntry, GitInfo, GitWorkspaceStatus, ThreadMetadata, Workspace } from '../types';
 
@@ -11,6 +12,7 @@ interface BranchSwitcherSnapshot {
 interface BottomBarProps {
   workspace?: Workspace;
   selectedThread?: ThreadMetadata;
+  skillsControl?: React.ReactNode;
   attachmentDraftPaths: string[];
   attachmentsEnabled: boolean;
   fullAccessUpdating?: boolean;
@@ -32,7 +34,7 @@ interface BranchPopoverPosition {
   bottom?: number;
 }
 
-const DISPLAY_ISSUE_TIP_MS = 10_000;
+const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
 
 function decodeFileUriToPath(uri: string): string {
   const trimmed = uri.trim();
@@ -100,6 +102,124 @@ function extractAttachmentPathsFromDrop(dataTransfer: DataTransfer): string[] {
   return normalizeDroppedPaths(paths);
 }
 
+function attachmentDisplayName(path: string): string {
+  const normalized = path.replace(/[\\/]+$/, '');
+  const lastSegment = normalized.split(/[\\/]/).pop();
+  return lastSegment && lastSegment.length > 0 ? lastSegment : path;
+}
+
+function attachmentSecondaryLabel(path: string): string | null {
+  const normalized = path.replace(/[\\/]+$/, '');
+  const segments = normalized.split(/[\\/]/).filter(Boolean);
+  if (segments.length <= 1) {
+    return null;
+  }
+  return segments.slice(-2, -1)[0] ?? null;
+}
+
+function isImageAttachmentPath(path: string): boolean {
+  const name = attachmentDisplayName(path);
+  const dotIndex = name.lastIndexOf('.');
+  if (dotIndex < 0) {
+    return false;
+  }
+  return IMAGE_ATTACHMENT_EXTENSIONS.has(name.slice(dotIndex + 1).toLowerCase());
+}
+
+function safeConvertAttachmentPreviewSrc(path: string): string | null {
+  try {
+    return convertFileSrc(path);
+  } catch {
+    return null;
+  }
+}
+
+function PaperclipIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M8.7 12.6 14.8 6.5a3.25 3.25 0 1 1 4.6 4.6l-8 8a5.25 5.25 0 1 1-7.43-7.43l8.36-8.35"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function FileIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M7.25 3.75h6.3l4.2 4.2v10.3A1.75 1.75 0 0 1 16 20H7.25A1.75 1.75 0 0 1 5.5 18.25V5.5A1.75 1.75 0 0 1 7.25 3.75Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
+      <path d="M13.5 3.9v4.1h4.1" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ImageIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="5" width="16" height="14" rx="2.2" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <circle cx="9" cy="10" r="1.4" fill="currentColor" />
+      <path d="m7 16 3.5-3.5 2.5 2.5 2-2 2.5 3" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+const AttachmentChip = React.memo(function AttachmentChip({
+  path,
+  index,
+  disabled,
+  onRemove
+}: {
+  path: string;
+  index: number;
+  disabled: boolean;
+  onRemove: (path: string) => void;
+}) {
+  const [previewFailed, setPreviewFailed] = React.useState(false);
+  const imageAttachment = isImageAttachmentPath(path);
+  const previewSrc = imageAttachment && !previewFailed ? safeConvertAttachmentPreviewSrc(path) : null;
+  const displayName = attachmentDisplayName(path);
+  const secondaryLabel = imageAttachment ? displayName : attachmentSecondaryLabel(path);
+  const primaryLabel = imageAttachment ? `Image #${index + 1}` : displayName;
+
+  return (
+    <span key={path} className={imageAttachment ? 'attachment-chip image' : 'attachment-chip'} title={path}>
+      <span className={imageAttachment ? 'attachment-chip-preview image' : 'attachment-chip-preview'} aria-hidden="true">
+        {previewSrc ? (
+          <img src={previewSrc} alt="" onError={() => setPreviewFailed(true)} />
+        ) : imageAttachment ? (
+          <ImageIcon />
+        ) : (
+          <FileIcon />
+        )}
+      </span>
+      <span className="attachment-chip-copy">
+        <span className="attachment-chip-text">{primaryLabel}</span>
+        {secondaryLabel ? <span className="attachment-chip-subtext">{secondaryLabel}</span> : null}
+      </span>
+      <button
+        type="button"
+        className="attachment-chip-remove"
+        aria-label={`Remove attachment ${displayName}`}
+        onClick={() => onRemove(path)}
+        disabled={disabled}
+      >
+        ×
+      </button>
+    </span>
+  );
+});
+
 function BranchGlyph() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -117,61 +237,10 @@ function BranchGlyph() {
   );
 }
 
-function DisplayIssueTip() {
-  const [showTip, setShowTip] = React.useState(false);
-  const timerRef = React.useRef<number | null>(null);
-
-  const clearTipTimer = React.useCallback(() => {
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-  }, []);
-
-  const handleClick = () => {
-    if (showTip) {
-      clearTipTimer();
-      setShowTip(false);
-      return;
-    }
-
-    setShowTip(true);
-    clearTipTimer();
-    timerRef.current = window.setTimeout(() => {
-      setShowTip(false);
-      timerRef.current = null;
-    }, DISPLAY_ISSUE_TIP_MS);
-  };
-
-  React.useEffect(() => {
-    return () => {
-      clearTipTimer();
-    };
-  }, [clearTipTimer]);
-
-  return (
-    <div className="display-issue-tip-wrapper">
-      <button
-        type="button"
-        className="fix-display-button"
-        data-testid="fix-display-button"
-        onClick={handleClick}
-        title="Having display issues? Click for a quick fix tip."
-      >
-        Display issue?
-      </button>
-      {showTip ? (
-        <div className="display-issue-tip" role="status">
-          Try slightly dragging a window edge to rerender the terminal.
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 export function BottomBar({
   workspace,
   selectedThread,
+  skillsControl,
   attachmentDraftPaths,
   attachmentsEnabled,
   fullAccessUpdating = false,
@@ -598,34 +667,29 @@ export function BottomBar({
             onClick={() => void onPickAttachments()}
             disabled={!attachmentsEnabled}
           >
-            +
+            <PaperclipIcon />
           </button>
 
           <div className="attachment-composer-main">
             {attachmentDraftPaths.length > 0 ? (
               <div className="attachment-chip-list" data-testid="attachment-chip-list">
-                {attachmentDraftPaths.map((path) => (
-                  <span key={path} className="attachment-chip" title={path}>
-                    <span className="attachment-chip-text">{path}</span>
-                    <button
-                      type="button"
-                      className="attachment-chip-remove"
-                      aria-label={`Remove attachment ${path}`}
-                      onClick={() => onRemoveAttachmentPath(path)}
-                      disabled={!attachmentsEnabled}
-                    >
-                      ×
-                    </button>
-                  </span>
+                {attachmentDraftPaths.map((path, index) => (
+                  <AttachmentChip
+                    key={path}
+                    path={path}
+                    index={index}
+                    disabled={!attachmentsEnabled}
+                    onRemove={onRemoveAttachmentPath}
+                  />
                 ))}
               </div>
             ) : (
               <p className="attachment-drop-hint">
                 {attachmentsEnabled
                   ? attachmentDragActive
-                    ? 'Drop files to attach'
-                    : 'Drop files here or click + to attach (sent on Enter)'
-                  : 'Select a thread to add attachments'}
+                    ? 'Drop files or images to attach'
+                    : 'Attach files or images. They send with your next prompt.'
+                  : 'Select a thread to stage attachments'}
               </p>
             )}
           </div>
@@ -644,7 +708,7 @@ export function BottomBar({
       </div>
 
       <div className="bottom-bar-right">
-        <DisplayIssueTip />
+        {skillsControl}
         <button
           type="button"
           className={selectedThread?.fullAccess ? 'full-access-toggle enabled' : 'full-access-toggle'}

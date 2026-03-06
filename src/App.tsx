@@ -9,6 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent
 } from 'react';
 
+import { setTheme as setAppTheme } from '@tauri-apps/api/app';
 import { confirm, open } from '@tauri-apps/plugin-dialog';
 
 import './styles.css';
@@ -19,9 +20,18 @@ import { HeaderBar } from './components/HeaderBar';
 import { LeftRail } from './components/LeftRail';
 import { SettingsModal } from './components/SettingsModal';
 import { TerminalPanel } from './components/TerminalPanel';
+import { ThreadSkillsPopover } from './components/ThreadSkillsPopover';
 import { ToastRegion, type ToastItem } from './components/ToastRegion';
+import { WorkspaceShellDrawer } from './components/WorkspaceShellDrawer';
 import { api, onTerminalData, onTerminalExit, onThreadUpdated } from './lib/api';
 import { clampTerminalLog as clampTerminalLogText } from './lib/terminalLogClamp';
+import {
+  applyAppearanceMode,
+  normalizeAppearanceMode,
+  persistAppearanceMode,
+  readStoredAppearanceMode,
+  resolveAppearanceTheme
+} from './lib/appearance';
 import {
   createRunLifecycleState,
   isStreamingStuck,
@@ -37,15 +47,25 @@ import {
   mergeSnapshotAndBufferedLive,
   type PendingSnapshotHydration
 } from './lib/terminalHydration';
+import {
+  loadSkillUsageMap,
+  persistSkillUsageMap,
+  recordSkillUsage,
+  toggleSkillPinned,
+  type SkillUsageMap
+} from './lib/skillUsage';
+import { isRemoteWorkspaceKind } from './lib/workspaceKind';
 import { useRunStore } from './stores/runStore';
 import { useThreadStore } from './stores/threadStore';
 import type {
+  AppearanceMode,
   AppUpdateInfo,
   GitBranchEntry,
   GitInfo,
   GitWorkspaceStatus,
   RunStatus,
   Settings,
+  SkillInfo,
   TerminalDataEvent,
   TerminalExitEvent,
   TerminalSessionMode,
@@ -65,6 +85,7 @@ const TERMINAL_LOG_FLUSH_INTERVAL_MS = 16;
 const TERMINAL_LOG_FLUSH_SAFETY_MS = 48;
 const TERMINAL_DATA_LISTENER_READY_TIMEOUT_MS = 800;
 const SESSION_SNAPSHOT_REFRESH_DELAYS_MS = [320, 1100];
+const SESSION_SNAPSHOT_LATE_REFRESH_DELAYS_MS = [2200, 4200];
 const CLAUDE_IN_PLACE_RESTART_DELAY_MS = 120;
 const RDEV_SHELL_PROMPT_POLL_INTERVAL_MS = 120;
 const RDEV_SHELL_PROMPT_MAX_POLLS = 12;
@@ -74,8 +95,16 @@ const THREAD_WORKING_IDLE_TIMEOUT_MS = 1200;
 const THREAD_WORKING_STUCK_TIMEOUT_MS = 15_000;
 const MAX_ATTACHMENT_DRAFTS = 24;
 const MAX_ATTACHMENTS_PER_MESSAGE = 12;
+const MAX_HIDDEN_INJECTED_PROMPTS_PER_THREAD = 80;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
+
+function normalizeSettings(settings?: Settings | null): Settings {
+  return {
+    claudeCliPath: settings?.claudeCliPath ?? null,
+    appearanceMode: normalizeAppearanceMode(settings?.appearanceMode)
+  };
+}
 
 interface PendingSessionStart {
   requestId: number;
@@ -208,16 +237,25 @@ function hasShellPromptInSnapshot(snapshot: string): boolean {
   return false;
 }
 
+function looksLikeClaudeUiReadyText(snapshot: string): boolean {
+  if (!snapshot) {
+    return false;
+  }
+
+  const normalized = stripAnsi(snapshot).toLowerCase();
+  return (
+    normalized.includes('for shortcuts') ||
+    normalized.includes('bypass permissions') ||
+    normalized.includes('what should claude do instead')
+  );
+}
+
 function stripAnsi(text: string): string {
   return text.replace(ANSI_REGEX, '');
 }
 
 function isDefaultThreadTitle(title: string): boolean {
   return title.trim().toLowerCase() === 'new thread';
-}
-
-function isRemoteWorkspaceKind(kind: Workspace['kind']): boolean {
-  return kind === 'rdev' || kind === 'ssh';
 }
 
 function normalizeTerminalInputChunk(data: string): string {
@@ -356,7 +394,12 @@ function extractSubmittedInputLines(
   const submittedLines: string[] = [];
 
   for (const char of normalized) {
-    if (char === '\r' || char === '\n') {
+    if (char === '\n') {
+      buffer += '\n';
+      continue;
+    }
+
+    if (char === '\r') {
       if (buffer.trim().length > 0) {
         submittedLines.push(buffer);
       }
@@ -431,9 +474,11 @@ function buildAttachmentPrompt(paths: string[]): string {
   const hasImages = limited.some(isImageAttachmentPath);
 
   const parts = [
-    `Use these attachments from Claude Desk as context: ${limited.map(quotePathForPrompt).join(', ')}.`,
-    hasImages ? 'For image/screenshot files, analyze the visual content.' : 'Read each file directly from the provided path.',
-    'If any path cannot be accessed, tell me exactly which one failed.'
+    'Attachments from Claude Desk:',
+    ...limited.map((path) => `- ${quotePathForPrompt(path)}`),
+    '',
+    hasImages ? 'Inspect image and screenshot files visually.' : 'Read the attached files directly.',
+    'If any attachment cannot be opened, say exactly which one failed.'
   ];
 
   if (omittedCount > 0) {
@@ -442,11 +487,57 @@ function buildAttachmentPrompt(paths: string[]): string {
     );
   }
 
-  return parts.join(' ');
+  return parts.join('\n');
+}
+
+function buildSkillPrompt(skills: SkillInfo[]): string {
+  const limited = skills.slice(0, 8);
+  const omittedCount = Math.max(0, skills.length - limited.length);
+  const references = limited.map((skill) => `${skill.name} (${skill.relativePath})`);
+  const parts = [
+    'Project skills to use for this request when relevant:',
+    ...references.map((reference) => `- ${reference}`),
+    '',
+    'Read each referenced SKILL.md before acting and follow its instructions when it applies.'
+  ];
+
+  if (omittedCount > 0) {
+    parts.push(
+      `${omittedCount} additional skill${omittedCount === 1 ? '' : 's'} were selected but omitted from this inline preamble to keep it compact.`
+    );
+  }
+
+  return parts.join('\n');
 }
 
 function clampTerminalLog(text: string): string {
   return clampTerminalLogText(text, TERMINAL_LOG_BUFFER_CHARS);
+}
+
+function stripFirstOccurrence(source: string, fragment: string): string {
+  if (!source || !fragment) {
+    return source;
+  }
+  const index = source.indexOf(fragment);
+  if (index < 0) {
+    return source;
+  }
+  return `${source.slice(0, index)}${source.slice(index + fragment.length)}`;
+}
+
+function stripHiddenPromptEchoes(text: string, prompts: string[]): string {
+  if (!text || prompts.length === 0) {
+    return text;
+  }
+
+  let next = text;
+  for (const prompt of prompts) {
+    if (!prompt) {
+      continue;
+    }
+    next = stripFirstOccurrence(next, prompt);
+  }
+  return next;
 }
 
 function isEditableElement(element: Element | null): boolean {
@@ -662,6 +753,7 @@ export default function App() {
     listThreads,
     createThread,
     setThreadFullAccess,
+    setThreadSkills,
     renameThread,
     deleteThread,
     setSelectedWorkspace,
@@ -686,17 +778,35 @@ export default function App() {
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const [threadSearch, setThreadSearch] = useState('');
   const [gitInfo, setGitInfo] = useState<GitInfo | null>(null);
-  const [terminalFocused, setTerminalFocused] = useState(false);
+  const [focusedTerminalKind, setFocusedTerminalKind] = useState<'claude' | 'shell' | null>(null);
   const [terminalSize, setTerminalSize] = useState({ cols: 120, rows: 32 });
+  const [shellTerminalSize, setShellTerminalSize] = useState({ cols: 120, rows: 16 });
   const [lastTerminalLogByThread, setLastTerminalLogByThread] = useState<Record<string, string>>({});
   const [unreadOutputByThread, setUnreadOutputByThread] = useState<Record<string, boolean>>({});
   const [draftAttachmentsByThread, setDraftAttachmentsByThread] = useState<Record<string, string[]>>({});
+  const [skillsByWorkspaceId, setSkillsByWorkspaceId] = useState<Record<string, SkillInfo[]>>({});
+  const [skillsLoadingByWorkspaceId, setSkillsLoadingByWorkspaceId] = useState<Record<string, boolean>>({});
+  const [skillErrorsByWorkspaceId, setSkillErrorsByWorkspaceId] = useState<Record<string, string | null>>({});
+  const [skillUsageMap, setSkillUsageMap] = useState<SkillUsageMap>(() => loadSkillUsageMap());
+  const [skillsUpdating, setSkillsUpdating] = useState(false);
+  const [shellDrawerOpen, setShellDrawerOpen] = useState(false);
+  const [shellTerminalSessionId, setShellTerminalSessionId] = useState<string | null>(null);
+  const [shellTerminalWorkspaceId, setShellTerminalWorkspaceId] = useState<string | null>(null);
+  const [shellTerminalContent, setShellTerminalContent] = useState('');
+  const [shellTerminalStarting, setShellTerminalStarting] = useState(false);
+  const [shellTerminalFocusRequestId, setShellTerminalFocusRequestId] = useState(0);
 
-  const [settings, setSettings] = useState<Settings>({ claudeCliPath: null });
+  const [settings, setSettings] = useState<Settings>(() =>
+    normalizeSettings({
+      claudeCliPath: null,
+      appearanceMode: readStoredAppearanceMode()
+    })
+  );
   const [detectedCliPath, setDetectedCliPath] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [blockingError, setBlockingError] = useState<string | null>(null);
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
+  const [terminalRepairRequestId, setTerminalRepairRequestId] = useState(0);
 
   const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
   const [addWorkspaceMode, setAddWorkspaceMode] = useState<'local' | 'rdev' | 'ssh'>('local');
@@ -727,6 +837,9 @@ export default function App() {
 
   const selectedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const selectedThreadIdRef = useRef<string | undefined>(undefined);
+  const focusedTerminalKindRef = useRef<'claude' | 'shell' | null>(null);
+  const shellTerminalSessionIdRef = useRef<string | null>(null);
+  const shellTerminalWorkspaceIdRef = useRef<string | null>(null);
   const activeRunsByThreadRef = useRef(runStore.activeRunsByThread);
   const workingByThreadRef = useRef(runStore.workingByThread);
   const sidebarResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -748,6 +861,7 @@ export default function App() {
   const threadTitleInitializedRef = useRef<Record<string, true>>({});
   const deletedThreadIdsRef = useRef<Record<string, true>>({});
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
+  const hiddenInjectedPromptsByThreadRef = useRef<Record<string, string[]>>({});
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
   const pendingSnapshotBySessionRef = useRef<Record<string, PendingSnapshotHydration>>({});
   const terminalSnapshotRefreshTimersBySessionRef = useRef<Record<string, number[]>>({});
@@ -773,6 +887,7 @@ export default function App() {
   const threadUpdatedEventHandlerRef = useRef<(thread: ThreadMetadata) => void>(() => undefined);
   const autoRecoverInFlightRef = useRef(false);
   const lastAutoRecoverAttemptAtRef = useRef(0);
+  const skillListRequestIdByWorkspaceRef = useRef<Record<string, number>>({});
   const sessionMetaBySessionIdRef = useRef<
     Record<
       string,
@@ -836,6 +951,34 @@ export default function App() {
     return draftAttachmentsByThread[selectedThreadId] ?? [];
   }, [draftAttachmentsByThread, selectedThreadId]);
 
+  const selectedWorkspaceSkills = useMemo(() => {
+    if (!selectedWorkspace) {
+      return [];
+    }
+    return skillsByWorkspaceId[selectedWorkspace.id] ?? [];
+  }, [selectedWorkspace, skillsByWorkspaceId]);
+
+  const selectedWorkspaceSkillsLoading = selectedWorkspace ? Boolean(skillsLoadingByWorkspaceId[selectedWorkspace.id]) : false;
+  const selectedWorkspaceSkillError = selectedWorkspace ? skillErrorsByWorkspaceId[selectedWorkspace.id] ?? null : null;
+
+  const selectedInjectableSkills = useMemo(() => {
+    if (!selectedThread || !selectedWorkspace) {
+      return [];
+    }
+    const availableById = new Map(selectedWorkspaceSkills.map((skill) => [skill.id, skill]));
+    return selectedThread.enabledSkills
+      .map((skillId) => availableById.get(skillId))
+      .filter((skill): skill is SkillInfo => Boolean(skill));
+  }, [selectedThread, selectedWorkspace, selectedWorkspaceSkills]);
+
+  const handleClaudeTerminalFocusChange = useCallback((focused: boolean) => {
+    setFocusedTerminalKind((current) => (focused ? 'claude' : current === 'claude' ? null : current));
+  }, []);
+
+  const handleShellTerminalFocusChange = useCallback((focused: boolean) => {
+    setFocusedTerminalKind((current) => (focused ? 'shell' : current === 'shell' ? null : current));
+  }, []);
+
   const resolveTerminalDataListenerReady = useCallback(() => {
     if (terminalDataListenerReadyRef.current) {
       return;
@@ -865,8 +1008,15 @@ export default function App() {
 
   selectedWorkspaceIdRef.current = selectedWorkspaceId;
   selectedThreadIdRef.current = selectedThreadId;
+  focusedTerminalKindRef.current = focusedTerminalKind;
+  shellTerminalSessionIdRef.current = shellTerminalSessionId;
+  shellTerminalWorkspaceIdRef.current = shellTerminalWorkspaceId;
   activeRunsByThreadRef.current = runStore.activeRunsByThread;
   workingByThreadRef.current = runStore.workingByThread;
+
+  useEffect(() => {
+    persistSkillUsageMap(skillUsageMap);
+  }, [skillUsageMap]);
 
   const bindSession = useCallback(
     (threadId: string, sessionId: string, startedAt: string) => {
@@ -1077,6 +1227,28 @@ export default function App() {
     };
   }, [refreshAppUpdateInfo]);
 
+  const registerHiddenInjectedPrompt = useCallback((threadId: string, prompt: string) => {
+    const normalized = prompt.trimEnd();
+    if (!normalized.trim()) {
+      return;
+    }
+    const existing = hiddenInjectedPromptsByThreadRef.current[threadId] ?? [];
+    hiddenInjectedPromptsByThreadRef.current[threadId] =
+      existing.length >= MAX_HIDDEN_INJECTED_PROMPTS_PER_THREAD
+        ? [...existing.slice(-(MAX_HIDDEN_INJECTED_PROMPTS_PER_THREAD - 1)), normalized]
+        : [...existing, normalized];
+  }, []);
+
+  const stripThreadHiddenInjectedPrompts = useCallback((threadId: string, text: string) => {
+    const prompts = hiddenInjectedPromptsByThreadRef.current[threadId] ?? [];
+    return stripHiddenPromptEchoes(text, prompts);
+  }, []);
+
+  const presentThreadTerminalText = useCallback(
+    (threadId: string, text: string) => clampTerminalLog(stripThreadHiddenInjectedPrompts(threadId, text)),
+    [stripThreadHiddenInjectedPrompts]
+  );
+
   const updateTerminalLogMap = useCallback(
     (
       updater: (current: Record<string, string>) => Record<string, string>,
@@ -1165,6 +1337,7 @@ export default function App() {
       }
       appendBytesByThread[threadId] = (appendBytesByThread[threadId] ?? 0) + chunk.length;
     }
+    let requiresSnapshot = false;
     updateTerminalLogMap((current) => {
       let next = current;
       for (const [threadId, chunk] of entries) {
@@ -1173,7 +1346,10 @@ export default function App() {
         }
         const previous = next[threadId] ?? '';
         const combined = `${previous}${chunk}`;
-        const clamped = clampTerminalLog(combined);
+        const clamped = presentThreadTerminalText(threadId, combined);
+        if (clamped !== combined) {
+          requiresSnapshot = true;
+        }
         if (clamped === previous) {
           continue;
         }
@@ -1183,8 +1359,8 @@ export default function App() {
         next[threadId] = clamped;
       }
       return next;
-    }, { mode: 'append', appendBytesByThread });
-  }, [updateTerminalLogMap]);
+    }, requiresSnapshot ? undefined : { mode: 'append', appendBytesByThread });
+  }, [presentThreadTerminalText, updateTerminalLogMap]);
 
   const cancelScheduledTerminalLogFlush = useCallback(() => {
     const handle = terminalLogFlushHandleRef.current;
@@ -1465,6 +1641,68 @@ export default function App() {
     [listThreads, setSelectedThread]
   );
 
+  const refreshSkillsForWorkspace = useCallback(async (workspace: Workspace) => {
+    if (isRemoteWorkspaceKind(workspace.kind)) {
+      setSkillsByWorkspaceId((current) => {
+        if ((current[workspace.id] ?? []).length === 0) {
+          return current;
+        }
+        return {
+          ...current,
+          [workspace.id]: []
+        };
+      });
+      setSkillsLoadingByWorkspaceId((current) => ({
+        ...current,
+        [workspace.id]: false
+      }));
+      setSkillErrorsByWorkspaceId((current) => ({
+        ...current,
+        [workspace.id]: null
+      }));
+      return [];
+    }
+
+    const requestId = (skillListRequestIdByWorkspaceRef.current[workspace.id] ?? 0) + 1;
+    skillListRequestIdByWorkspaceRef.current[workspace.id] = requestId;
+    setSkillsLoadingByWorkspaceId((current) => ({
+      ...current,
+      [workspace.id]: true
+    }));
+    setSkillErrorsByWorkspaceId((current) => ({
+      ...current,
+      [workspace.id]: null
+    }));
+
+    try {
+      const skills = await api.listSkills(workspace.path);
+      if (skillListRequestIdByWorkspaceRef.current[workspace.id] !== requestId) {
+        return skills;
+      }
+      setSkillsByWorkspaceId((current) => ({
+        ...current,
+        [workspace.id]: skills
+      }));
+      return skills;
+    } catch (error) {
+      if (skillListRequestIdByWorkspaceRef.current[workspace.id] !== requestId) {
+        return [];
+      }
+      setSkillErrorsByWorkspaceId((current) => ({
+        ...current,
+        [workspace.id]: String(error)
+      }));
+      return [];
+    } finally {
+      if (skillListRequestIdByWorkspaceRef.current[workspace.id] === requestId) {
+        setSkillsLoadingByWorkspaceId((current) => ({
+          ...current,
+          [workspace.id]: false
+        }));
+      }
+    }
+  }, []);
+
   const refreshGitInfo = useCallback(async () => {
     if (!selectedWorkspace || selectedWorkspace.kind !== 'local') {
       setGitInfo(null);
@@ -1485,6 +1723,69 @@ export default function App() {
     clearThreadUnread(threadId);
     await api.terminalWrite(sessionId, pending);
   }, [clearThreadUnread]);
+
+  const getThreadDraftInput = useCallback((threadId: string) => inputBufferByThreadRef.current[threadId] ?? '', []);
+
+  const replayThreadDraftInput = useCallback(async (sessionId: string | null, draftInput: string) => {
+    if (!sessionId || draftInput.length === 0) {
+      return;
+    }
+    await api.terminalWrite(sessionId, draftInput).catch(() => undefined);
+  }, []);
+
+  const waitForThreadReplayWindow = useCallback(
+    async (threadId: string, sessionId: string | null, timeoutMs = 2500) => {
+      if (!sessionId) {
+        return false;
+      }
+
+      const startedAtMs = Date.now();
+      let hydrationSettledAtMs: number | null = null;
+      while (Date.now() - startedAtMs < timeoutMs) {
+        if (activeRunsByThreadRef.current[threadId]?.sessionId !== sessionId) {
+          return false;
+        }
+
+        const hydrationPending = pendingSnapshotBySessionRef.current[sessionId]?.threadId === threadId;
+        if (!hydrationPending && hydrationSettledAtMs === null) {
+          hydrationSettledAtMs = Date.now();
+        }
+
+        const cached = lastTerminalLogByThreadRef.current[threadId] ?? '';
+        if (!hydrationPending && looksLikeClaudeUiReadyText(cached)) {
+          return true;
+        }
+
+        const snapshot = await api.terminalReadOutput(sessionId).catch(() => '');
+        if (activeRunsByThreadRef.current[threadId]?.sessionId !== sessionId) {
+          return false;
+        }
+
+        const hydrationStillPending = pendingSnapshotBySessionRef.current[sessionId]?.threadId === threadId;
+        if (!hydrationStillPending && hydrationSettledAtMs === null) {
+          hydrationSettledAtMs = Date.now();
+        }
+
+        if (!hydrationStillPending && looksLikeClaudeUiReadyText(snapshot)) {
+          return true;
+        }
+
+        if (hydrationSettledAtMs !== null && Date.now() - hydrationSettledAtMs >= 180) {
+          return true;
+        }
+
+        await new Promise<void>((resolve) => {
+          window.setTimeout(() => resolve(), 70);
+        });
+      }
+
+      return (
+        activeRunsByThreadRef.current[threadId]?.sessionId === sessionId &&
+        pendingSnapshotBySessionRef.current[sessionId]?.threadId !== threadId
+      );
+    },
+    []
+  );
 
   const setAttachmentDraftForThread = useCallback((threadId: string, paths: string[]) => {
     setDraftAttachmentsByThread((current) => {
@@ -1538,18 +1839,70 @@ export default function App() {
     [setAttachmentDraftForThread]
   );
 
+  const togglePinnedSkillForSelectedWorkspace = useCallback((skillId: string) => {
+    if (!selectedWorkspace) {
+      return;
+    }
+    setSkillUsageMap((current) => toggleSkillPinned(current, selectedWorkspace.path, skillId));
+  }, [selectedWorkspace]);
+
+  const updateSelectedThreadSkills = useCallback(
+    async (nextSkillIds: string[]) => {
+      if (!selectedThread) {
+        return;
+      }
+      const normalizedSkillIds = Array.from(new Set(nextSkillIds.filter((skillId) => skillId.trim().length > 0)));
+      setSkillsUpdating(true);
+      try {
+        const updated = await setThreadSkills(selectedThread.workspaceId, selectedThread.id, normalizedSkillIds);
+        applyThreadUpdate(updated);
+      } catch (error) {
+        pushToast(`Failed to update skills: ${String(error)}`, 'error');
+      } finally {
+        setSkillsUpdating(false);
+      }
+    },
+    [applyThreadUpdate, pushToast, selectedThread, setThreadSkills]
+  );
+
+  const toggleSelectedThreadSkill = useCallback(
+    async (skillId: string) => {
+      if (!selectedThread) {
+        return;
+      }
+      const selectedIds = selectedThread.enabledSkills ?? [];
+      const nextSkillIds = selectedIds.includes(skillId)
+        ? selectedIds.filter((currentSkillId) => currentSkillId !== skillId)
+        : [...selectedIds, skillId];
+      await updateSelectedThreadSkills(nextSkillIds);
+    },
+    [selectedThread, updateSelectedThreadSkills]
+  );
+
+  const removeMissingSelectedThreadSkill = useCallback(
+    async (skillId: string) => {
+      if (!selectedThread) {
+        return;
+      }
+      const nextSkillIds = (selectedThread.enabledSkills ?? []).filter((currentSkillId) => currentSkillId !== skillId);
+      await updateSelectedThreadSkills(nextSkillIds);
+    },
+    [selectedThread, updateSelectedThreadSkills]
+  );
+
   const appendTerminalLogChunk = useCallback((threadId: string, chunk: string) => {
-    if (!chunk) {
+    const visibleChunk = stripThreadHiddenInjectedPrompts(threadId, chunk);
+    if (!visibleChunk) {
       return;
     }
     const pending = pendingTerminalChunksByThreadRef.current[threadId] ?? '';
-    const combined = `${pending}${chunk}`;
+    const combined = `${pending}${visibleChunk}`;
     pendingTerminalChunksByThreadRef.current[threadId] =
       combined.length <= TERMINAL_LOG_BUFFER_CHARS
         ? combined
         : combined.slice(combined.length - TERMINAL_LOG_BUFFER_CHARS);
     scheduleTerminalLogFlush();
-  }, [scheduleTerminalLogFlush]);
+  }, [scheduleTerminalLogFlush, stripThreadHiddenInjectedPrompts]);
 
   const resetTerminalLog = useCallback((threadId: string) => {
     delete pendingTerminalChunksByThreadRef.current[threadId];
@@ -1572,11 +1925,11 @@ export default function App() {
   }, []);
 
   const scheduleSessionSnapshotRefreshes = useCallback(
-    (threadId: string, sessionId: string) => {
+    (threadId: string, sessionId: string, delaysMs = SESSION_SNAPSHOT_REFRESH_DELAYS_MS) => {
       clearSessionSnapshotRefreshTimers(sessionId);
       const handles: number[] = [];
 
-      for (const delayMs of SESSION_SNAPSHOT_REFRESH_DELAYS_MS) {
+      for (const delayMs of delaysMs) {
         const handle = window.setTimeout(() => {
           void (async () => {
             if (activeRunsByThreadRef.current[threadId]?.sessionId !== sessionId) {
@@ -1608,7 +1961,7 @@ export default function App() {
 
             updateTerminalLogMap((current) => {
               const existing = current[threadId] ?? '';
-              const merged = clampTerminalLog(mergeTerminalLogSnapshot(existing, snapshot));
+              const merged = presentThreadTerminalText(threadId, mergeTerminalLogSnapshot(existing, snapshot));
               if (merged === existing) {
                 return current;
               }
@@ -1708,12 +2061,15 @@ export default function App() {
             return;
           }
           const bufferedLive = pendingHydration.bufferedLive;
-          const mergedSnapshot = clampTerminalLog(mergeSnapshotAndBufferedLive(settledSnapshot, bufferedLive));
+          const mergedSnapshot = presentThreadTerminalText(
+            threadId,
+            mergeSnapshotAndBufferedLive(settledSnapshot, bufferedLive)
+          );
           delete pendingSnapshotBySessionRef.current[sessionId];
           delete pendingTerminalChunksByThreadRef.current[threadId];
           updateTerminalLogMap((current) => {
             const existing = current[threadId] ?? '';
-            const merged = clampTerminalLog(mergeTerminalLogSnapshot(existing, mergedSnapshot));
+            const merged = presentThreadTerminalText(threadId, mergeTerminalLogSnapshot(existing, mergedSnapshot));
             if (merged === existing) {
               return current;
             }
@@ -1749,7 +2105,7 @@ export default function App() {
         updateTerminalLogMap((current) => {
           const existing = current[threadId] ?? '';
           const bufferedMerge = mergeSnapshotAndBufferedLive(existing, bufferedLive);
-          const merged = clampTerminalLog(mergeTerminalLogSnapshot(existing, bufferedMerge));
+          const merged = presentThreadTerminalText(threadId, mergeTerminalLogSnapshot(existing, bufferedMerge));
           if (merged === existing) {
             return current;
           }
@@ -1762,8 +2118,17 @@ export default function App() {
       runLifecycleByThreadRef.current[threadId] = markRunReady(runLifecycleByThreadRef.current[threadId]);
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
+      if (
+        bufferedLive.length === 0 &&
+        selectedThreadIdRef.current === threadId &&
+        activeRunsByThreadRef.current[threadId]?.sessionId === sessionId &&
+        !liveDataSeenBySessionRef.current[sessionId] &&
+        !hasCachedTerminalLog(threadId)
+      ) {
+        scheduleSessionSnapshotRefreshes(threadId, sessionId, SESSION_SNAPSHOT_LATE_REFRESH_DELAYS_MS);
+      }
     },
-    [updateTerminalLogMap]
+    [hasCachedTerminalLog, scheduleSessionSnapshotRefreshes, updateTerminalLogMap]
   );
 
   const bumpSessionStartRequestId = useCallback((threadId: string) => {
@@ -1943,12 +2308,93 @@ export default function App() {
       }
       const added = addAttachmentPathsForSelectedThread(rawPaths);
       if (added > 0) {
-        pushToast(`Queued ${added} attachment${added === 1 ? '' : 's'} for next Enter submit.`, 'info');
+        pushToast(`Queued ${added} attachment${added === 1 ? '' : 's'} for the next prompt.`, 'info');
       }
       return added;
     },
     [addAttachmentPathsForSelectedThread, pushToast, selectedThread]
   );
+
+  const startWorkspaceShellSession = useCallback(
+    async (workspace: Workspace): Promise<string | null> => {
+      const existingSessionId = shellTerminalSessionIdRef.current;
+      const existingWorkspaceId = shellTerminalWorkspaceIdRef.current;
+      if (existingSessionId && existingWorkspaceId === workspace.id) {
+        setShellTerminalStarting(false);
+        return existingSessionId;
+      }
+
+      if (existingSessionId && existingWorkspaceId && existingWorkspaceId !== workspace.id) {
+        try {
+          await api.terminalKill(existingSessionId);
+        } catch {
+          // best effort
+        }
+      }
+
+      setShellTerminalStarting(true);
+      setShellTerminalContent('');
+      setShellTerminalSessionId(null);
+      setShellTerminalWorkspaceId(workspace.id);
+
+      await waitForTerminalDataListenerReady();
+      const response = await api.workspaceShellStartSession({
+        workspacePath: workspace.path,
+        initialCwd: workspace.kind === 'local' ? workspace.path : null
+      });
+
+      setShellTerminalSessionId(response.sessionId);
+      setShellTerminalWorkspaceId(workspace.id);
+      setShellTerminalStarting(false);
+      void api.terminalResize(response.sessionId, shellTerminalSize.cols, shellTerminalSize.rows);
+      return response.sessionId;
+    },
+    [shellTerminalSize.cols, shellTerminalSize.rows, waitForTerminalDataListenerReady]
+  );
+
+  const toggleWorkspaceShellDrawer = useCallback(() => {
+    if (!selectedWorkspace) {
+      return;
+    }
+
+    if (shellDrawerOpen && shellTerminalWorkspaceId === selectedWorkspace.id) {
+      setShellDrawerOpen(false);
+      setFocusedTerminalKind((current) => (current === 'shell' ? null : current));
+      return;
+    }
+
+    setShellDrawerOpen(true);
+    setShellTerminalFocusRequestId((current) => current + 1);
+    void startWorkspaceShellSession(selectedWorkspace).catch((error) => {
+      setShellTerminalStarting(false);
+      pushToast(`Failed to start workspace terminal: ${String(error)}`, 'error');
+    });
+  }, [pushToast, selectedWorkspace, shellDrawerOpen, shellTerminalWorkspaceId, startWorkspaceShellSession]);
+
+  useEffect(() => {
+    if (!shellDrawerOpen) {
+      return;
+    }
+    if (!selectedWorkspace) {
+      setShellDrawerOpen(false);
+      setShellTerminalStarting(false);
+      return;
+    }
+    if (shellTerminalWorkspaceId === selectedWorkspace.id && shellTerminalSessionId) {
+      return;
+    }
+    void startWorkspaceShellSession(selectedWorkspace).catch((error) => {
+      setShellTerminalStarting(false);
+      pushToast(`Failed to start workspace terminal: ${String(error)}`, 'error');
+    });
+  }, [
+    pushToast,
+    selectedWorkspace,
+    shellDrawerOpen,
+    shellTerminalSessionId,
+    shellTerminalWorkspaceId,
+    startWorkspaceShellSession
+  ]);
 
   const attemptAutoRecoverSelectedThread = useCallback(async () => {
     const workspaceId = selectedWorkspaceIdRef.current;
@@ -1995,7 +2441,7 @@ export default function App() {
           delete pendingTerminalChunksByThreadRef.current[thread.id];
           updateTerminalLogMap((current) => {
             const existing = current[thread.id] ?? '';
-            const clamped = clampTerminalLog(snapshot);
+            const clamped = presentThreadTerminalText(thread.id, snapshot);
             if (clamped === existing) {
               return current;
             }
@@ -2426,6 +2872,7 @@ export default function App() {
       delete inputControlCarryByThreadRef.current[threadId];
       delete threadTitleInitializedRef.current[threadId];
       delete pendingTerminalChunksByThreadRef.current[threadId];
+      delete hiddenInjectedPromptsByThreadRef.current[threadId];
       delete outputControlCarryByThreadRef.current[threadId];
       delete latestOutputSequenceByThreadRef.current[threadId];
       delete seenOutputSequenceByThreadRef.current[threadId];
@@ -2483,7 +2930,7 @@ export default function App() {
           delete pendingTerminalChunksByThreadRef.current[threadId];
           updateTerminalLogMap((current) => ({
             ...current,
-            [threadId]: clampTerminalLog(snapshot)
+            [threadId]: presentThreadTerminalText(threadId, snapshot)
           }));
         }
       } catch {
@@ -2634,13 +3081,14 @@ export default function App() {
       try {
         await api.gitCheckoutBranch(selectedWorkspace.path, branchName);
         await refreshGitInfo();
+        await refreshSkillsForWorkspace(selectedWorkspace);
         if (selectedThread?.workspaceId === selectedWorkspace.id) {
           const snapshot = await api.terminalGetLastLog(selectedWorkspace.id, selectedThread.id).catch(() => '');
           if (snapshot) {
             delete pendingTerminalChunksByThreadRef.current[selectedThread.id];
             updateTerminalLogMap((current) => ({
               ...current,
-              [selectedThread.id]: clampTerminalLog(snapshot)
+              [selectedThread.id]: presentThreadTerminalText(selectedThread.id, snapshot)
             }));
           }
         }
@@ -2650,7 +3098,7 @@ export default function App() {
         throw error;
       }
     },
-    [pushToast, refreshGitInfo, selectedThread, selectedWorkspace, stopSessionsForBranchSwitch, updateTerminalLogMap]
+    [pushToast, refreshGitInfo, refreshSkillsForWorkspace, selectedThread, selectedWorkspace, stopSessionsForBranchSwitch, updateTerminalLogMap]
   );
 
   useEffect(() => {
@@ -2658,8 +3106,9 @@ export default function App() {
       try {
         await api.getAppStorageRoot();
         await refreshWorkspaces();
-        const savedSettings = await api.getSettings();
+        const savedSettings = normalizeSettings(await api.getSettings());
         setSettings(savedSettings);
+        persistAppearanceMode(savedSettings.appearanceMode ?? 'dark');
         const detected = await api.detectClaudeCliPath();
         setDetectedCliPath(detected);
         if (!detected && !savedSettings.claudeCliPath) {
@@ -2672,6 +3121,33 @@ export default function App() {
 
     void init();
   }, [refreshWorkspaces]);
+
+  useEffect(() => {
+    const appearanceMode = normalizeAppearanceMode(settings.appearanceMode);
+
+    const syncAppearance = () => {
+      const resolvedTheme = resolveAppearanceTheme(appearanceMode);
+      applyAppearanceMode(appearanceMode);
+      persistAppearanceMode(appearanceMode);
+      void setAppTheme(appearanceMode === 'system' ? null : resolvedTheme).catch(() => undefined);
+    };
+
+    syncAppearance();
+
+    if (appearanceMode !== 'system' || !window.matchMedia) {
+      return;
+    }
+
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleChange = () => {
+      syncAppearance();
+    };
+
+    media.addEventListener?.('change', handleChange);
+    return () => {
+      media.removeEventListener?.('change', handleChange);
+    };
+  }, [settings.appearanceMode]);
 
   useEffect(() => {
     if (!selectedWorkspaceId) {
@@ -2698,6 +3174,26 @@ export default function App() {
       })
     );
   }, [listThreads, workspaces]);
+
+  useEffect(() => {
+    const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
+    setSkillsByWorkspaceId((current) =>
+      Object.fromEntries(Object.entries(current).filter(([workspaceId]) => workspaceIds.has(workspaceId)))
+    );
+    setSkillsLoadingByWorkspaceId((current) =>
+      Object.fromEntries(Object.entries(current).filter(([workspaceId]) => workspaceIds.has(workspaceId)))
+    );
+    setSkillErrorsByWorkspaceId((current) =>
+      Object.fromEntries(Object.entries(current).filter(([workspaceId]) => workspaceIds.has(workspaceId)))
+    );
+  }, [workspaces]);
+
+  useEffect(() => {
+    if (!selectedWorkspace) {
+      return;
+    }
+    void refreshSkillsForWorkspace(selectedWorkspace);
+  }, [refreshSkillsForWorkspace, selectedWorkspace]);
 
   useEffect(() => {
     if (!selectedWorkspace) {
@@ -2750,7 +3246,7 @@ export default function App() {
         delete pendingTerminalChunksByThreadRef.current[selectedThreadId];
         updateTerminalLogMap((current) => ({
           ...current,
-          [selectedThreadId]: clampTerminalLog(log)
+          [selectedThreadId]: presentThreadTerminalText(selectedThreadId, log)
         }));
       })
       .catch(() => {
@@ -2862,6 +3358,12 @@ export default function App() {
         clearSessionSnapshotRefreshTimers(event.sessionId);
       }
 
+      if (shellTerminalSessionIdRef.current === event.sessionId && !event.threadId) {
+        setShellTerminalStarting(false);
+        setShellTerminalContent((current) => clampTerminalLog(`${current}${event.data}`));
+        return;
+      }
+
       const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
       const threadId =
         event.threadId ??
@@ -2871,7 +3373,8 @@ export default function App() {
         return;
       }
 
-      const hasMeaningfulOutput = noteThreadOutput(threadId, event.data);
+      const visibleEventData = stripThreadHiddenInjectedPrompts(threadId, event.data);
+      const hasMeaningfulOutput = noteThreadOutput(threadId, visibleEventData);
       const isSelectedThread = selectedThreadIdRef.current === threadId;
       const nowMs = Date.now();
       runLifecycleByThreadRef.current[threadId] = noteRunOutput(
@@ -2895,10 +3398,10 @@ export default function App() {
       if (pendingHydration && pendingHydration.threadId === threadId) {
         pendingHydration.bufferedLive = appendBufferedLive(
           pendingHydration.bufferedLive,
-          event.data,
+          visibleEventData,
           SNAPSHOT_BUFFER_MAX_CHARS
         );
-        appendTerminalLogChunk(threadId, event.data);
+        appendTerminalLogChunk(threadId, visibleEventData);
         if (isSelectedThread) {
           setStartingByThread((current) => removeThreadFlag(current, threadId));
           setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
@@ -2935,7 +3438,7 @@ export default function App() {
         startThreadWorking(threadId);
         scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
       }
-      appendTerminalLogChunk(threadId, event.data);
+      appendTerminalLogChunk(threadId, visibleEventData);
     },
     [
       appendTerminalLogChunk,
@@ -2944,6 +3447,7 @@ export default function App() {
       clearThreadUnread,
       hasUserSentMessageInCurrentSession,
       noteThreadOutput,
+      stripThreadHiddenInjectedPrompts,
       startThreadWorking,
       stopThreadWorking,
       scheduleThreadWorkingStop
@@ -2958,6 +3462,18 @@ export default function App() {
       delete terminalDataSequenceBySessionRef.current[event.sessionId];
       delete liveDataSeenBySessionRef.current[event.sessionId];
       clearSessionSnapshotRefreshTimers(event.sessionId);
+
+      if (shellTerminalSessionIdRef.current === event.sessionId) {
+        setShellTerminalSessionId(null);
+        setShellTerminalStarting(false);
+        void api
+          .terminalReadOutput(event.sessionId)
+          .then((snapshot) => {
+            setShellTerminalContent(clampTerminalLog(snapshot));
+          })
+          .catch(() => undefined);
+        return;
+      }
 
       const endedThreadId = finishSessionBinding(event.sessionId);
       if (!endedThreadId) {
@@ -3001,7 +3517,7 @@ export default function App() {
           delete pendingTerminalChunksByThreadRef.current[endedThreadId];
           updateTerminalLogMap((current) => ({
             ...current,
-            [endedThreadId]: clampTerminalLog(snapshot)
+            [endedThreadId]: presentThreadTerminalText(endedThreadId, snapshot)
           }));
 
           if (sessionMeta?.mode !== 'resumed') {
@@ -3132,42 +3648,53 @@ export default function App() {
         return;
       }
 
+      const focusedSessionId =
+        focusedTerminalKind === 'shell'
+          ? shellTerminalSessionId
+          : focusedTerminalKind === 'claude'
+            ? selectedSessionId
+            : null;
       const key = event.key.toLowerCase();
 
-      if (terminalFocused && event.ctrlKey && !event.metaKey && !event.altKey && key === 'c' && selectedSessionId) {
+      if (focusedSessionId && event.ctrlKey && !event.metaKey && !event.altKey && key === 'c') {
         event.preventDefault();
-        void api.terminalSendSignal(selectedSessionId, 'SIGINT');
+        void api.terminalSendSignal(focusedSessionId, 'SIGINT');
         return;
       }
 
-      if (event.key === 'Escape' && selectedSessionId) {
+      if (event.key === 'Escape' && focusedSessionId) {
         event.preventDefault();
         const now = Date.now();
         if (
           escapeSignalRef.current &&
-          escapeSignalRef.current.sessionId === selectedSessionId &&
+          escapeSignalRef.current.sessionId === focusedSessionId &&
           now - escapeSignalRef.current.at < 1500
         ) {
-          void api.terminalKill(selectedSessionId);
+          void api.terminalKill(focusedSessionId);
           escapeSignalRef.current = null;
         } else {
-          void api.terminalSendSignal(selectedSessionId, 'SIGINT');
-          escapeSignalRef.current = { sessionId: selectedSessionId, at: now };
+          void api.terminalSendSignal(focusedSessionId, 'SIGINT');
+          escapeSignalRef.current = { sessionId: focusedSessionId, at: now };
         }
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [selectedSessionId, terminalFocused]);
+  }, [focusedTerminalKind, selectedSessionId, shellTerminalSessionId]);
 
-  const saveSettings = useCallback(async (cliPath: string) => {
-    const saved = await api.saveSettings({ claudeCliPath: cliPath || null });
+  const saveSettings = useCallback(async (nextSettings: { cliPath: string; appearanceMode: AppearanceMode }) => {
+    const saved = normalizeSettings(
+      await api.saveSettings({
+        claudeCliPath: nextSettings.cliPath || null,
+        appearanceMode: nextSettings.appearanceMode
+      })
+    );
     setSettings(saved);
     const detected = await api.detectClaudeCliPath();
     setDetectedCliPath(detected);
     setSettingsOpen(false);
-    if (detected || cliPath) {
+    if (detected || nextSettings.cliPath) {
       setBlockingError(null);
     }
   }, []);
@@ -3255,6 +3782,7 @@ export default function App() {
     }
 
     const nextValue = !selectedThread.fullAccess;
+    const draftInput = getThreadDraftInput(selectedThread.id);
     setFullAccessUpdating(true);
     try {
       const updatedThread = await setThreadFullAccess(selectedThread.workspaceId, selectedThread.id, nextValue);
@@ -3262,6 +3790,9 @@ export default function App() {
       if (workspace && isRemoteWorkspaceKind(workspace.kind)) {
         const switchedInPlace = await restartRdevClaudeInPlace(updatedThread);
         if (switchedInPlace) {
+          const sessionId =
+            activeRunsByThreadRef.current[updatedThread.id]?.sessionId ?? runStore.sessionForThread(updatedThread.id) ?? null;
+          await replayThreadDraftInput(sessionId, draftInput);
           if (selectedWorkspaceIdRef.current !== updatedThread.workspaceId) {
             setSelectedWorkspace(updatedThread.workspaceId);
           }
@@ -3276,23 +3807,30 @@ export default function App() {
         setSelectedWorkspace(updatedThread.workspaceId);
       }
       setSelectedThread(updatedThread.id);
-      await ensureSessionForThread(updatedThread);
+      const nextSessionId = await ensureSessionForThread(updatedThread);
+      await waitForThreadReplayWindow(updatedThread.id, nextSessionId);
+      await replayThreadDraftInput(nextSessionId, draftInput);
     } catch (error) {
       pushToast(`Failed to update Full access: ${String(error)}`, 'error');
     } finally {
       setFullAccessUpdating(false);
     }
   }, [
+    activeRunsByThreadRef,
     ensureSessionForThread,
     fullAccessUpdating,
+    getThreadDraftInput,
     pushToast,
+    replayThreadDraftInput,
+    restartRdevClaudeInPlace,
+    runStore,
     selectedThread,
     setSelectedThread,
     setSelectedWorkspace,
     setThreadFullAccess,
     stopThreadSession,
-    workspaces,
-    restartRdevClaudeInPlace
+    waitForThreadReplayWindow,
+    workspaces
   ]);
 
   const openWorkspaceInFinder = useCallback(
@@ -3606,6 +4144,7 @@ export default function App() {
         <HeaderBar
           workspace={selectedWorkspace}
           selectedThread={selectedThread}
+          gitInfo={gitInfo}
           updateAvailable={Boolean(appUpdateInfo?.updateAvailable)}
           updateVersionLabel={appUpdateInfo?.latestVersion ?? undefined}
           updating={installingUpdate}
@@ -3615,11 +4154,13 @@ export default function App() {
               openWorkspaceInFinder(selectedWorkspace);
             }
           }}
-          onOpenTerminal={() => {
-            if (selectedWorkspace) {
-              openWorkspaceInTerminal(selectedWorkspace);
-            }
+          onRepairDisplay={() => {
+            setTerminalRepairRequestId((current) => current + 1);
           }}
+          onOpenTerminal={() => {
+            toggleWorkspaceShellDrawer();
+          }}
+          terminalOpen={shellDrawerOpen}
         />
 
         {blockingError ? (
@@ -3634,6 +4175,7 @@ export default function App() {
         <section className="terminal-region">
           {selectedThread ? (
             <TerminalPanel
+              key={`${selectedThread.id}:${selectedSessionId ?? 'pending'}`}
               sessionId={selectedSessionId}
               content={selectedTerminalContent}
               contentByteCount={selectedTerminalContentByteCount}
@@ -3647,6 +4189,7 @@ export default function App() {
                   : undefined
               }
               focusRequestId={terminalFocusRequestId}
+              repairRequestId={terminalRepairRequestId}
               onData={(data) => {
                 if (!selectedThread) {
                   return;
@@ -3685,18 +4228,46 @@ export default function App() {
                 if (submittedLines.length > 0) {
                   const attachmentDraft = draftAttachmentsByThreadRef.current[selectedThread.id] ?? [];
                   clearAttachmentDraftForThread(selectedThread.id);
+                  const activeSkills = selectedInjectableSkills;
 
                   // Determine the live session id now (before any async work).
                   const sessionId = (!isSelectedThreadStarting && selectedSessionId)
                     ? runStore.sessionForThread(selectedThread.id)
                     : null;
 
-                  const attachmentPrompt = attachmentDraft.length > 0
-                    ? `${buildAttachmentPrompt(attachmentDraft)}\r`
+                  const skillPromptText = activeSkills.length > 0
+                    ? buildSkillPrompt(activeSkills)
                     : '';
+                  if (skillPromptText) {
+                    if (selectedWorkspace) {
+                      setSkillUsageMap((current) =>
+                        recordSkillUsage(
+                          current,
+                          selectedWorkspace.path,
+                          activeSkills.map((skill) => skill.id)
+                        )
+                      );
+                    }
+                  }
+
+                  const attachmentPromptText = attachmentDraft.length > 0
+                    ? buildAttachmentPrompt(attachmentDraft)
+                    : '';
+                  const hiddenPromptBlocks = [skillPromptText, attachmentPromptText]
+                    .filter((prompt): prompt is string => prompt.length > 0)
+                    .map((prompt) => `\n\n${prompt}`);
+                  for (const block of hiddenPromptBlocks) {
+                    registerHiddenInjectedPrompt(selectedThread.id, block);
+                  }
 
                   void (async () => {
-                    const outboundData = `${attachmentPrompt}${data}`;
+                    const submitIndex = data.lastIndexOf('\r');
+                    const outboundData =
+                      hiddenPromptBlocks.length === 0
+                        ? data
+                        : submitIndex >= 0
+                          ? `${data.slice(0, submitIndex)}${hiddenPromptBlocks.join('')}${data.slice(submitIndex)}`
+                          : `${data}${hiddenPromptBlocks.join('')}`;
 
                     if (isSelectedThreadStarting || !selectedSessionId) {
                       pendingInputByThreadRef.current[selectedThread.id] =
@@ -3742,7 +4313,7 @@ export default function App() {
                 }
                 void api.terminalResize(selectedSessionId, cols, rows);
               }}
-              onFocusChange={setTerminalFocused}
+              onFocusChange={handleClaudeTerminalFocusChange}
             />
           ) : (
             <div className="terminal-empty">Select a thread to start Claude.</div>
@@ -3751,6 +4322,28 @@ export default function App() {
         <BottomBar
           workspace={selectedWorkspace}
           selectedThread={selectedThread}
+          skillsControl={
+            selectedThread ? (
+              <ThreadSkillsPopover
+                workspace={selectedWorkspace}
+                thread={selectedThread}
+                skills={selectedWorkspaceSkills}
+                loading={selectedWorkspaceSkillsLoading}
+                error={selectedWorkspaceSkillError}
+                usageMap={skillUsageMap}
+                saving={skillsUpdating}
+                onToggleSkill={toggleSelectedThreadSkill}
+                onRemoveMissingSkill={removeMissingSelectedThreadSkill}
+                onTogglePinned={togglePinnedSkillForSelectedWorkspace}
+                onRefresh={async () => {
+                  if (!selectedWorkspace) {
+                    return;
+                  }
+                  await refreshSkillsForWorkspace(selectedWorkspace);
+                }}
+              />
+            ) : null
+          }
           attachmentDraftPaths={selectedThreadDraftAttachments}
           attachmentsEnabled={Boolean(selectedThread)}
           fullAccessUpdating={fullAccessUpdating}
@@ -3763,14 +4356,41 @@ export default function App() {
           onLoadBranchSwitcher={onLoadBranchSwitcher}
           onCheckoutBranch={onCheckoutBranch}
         />
+        <WorkspaceShellDrawer
+          open={shellDrawerOpen}
+          workspace={selectedWorkspace}
+          sessionId={shellTerminalSessionId}
+          content={shellTerminalContent}
+          starting={shellTerminalStarting}
+          focusRequestId={shellTerminalFocusRequestId}
+          onClose={() => {
+            setShellDrawerOpen(false);
+            setFocusedTerminalKind((current) => (current === 'shell' ? null : current));
+          }}
+          onData={(data) => {
+            if (!shellTerminalSessionId) {
+              return;
+            }
+            void api.terminalWrite(shellTerminalSessionId, data);
+          }}
+          onResize={(cols, rows) => {
+            setShellTerminalSize({ cols, rows });
+            if (!shellTerminalSessionId) {
+              return;
+            }
+            void api.terminalResize(shellTerminalSessionId, cols, rows);
+          }}
+          onFocusChange={handleShellTerminalFocusChange}
+        />
       </main>
 
       <SettingsModal
         open={settingsOpen}
         initialCliPath={settings.claudeCliPath ?? ''}
+        initialAppearanceMode={normalizeAppearanceMode(settings.appearanceMode)}
         detectedCliPath={detectedCliPath}
         onClose={() => setSettingsOpen(false)}
-        onSave={(path) => void saveSettings(path)}
+        onSave={(nextSettings) => void saveSettings(nextSettings)}
         onCopyEnvDiagnostics={() => void copyEnvDiagnostics()}
       />
 

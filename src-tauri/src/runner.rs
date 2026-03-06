@@ -21,6 +21,7 @@ use crate::models::{
     ContextFilePreview, ContextPreview, RunClaudeRequest, RunClaudeResponse, RunExitEvent,
     RunMetadata, Settings, StreamEvent, TerminalDataEvent, TerminalExitEvent,
     TerminalStartResponse, ThreadRunStatus, TranscriptEntry, WorkspaceKind,
+    WorkspaceShellStartResponse,
 };
 use crate::skills;
 use crate::storage;
@@ -206,6 +207,37 @@ fn build_terminal_shell_command(
     };
 
     Ok((remote_command, Some(exec_claude_command)))
+}
+
+fn build_workspace_shell_command(
+    workspace_kind: WorkspaceKind,
+    shell_path: &str,
+    rdev_ssh_command: Option<&str>,
+    ssh_command: Option<&str>,
+    remote_path: Option<&str>,
+) -> Result<(Option<String>, Option<String>)> {
+    match workspace_kind {
+        WorkspaceKind::Local => Ok((None, None)),
+        WorkspaceKind::Rdev => {
+            let remote_command = rdev_ssh_command
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("Missing rdev ssh command for remote workspace"))?;
+            Ok((Some(ensure_rdev_non_tmux(remote_command)), None))
+        }
+        WorkspaceKind::Ssh => {
+            let remote_command = ssh_command
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow!("Missing ssh command for remote workspace"))?
+                .to_string();
+            let post_connect_command = remote_path
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("cd {} && exec {}", shell_escape_arg(value), shell_escape_arg(shell_path)));
+            Ok((Some(remote_command), post_connect_command))
+        }
+    }
 }
 
 fn resolve_claude_command_for_workspace(
@@ -414,12 +446,19 @@ impl TerminalSessionMode {
 
 pub type TerminalSessionId = String;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalSessionKind {
+    ClaudeThread,
+    WorkspaceShell,
+}
+
 struct TerminalSession {
     session_id: TerminalSessionId,
     workspace_id: String,
     workspace_path: String,
-    thread_id: String,
-    session_mode: TerminalSessionMode,
+    kind: TerminalSessionKind,
+    thread_id: Option<String>,
+    session_mode: Option<TerminalSessionMode>,
     resume_session_id: Option<String>,
     process_id: Option<u32>,
     started_at: chrono::DateTime<Utc>,
@@ -488,7 +527,29 @@ impl TerminalSessionManager {
         let matching_session_ids = sessions
             .iter()
             .filter(|(_, session)| {
-                session.workspace_id == workspace_id && session.thread_id == thread_id
+                session.workspace_id == workspace_id
+                    && session.thread_id.as_deref() == Some(thread_id)
+            })
+            .map(|(session_id, _)| session_id.clone())
+            .collect::<Vec<_>>();
+        let mut removed = Vec::new();
+        for session_id in matching_session_ids {
+            if let Some(session) = sessions.remove(&session_id) {
+                removed.push(session);
+            }
+        }
+        Ok(removed)
+    }
+
+    fn remove_for_workspace_shell(&self, workspace_id: &str) -> Result<Vec<Arc<TerminalSession>>> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| anyhow!("Terminal session lock poisoned"))?;
+        let matching_session_ids = sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.workspace_id == workspace_id && session.kind == TerminalSessionKind::WorkspaceShell
             })
             .map(|(session_id, _)| session_id.clone())
             .collect::<Vec<_>>();
@@ -1006,8 +1067,9 @@ pub async fn terminal_start_session(
         session_id: session_id.clone(),
         workspace_id: workspace_id.clone(),
         workspace_path: workspace_path.clone(),
-        thread_id: thread_id.clone(),
-        session_mode,
+        kind: TerminalSessionKind::ClaudeThread,
+        thread_id: Some(thread_id.clone()),
+        session_mode: Some(session_mode),
         resume_session_id: resume_session_id.clone(),
         process_id,
         started_at,
@@ -1098,7 +1160,7 @@ pub async fn terminal_start_session(
                     TERMINAL_DATA_EVENT,
                     TerminalDataEvent {
                         session_id: data_session_id.clone(),
-                        thread_id: data_thread_id.clone(),
+                        thread_id: Some(data_thread_id.clone()),
                         data: chunk,
                         sequence: chunk_sequence,
                     },
@@ -1128,7 +1190,7 @@ pub async fn terminal_start_session(
                 TERMINAL_DATA_EVENT,
                 TerminalDataEvent {
                     session_id: data_session_id.clone(),
-                    thread_id: data_thread_id.clone(),
+                    thread_id: Some(data_thread_id.clone()),
                     data: trailing,
                     sequence: chunk_sequence,
                 },
@@ -1155,7 +1217,11 @@ pub async fn terminal_start_session(
 
         let ended_at = Utc::now();
         let duration_ms = (ended_at - wait_session.started_at).num_milliseconds();
-        let run_folder = storage::runs_dir(&wait_session.workspace_id, &wait_session.thread_id)
+        let thread_id = match wait_session.thread_id.as_deref() {
+            Some(thread_id) => thread_id,
+            None => return,
+        };
+        let run_folder = storage::runs_dir(&wait_session.workspace_id, thread_id)
             .unwrap_or_else(|_| PathBuf::from(""))
             .join(&wait_session_id);
 
@@ -1163,9 +1229,9 @@ pub async fn terminal_start_session(
             &run_folder.join("metadata.json"),
             &serde_json::json!({
                 "sessionId": wait_session_id,
-                "threadId": wait_session.thread_id,
+                "threadId": thread_id,
                 "workspaceId": wait_session.workspace_id,
-                "sessionMode": wait_session.session_mode.as_str(),
+                "sessionMode": wait_session.session_mode.map(|mode| mode.as_str()),
                 "resumeSessionId": wait_session.resume_session_id,
                 "command": wait_session.command,
                 "durationMs": duration_ms,
@@ -1188,7 +1254,7 @@ pub async fn terminal_start_session(
         };
         let _ = storage::set_thread_run_state(
             &wait_session.workspace_id,
-            &wait_session.thread_id,
+            thread_id,
             status,
             None,
             Some(ended_at),
@@ -1214,6 +1280,269 @@ pub async fn terminal_start_session(
         resume_session_id,
         thread,
     })
+}
+
+pub async fn workspace_shell_start_session(
+    app: AppHandle,
+    state: Arc<RunnerState>,
+    workspace_path: String,
+    initial_cwd: Option<String>,
+    env_vars: Option<HashMap<String, String>>,
+) -> Result<WorkspaceShellStartResponse> {
+    let workspace = storage::resolve_workspace_by_path(&workspace_path)?.ok_or_else(|| {
+        anyhow!("Workspace not registered. Add workspace before starting terminal.")
+    })?;
+    let workspace_id = workspace.id.clone();
+    let stale_sessions = state
+        .terminal_sessions
+        .remove_for_workspace_shell(&workspace_id)?;
+    for stale_session in stale_sessions {
+        terminate_terminal_session_process(&stale_session);
+    }
+
+    let shell_path = resolve_login_shell();
+    let cwd = if workspace.kind == WorkspaceKind::Local {
+        initial_cwd.unwrap_or_else(|| workspace_path.clone())
+    } else {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/"))
+            .to_string_lossy()
+            .to_string()
+    };
+
+    let session_id = Uuid::new_v4().to_string();
+    let run_dir = storage::workspace_shell_sessions_dir(&workspace_id)?.join(&session_id);
+    fs::create_dir_all(&run_dir)?;
+
+    let (shell_command, post_connect_command) = build_workspace_shell_command(
+        workspace.kind,
+        &shell_path,
+        workspace.rdev_ssh_command.as_deref(),
+        workspace.ssh_command.as_deref(),
+        workspace.remote_path.as_deref(),
+    )?;
+    let mut command_manifest = vec![shell_path.clone()];
+
+    let pty_system = native_pty_system();
+    let pty_pair = pty_system.openpty(PtySize {
+        rows: 24,
+        cols: 120,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
+
+    let mut command = CommandBuilder::new(shell_path.clone());
+    if let Some(shell_command) = shell_command.clone() {
+        command.arg("-lic");
+        command.arg(shell_command.clone());
+        command_manifest.push("-lic".to_string());
+        command_manifest.push(shell_command);
+    } else {
+        command.arg("-li");
+        command_manifest.push("-li".to_string());
+    }
+    command.cwd(cwd.clone());
+    for (key, value) in env::vars() {
+        if key == "TERM" || key.eq_ignore_ascii_case("NO_COLOR") {
+            continue;
+        }
+        command.env(key, value);
+    }
+    if let Some(extra_env) = &env_vars {
+        for (key, value) in extra_env {
+            if key.eq_ignore_ascii_case("NO_COLOR") {
+                continue;
+            }
+            command.env(key, value);
+        }
+    }
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env("CLICOLOR", "1");
+    command.env("CLICOLOR_FORCE", "1");
+    command.env("FORCE_COLOR", "1");
+    command.env("ZSH_DISABLE_COMPFIX", "true");
+
+    storage::write_json_file(
+        &run_dir.join("input_manifest.json"),
+        &serde_json::json!({
+            "sessionId": session_id,
+            "workspacePath": workspace_path,
+            "workspaceId": workspace_id,
+            "cwd": cwd,
+            "envVars": env_vars,
+            "command": command_manifest,
+            "shell": shell_path,
+            "shellCommand": shell_command,
+            "startedAt": Utc::now(),
+            "mode": "workspace-shell-terminal",
+            "workspaceKind": match workspace.kind {
+                WorkspaceKind::Local => "local",
+                WorkspaceKind::Rdev => "rdev",
+                WorkspaceKind::Ssh => "ssh",
+            },
+            "postConnectCommand": post_connect_command,
+        }),
+    )?;
+
+    let child = pty_pair.slave.spawn_command(command)?;
+    let process_id = child.process_id();
+    let mut reader = pty_pair.master.try_clone_reader()?;
+    let writer = pty_pair.master.take_writer()?;
+    let output_log_path = run_dir.join("output.log");
+    let output_log = Arc::new(Mutex::new(
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&output_log_path)?,
+    ));
+
+    let started_at = Utc::now();
+    let session = Arc::new(TerminalSession {
+        session_id: session_id.clone(),
+        workspace_id: workspace_id.clone(),
+        workspace_path: workspace_path.clone(),
+        kind: TerminalSessionKind::WorkspaceShell,
+        thread_id: None,
+        session_mode: None,
+        resume_session_id: None,
+        process_id,
+        started_at,
+        command: command_manifest.clone(),
+        output_log_path: output_log_path.clone(),
+        master: Arc::new(Mutex::new(pty_pair.master)),
+        writer: Arc::new(Mutex::new(writer)),
+        child: Arc::new(Mutex::new(child)),
+    });
+    state.terminal_sessions.insert(session.clone())?;
+
+    let data_session_id = session_id.clone();
+    let data_output_log = output_log.clone();
+    let data_app = app.clone();
+    let post_connect_writer = session.writer.clone();
+    let post_connect_started_at = Instant::now();
+    let mut pending_post_connect_command = post_connect_command;
+    let mut post_connect_prompt_probe = String::new();
+    let mut saw_ssh_connection_start = false;
+    std::thread::spawn(move || {
+        let mut buffer = [0u8; 32_768];
+        let mut utf8_carry = Vec::<u8>::new();
+        let mut chunk_sequence: u64 = 0;
+        loop {
+            let read = match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(size) => size,
+                Err(_) => break,
+            };
+
+            if let Ok(mut file) = data_output_log.lock() {
+                let _ = file.write_all(&buffer[..read]);
+            }
+
+            if let Some(chunk) = decode_utf8_chunk(&buffer[..read], &mut utf8_carry) {
+                if pending_post_connect_command.is_some() {
+                    let clean_chunk = strip_ansi_sequences(&chunk);
+                    if !clean_chunk.is_empty() {
+                        let lower = clean_chunk.to_ascii_lowercase();
+                        if lower.contains("starting ssh connection")
+                            || lower.contains("connected to")
+                            || lower.contains("now ready to use")
+                        {
+                            saw_ssh_connection_start = true;
+                        }
+                        post_connect_prompt_probe.push_str(&clean_chunk);
+                        trim_prompt_probe_buffer(&mut post_connect_prompt_probe);
+                    }
+
+                    let should_send_post_connect = should_dispatch_post_connect_command(
+                        &post_connect_prompt_probe,
+                        saw_ssh_connection_start,
+                        post_connect_started_at.elapsed(),
+                    );
+                    if should_send_post_connect {
+                        if let Some(command) = pending_post_connect_command.take() {
+                            if let Ok(mut writer) = post_connect_writer.lock() {
+                                let _ = writer.write_all(format!("{command}\r").as_bytes());
+                                let _ = writer.flush();
+                            }
+                        }
+                        post_connect_prompt_probe.clear();
+                    }
+                }
+
+                chunk_sequence = chunk_sequence.saturating_add(1);
+                let _ = data_app.emit(
+                    TERMINAL_DATA_EVENT,
+                    TerminalDataEvent {
+                        session_id: data_session_id.clone(),
+                        thread_id: None,
+                        data: chunk,
+                        sequence: chunk_sequence,
+                    },
+                );
+            }
+        }
+
+        if !utf8_carry.is_empty() {
+            let trailing = String::from_utf8_lossy(&utf8_carry).to_string();
+            chunk_sequence = chunk_sequence.saturating_add(1);
+            let _ = data_app.emit(
+                TERMINAL_DATA_EVENT,
+                TerminalDataEvent {
+                    session_id: data_session_id.clone(),
+                    thread_id: None,
+                    data: trailing,
+                    sequence: chunk_sequence,
+                },
+            );
+        }
+    });
+
+    let wait_state = state.clone();
+    let wait_session = session.clone();
+    let wait_session_id = session_id.clone();
+    std::thread::spawn(move || {
+        let (code, signal) = {
+            let mut child = match wait_session.child.lock() {
+                Ok(child) => child,
+                Err(_) => return,
+            };
+            match child.wait() {
+                Ok(status) => (Some(status.exit_code() as i32), None),
+                Err(_) => (None, None),
+            }
+        };
+
+        let _ = wait_state.terminal_sessions.remove(&wait_session_id);
+
+        let ended_at = Utc::now();
+        let duration_ms = (ended_at - wait_session.started_at).num_milliseconds();
+        let _ = storage::write_json_file(
+            &run_dir.join("metadata.json"),
+            &serde_json::json!({
+                "sessionId": wait_session_id,
+                "workspaceId": wait_session.workspace_id,
+                "command": wait_session.command,
+                "durationMs": duration_ms,
+                "exitCode": code,
+                "signal": signal,
+                "startedAt": wait_session.started_at,
+                "endedAt": ended_at,
+                "outputLogPath": wait_session.output_log_path,
+            }),
+        );
+
+        let _ = app.emit(
+            TERMINAL_EXIT_EVENT,
+            TerminalExitEvent {
+                session_id: wait_session_id,
+                code,
+                signal,
+            },
+        );
+    });
+
+    Ok(WorkspaceShellStartResponse { session_id })
 }
 
 pub fn terminal_write(state: Arc<RunnerState>, session_id: String, data: String) -> Result<bool> {
@@ -1856,6 +2185,7 @@ mod tests {
 
         let settings = Settings {
             claude_cli_path: Some(cli_path.to_string_lossy().to_string()),
+            ..Settings::default()
         };
         let command =
             resolve_claude_command_for_workspace(WorkspaceKind::Local, &settings).expect("local command should resolve");

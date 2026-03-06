@@ -13,6 +13,7 @@ import {
   pauseFollowByUser,
   shouldAutoFollow
 } from '../lib/terminalFollowState';
+import { shouldScheduleTerminalStreamRepair } from '../lib/terminalStreamRepair';
 import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
 
 const INPUT_FLUSH_MS = 8;
@@ -20,6 +21,7 @@ const INPUT_CHUNK_SIZE = 4 * 1024;
 const OUTPUT_BATCH_BYTES = 16 * 1024;
 const OUTPUT_BATCH_BYTES_INTERACTIVE = 8 * 1024;
 const OUTPUT_MAX_FLUSH_DELAY_MS = 48;
+const STREAM_REPAIR_IDLE_DELAY_MS = 120;
 const OUTPUT_QUEUE_WARN_PENDING_BYTES = 128 * 1024;
 const OUTPUT_QUEUE_WARN_LATENCY_MS = 96;
 const OUTPUT_QUEUE_WARN_COOLDOWN_MS = 2_000;
@@ -34,6 +36,7 @@ interface TerminalPanelProps {
   inputEnabled?: boolean;
   overlayMessage?: string;
   focusRequestId?: number;
+  repairRequestId?: number;
   onData?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
   onFocusChange?: (focused: boolean) => void;
@@ -49,6 +52,7 @@ export function TerminalPanel({
   inputEnabled = true,
   overlayMessage,
   focusRequestId = 0,
+  repairRequestId = 0,
   onData,
   onResize,
   onFocusChange
@@ -80,14 +84,23 @@ export function TerminalPanel({
   const resizeFrameRef = useRef<number | null>(null);
   const refreshFrameRef = useRef<number | null>(null);
   const previousFocusRequestRef = useRef(focusRequestId);
+  const previousRepairRequestRef = useRef(repairRequestId);
   const lastQueueWarningAtRef = useRef(0);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const fitWithReflowRef = useRef<(() => void) | null>(null);
   const bulkWritingRef = useRef(false);
   const bulkWriteEpochRef = useRef(0);
   const isWritingRef = useRef(false);
   const userScrollIntentRef = useRef(false);
   const scrollRafRef = useRef<number | null>(null);
   const scrollPauseCooldownRef = useRef(0);
+  const streamRepairTimerRef = useRef<number | null>(null);
+  const bytesSinceRepairRef = useRef(0);
+  const lastStreamRepairAtRef = useRef(0);
+
+  const syncFollowOutputPaused = useCallback((nextPaused: boolean) => {
+    setFollowOutputPaused((current) => (current === nextPaused ? current : nextPaused));
+  }, []);
 
   const scrollToBottomSoon = useCallback((term: Terminal) => {
     if (!shouldAutoFollow(followStateRef.current)) {
@@ -134,8 +147,8 @@ export function TerminalPanel({
       window.cancelAnimationFrame(scrollRafRef.current);
       scrollRafRef.current = null;
     }
-    setFollowOutputPaused(true);
-  }, []);
+    syncFollowOutputPaused(true);
+  }, [syncFollowOutputPaused]);
 
   const openExternalLink = useCallback((_: MouseEvent, uri: string) => {
     const target = uri.trim();
@@ -167,6 +180,50 @@ export function TerminalPanel({
       term.refresh(0, Math.max(0, term.rows - 1));
     });
   }, []);
+
+  const clearScheduledStreamRepair = useCallback(() => {
+    if (streamRepairTimerRef.current !== null) {
+      window.clearTimeout(streamRepairTimerRef.current);
+      streamRepairTimerRef.current = null;
+    }
+  }, []);
+
+  const runStreamRepair = useCallback(
+    (term: Terminal) => {
+      if (terminalRef.current !== term) {
+        return;
+      }
+      lastStreamRepairAtRef.current = Date.now();
+      bytesSinceRepairRef.current = 0;
+      fitWithReflowRef.current?.();
+      scheduleTerminalRefresh(term);
+    },
+    [scheduleTerminalRefresh]
+  );
+
+  const scheduleStreamRepair = useCallback(
+    (term: Terminal, delayMs = STREAM_REPAIR_IDLE_DELAY_MS) => {
+      if (streamRepairTimerRef.current !== null) {
+        return;
+      }
+
+      streamRepairTimerRef.current = window.setTimeout(() => {
+        streamRepairTimerRef.current = null;
+        if (terminalRef.current !== term) {
+          return;
+        }
+
+        const stats = writeQueueRef.current.getStats();
+        if (bulkWritingRef.current || isWritingRef.current || stats.writing || stats.pendingBytes > 0) {
+          scheduleStreamRepair(term, STREAM_REPAIR_IDLE_DELAY_MS);
+          return;
+        }
+
+        runStreamRepair(term);
+      }, delayMs);
+    },
+    [runStreamRepair]
+  );
 
   const maybeLogQueueHealth = useCallback(() => {
     if (!import.meta.env.DEV) {
@@ -251,12 +308,14 @@ export function TerminalPanel({
         }
         bulkWritingRef.current = false;
         followStateRef.current = createFollowState();
-        setFollowOutputPaused(false);
+        syncFollowOutputPaused(false);
+        bytesSinceRepairRef.current = 0;
+        clearScheduledStreamRepair();
         scrollToBottomSoon(term);
         scheduleTerminalRefresh(term);
       });
     },
-    [clearPendingWrites, queueWrite, scheduleTerminalRefresh, scrollToBottomSoon]
+    [clearPendingWrites, clearScheduledStreamRepair, queueWrite, scheduleTerminalRefresh, scrollToBottomSoon, syncFollowOutputPaused]
   );
 
   useEffect(() => {
@@ -291,30 +350,32 @@ export function TerminalPanel({
         convertEol: false,
         scrollback: 10_000,
         fontFamily: '"SF Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace',
-        fontSize: 13,
-        lineHeight: 1.34,
+        fontSize: 14,
+        fontWeight: 460,
+        lineHeight: 1.28,
+        letterSpacing: 0.1,
         theme: {
-          background: '#0b1426',
-          foreground: '#d8e0ef',
-          cursor: '#e6edf8',
-          cursorAccent: '#0b1426',
-          selectionBackground: 'rgba(151, 166, 189, 0.28)',
-          black: '#1a2130',
-          red: '#f38f79',
-          green: '#62d5a4',
-          yellow: '#f4c777',
-          blue: '#8bb8ff',
-          magenta: '#c8acff',
-          cyan: '#80d5ea',
-          white: '#d6deec',
-          brightBlack: '#7f8ca6',
-          brightRed: '#f8a996',
-          brightGreen: '#7be0b3',
-          brightYellow: '#f8d18e',
-          brightBlue: '#a6c8ff',
-          brightMagenta: '#d7bfff',
-          brightCyan: '#97def0',
-          brightWhite: '#f2f6ff'
+          background: '#081121',
+          foreground: '#d9e3f5',
+          cursor: '#f5f8ff',
+          cursorAccent: '#081121',
+          selectionBackground: 'rgba(162, 182, 216, 0.24)',
+          black: '#172033',
+          red: '#f39a86',
+          green: '#69d5a8',
+          yellow: '#f0c97f',
+          blue: '#90bcff',
+          magenta: '#ccb2ff',
+          cyan: '#86d7ec',
+          white: '#d9e3f5',
+          brightBlack: '#77849d',
+          brightRed: '#f7ae9f',
+          brightGreen: '#84dfb8',
+          brightYellow: '#f6d79b',
+          brightBlue: '#abcfff',
+          brightMagenta: '#dbc5ff',
+          brightCyan: '#9ce2f2',
+          brightWhite: '#f5f8ff'
         },
         disableStdin: readOnly || !inputEnabled
       });
@@ -353,6 +414,19 @@ export function TerminalPanel({
               scrollToBottomSoon(term);
             }
             scheduleTerminalRefresh(term);
+            bytesSinceRepairRef.current += chunk.length;
+            const queueStats = writeQueueRef.current.getStats();
+            if (
+              shouldScheduleTerminalStreamRepair({
+                autoFollow: shouldAutoFollow(followStateRef.current),
+                bytesSinceLastRepair: bytesSinceRepairRef.current,
+                lastQueueLatencyMs: queueStats.lastQueueLatencyMs,
+                lastRepairAtMs: lastStreamRepairAtRef.current,
+                nowMs: Date.now()
+              })
+            ) {
+              scheduleStreamRepair(term);
+            }
             maybeLogQueueHealth();
             done();
           });
@@ -390,6 +464,7 @@ export function TerminalPanel({
         }
         fitAndNotify();
       };
+      fitWithReflowRef.current = fitWithReflow;
 
       // Synchronous best-effort fit (renderer may not have dims yet — that's OK).
       fitAndNotify();
@@ -470,7 +545,9 @@ export function TerminalPanel({
       const onScrollDisposable = term.onScroll((viewportY) => {
         const baseY = term.buffer.active.baseY;
         const prev = followStateRef.current;
-        followStateRef.current = handleTerminalScroll(prev, { viewportY, baseY });
+        const next = handleTerminalScroll(prev, { viewportY, baseY });
+        followStateRef.current = next;
+        syncFollowOutputPaused(next.mode === 'pausedByUser');
         // Pause follow for scrollbar drag; wheel and PageUp are handled by their own listeners.
         if (userScrollIntentRef.current && viewportY < baseY) {
           pauseFollowOutput();
@@ -545,6 +622,9 @@ export function TerminalPanel({
         bulkWritingRef.current = false;
         isWritingRef.current = false;
         bulkWriteEpochRef.current += 1;
+        fitWithReflowRef.current = null;
+        clearScheduledStreamRepair();
+        bytesSinceRepairRef.current = 0;
         term.dispose();
         terminalRef.current = null;
         followStateRef.current = createFollowState();
@@ -577,8 +657,11 @@ export function TerminalPanel({
     openExternalLink,
     pauseFollowOutput,
     queueWrite,
+    clearScheduledStreamRepair,
+    scheduleStreamRepair,
     scrollToBottomSoon,
-    scheduleOutgoingInputFlush
+    scheduleOutgoingInputFlush,
+    syncFollowOutputPaused
   ]);
 
   useEffect(() => {
@@ -626,8 +709,10 @@ export function TerminalPanel({
 
     sessionRef.current = sessionId;
     followStateRef.current = createFollowState();
-    setFollowOutputPaused(false);
+    syncFollowOutputPaused(false);
     clearPendingWrites();
+    clearScheduledStreamRepair();
+    bytesSinceRepairRef.current = 0;
     inputBufferRef.current = '';
     if (inputFlushTimerRef.current !== null) {
       window.clearTimeout(inputFlushTimerRef.current);
@@ -639,7 +724,7 @@ export function TerminalPanel({
     renderedByteCountRef.current = contentByteCount ?? contentRef.current.length;
     renderedGenerationRef.current = contentGeneration ?? 0;
     scheduleTerminalRefresh(term);
-  }, [clearPendingWrites, resetTerminalContent, scheduleTerminalRefresh, sessionId]);
+  }, [clearPendingWrites, clearScheduledStreamRepair, resetTerminalContent, scheduleTerminalRefresh, sessionId, syncFollowOutputPaused]);
 
   useEffect(() => {
     const term = terminalRef.current;
@@ -731,9 +816,22 @@ export function TerminalPanel({
     if (shouldAutoFollow(followStateRef.current)) {
       scrollToBottomSoon(term);
     }
-    setFollowOutputPaused(followStateRef.current.mode === 'pausedByUser');
+    syncFollowOutputPaused(followStateRef.current.mode === 'pausedByUser');
     scheduleTerminalRefresh(term);
-  }, [focusRequestId, scheduleTerminalRefresh, scrollToBottomSoon]);
+  }, [focusRequestId, scheduleTerminalRefresh, scrollToBottomSoon, syncFollowOutputPaused]);
+
+  useEffect(() => {
+    if (previousRepairRequestRef.current === repairRequestId) {
+      return;
+    }
+    previousRepairRequestRef.current = repairRequestId;
+    const term = terminalRef.current;
+    if (!term) {
+      return;
+    }
+    clearScheduledStreamRepair();
+    runStreamRepair(term);
+  }, [clearScheduledStreamRepair, repairRequestId, runStreamRepair]);
 
   const jumpToLatest = useCallback(() => {
     const term = terminalRef.current;
@@ -743,12 +841,12 @@ export function TerminalPanel({
     followStateRef.current = jumpFollowStateToLatest(followStateRef.current, {
       baseY: term.buffer.active.baseY
     });
-    setFollowOutputPaused(false);
+    syncFollowOutputPaused(false);
     // Clear cooldown so the explicit user action isn't suppressed.
     scrollPauseCooldownRef.current = 0;
     scrollToBottomSoon(term);
     scheduleTerminalRefresh(term);
-  }, [scheduleTerminalRefresh, scrollToBottomSoon]);
+  }, [scheduleTerminalRefresh, scrollToBottomSoon, syncFollowOutputPaused]);
 
   if (fallback) {
     return (

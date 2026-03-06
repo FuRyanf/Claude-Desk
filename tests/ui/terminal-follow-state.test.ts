@@ -23,16 +23,16 @@ describe('terminal follow state', () => {
     expect(shouldAutoFollow(state)).toBe(true);
   });
 
-  it('stays paused on at-bottom scroll events until user explicitly jumps to latest', () => {
+  it('resumes follow once a paused viewport is scrolled back to the latest line', () => {
     let state = createFollowState();
     // Simulate explicit user gesture pausing (wheel/PageUp/scrollbar drag detected in TerminalPanel).
     state = pauseFollowByUser(state);
     expect(state.mode).toBe('pausedByUser');
 
-    // System scroll to bottom should not auto-resume.
+    // Once the viewport reaches the bottom again, resume follow and hide the affordance.
     state = handleTerminalScroll(state, { viewportY: 200, baseY: 200 });
-    expect(state.mode).toBe('pausedByUser');
-    expect(shouldAutoFollow(state)).toBe(false);
+    expect(state.mode).toBe('following');
+    expect(shouldAutoFollow(state)).toBe(true);
   });
 
   it('stays paused when buffer grows but viewport stays at same relative offset', () => {

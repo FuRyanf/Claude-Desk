@@ -413,7 +413,7 @@ describe('Sidebar behavior', () => {
     );
     expect(matchingCall).toBeDefined();
     expect(matchingCall?.[0]).toBe('session-thread-1');
-    expect(matchingCall?.[1]).toContain('For image/screenshot files');
+    expect(matchingCall?.[1]).toContain('Inspect image and screenshot files visually.');
     expect(matchingCall?.[1]).toContain('First prompt title line');
     expect(matchingCall?.[1].endsWith('\r')).toBe(true);
   });

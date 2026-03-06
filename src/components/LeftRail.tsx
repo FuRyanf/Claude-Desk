@@ -91,6 +91,21 @@ function PlusIcon() {
   );
 }
 
+function FolderPlusIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M3.75 7A1.75 1.75 0 0 1 5.5 5.25h4c.56 0 1.08.26 1.41.72l.71.97c.14.2.37.31.62.31h6.26A1.75 1.75 0 0 1 20.25 9v7.5a1.75 1.75 0 0 1-1.75 1.75H5.5a1.75 1.75 0 0 1-1.75-1.75V7Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
+      <path d="M16.5 10.25v5.5M13.75 13h5.5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function DotsIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -128,6 +143,37 @@ function TrashIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+function BookIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M6.75 4.5h9A2.25 2.25 0 0 1 18 6.75v10.5A2.25 2.25 0 0 0 15.75 15h-9A2.25 2.25 0 0 0 4.5 17.25V6.75A2.25 2.25 0 0 1 6.75 4.5Zm0 0A2.25 2.25 0 0 0 4.5 6.75v10.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function GearIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M11.98 3.75h.04a1.3 1.3 0 0 1 1.26 1.01l.26 1.12a6.8 6.8 0 0 1 1.42.59l.98-.61a1.3 1.3 0 0 1 1.58.18l.03.03a1.3 1.3 0 0 1 .18 1.58l-.61.98c.23.45.43.92.59 1.42l1.12.26a1.3 1.3 0 0 1 1.01 1.26v.04a1.3 1.3 0 0 1-1.01 1.26l-1.12.26a6.8 6.8 0 0 1-.59 1.42l.61.98a1.3 1.3 0 0 1-.18 1.58l-.03.03a1.3 1.3 0 0 1-1.58.18l-.98-.61c-.45.23-.92.43-1.42.59l-.26 1.12a1.3 1.3 0 0 1-1.26 1.01h-.04a1.3 1.3 0 0 1-1.26-1.01l-.26-1.12a6.8 6.8 0 0 1-1.42-.59l-.98.61a1.3 1.3 0 0 1-1.58-.18l-.03-.03a1.3 1.3 0 0 1-.18-1.58l.61-.98a6.8 6.8 0 0 1-.59-1.42l-1.12-.26A1.3 1.3 0 0 1 3.75 12v-.04a1.3 1.3 0 0 1 1.01-1.26l1.12-.26c.16-.5.36-.97.59-1.42l-.61-.98a1.3 1.3 0 0 1 .18-1.58l.03-.03a1.3 1.3 0 0 1 1.58-.18l.98.61c.45-.23.92-.43 1.42-.59l.26-1.12a1.3 1.3 0 0 1 1.26-1.01Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="12" r="2.8" fill="none" stroke="currentColor" strokeWidth="1.5" />
     </svg>
   );
 }
@@ -506,37 +552,16 @@ function LeftRailComponent({
           <div className="codex-rail-toolbar">
             <button
               type="button"
-              className="icon-ghost-button claude-path-button"
-              onClick={onOpenSettings}
-              title="Configure Claude path"
-            >
-              Claude path
-            </button>
-            <button
-              type="button"
               className="icon-ghost-button add-project-button"
               onClick={onOpenWorkspacePicker}
               title="Add new project"
               aria-label="Add new project"
             >
               <span className="rail-icon" aria-hidden="true">
-                <PlusIcon />
+                <FolderPlusIcon />
               </span>
               <span>Add project</span>
             </button>
-            <div className="wiki-link-wrapper">
-              <button
-                type="button"
-                className="icon-ghost-button wiki-link-button"
-                onClick={onOpenWiki}
-                aria-describedby="wiki-hover-tip"
-              >
-                Wiki
-              </button>
-              <span id="wiki-hover-tip" className="wiki-hover-tip" role="tooltip">
-                React if you're loving it!
-              </span>
-            </div>
           </div>
         </div>
 
@@ -773,6 +798,26 @@ function LeftRailComponent({
             );
           })}
         </ul>
+      </div>
+
+      <div className="left-rail-footer">
+        <div className="left-rail-footer-links">
+          <div className="wiki-link-wrapper">
+            <button type="button" className="rail-footer-button" onClick={onOpenWiki}>
+              <span className="rail-footer-icon" aria-hidden="true">
+                <BookIcon />
+              </span>
+              <span>Wiki</span>
+            </button>
+            <span className="wiki-hover-tip">React if you&apos;re loving it!</span>
+          </div>
+          <button type="button" className="rail-footer-button" onClick={onOpenSettings}>
+            <span className="rail-footer-icon" aria-hidden="true">
+              <GearIcon />
+            </span>
+            <span>Settings</span>
+          </button>
+        </div>
       </div>
 
       {contextMenu ? (

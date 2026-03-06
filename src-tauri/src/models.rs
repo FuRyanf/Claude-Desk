@@ -90,16 +90,29 @@ pub struct TranscriptEntry {
     pub run_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppearanceMode {
+    Light,
+    #[default]
+    Dark,
+    System,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    #[serde(default)]
     pub claude_cli_path: Option<String>,
+    #[serde(default)]
+    pub appearance_mode: AppearanceMode,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             claude_cli_path: None,
+            appearance_mode: AppearanceMode::Dark,
         }
     }
 }
@@ -162,6 +175,9 @@ pub struct SkillInfo {
     pub description: String,
     pub entry_points: Vec<String>,
     pub path: String,
+    pub relative_path: String,
+    #[serde(default)]
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,9 +223,15 @@ pub struct TerminalStartResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceShellStartResponse {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TerminalDataEvent {
     pub session_id: String,
-    pub thread_id: String,
+    pub thread_id: Option<String>,
     pub data: String,
     pub sequence: u64,
 }

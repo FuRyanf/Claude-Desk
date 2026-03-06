@@ -18,6 +18,7 @@ import type {
   TerminalDataEvent,
   TerminalExitEvent,
   TerminalStartResponse,
+  WorkspaceShellStartResponse,
   ThreadMetadata,
   TranscriptEntry,
   Workspace
@@ -100,6 +101,12 @@ export const api = {
     threadId: string;
   }) =>
     invoke<TerminalStartResponse>('terminal_start_session', params),
+  workspaceShellStartSession: (params: {
+    workspacePath: string;
+    initialCwd?: string | null;
+    envVars?: Record<string, string> | null;
+  }) =>
+    invoke<WorkspaceShellStartResponse>('workspace_shell_start_session', params),
   terminalWrite: (sessionId: string, data: string) =>
     invoke<boolean>('terminal_write', { sessionId, data }),
   terminalResize: (sessionId: string, cols: number, rows: number) =>

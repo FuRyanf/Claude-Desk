@@ -1,9 +1,9 @@
 /**
  * Tests for the "Display issue?" button.
  *
- * The button shows a semi-persistent inline tip telling users to drag
- * a window edge to rerender the terminal.  It does not trigger any
- * programmatic resize — it is purely informational.
+ * The button lives in the header actions and shows a semi-persistent
+ * inline tip telling users to drag a window edge to rerender the
+ * terminal.
  */
 
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -165,7 +165,7 @@ describe('"Display issue?" button', () => {
     window.localStorage.clear();
   });
 
-  it('renders in the bottom bar', async () => {
+  it('renders in the header actions', async () => {
     render(<App />);
     await screen.findByRole('button', { name: /Test Thread/i });
     expect(screen.getByTestId('fix-display-button')).toBeInTheDocument();

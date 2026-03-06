@@ -1,4 +1,9 @@
 import '@testing-library/jest-dom';
+import { vi } from 'vitest';
+
+vi.mock('@tauri-apps/api/app', () => ({
+  setTheme: vi.fn(async () => undefined)
+}));
 
 if (!window.matchMedia) {
   window.matchMedia = ((query: string) => ({

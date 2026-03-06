@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => {
   };
 
   let threadState = [{ ...baseThread }];
+  let sessionCounter = 0;
 
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
@@ -143,7 +144,7 @@ const mocks = vi.hoisted(() => {
     terminalStartSession: vi.fn(async (params: { threadId: string }) => {
       const thread = threadState.find((item) => item.id === params.threadId) ?? threadState[0];
       return {
-        sessionId: 'session-1',
+        sessionId: `session-${++sessionCounter}`,
         sessionMode: thread?.claudeSessionId ? 'resumed' : 'new',
         resumeSessionId: thread?.claudeSessionId ?? null,
         thread: {
@@ -159,7 +160,7 @@ const mocks = vi.hoisted(() => {
     terminalKill: vi.fn(async () => true),
     terminalSendSignal: vi.fn(async () => true),
     terminalGetLastLog: vi.fn(async () => ''),
-    terminalReadOutput: vi.fn(async () => ''),
+    terminalReadOutput: vi.fn(async () => '? for shortcuts'),
     runClaude: vi.fn(async () => ({ runId: 'run-1' })),
     cancelRun: vi.fn(async () => true),
     generateCommitMessage: vi.fn(async () => 'chore: update'),
@@ -171,6 +172,7 @@ const mocks = vi.hoisted(() => {
   const reset = () => {
     workspace = { ...baseWorkspace };
     threadState = [{ ...baseThread }];
+    sessionCounter = 0;
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -206,6 +208,16 @@ vi.mock('../../src/lib/api', () => ({
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: mocks.openDialog,
   confirm: mocks.confirmDialog
+}));
+
+vi.mock('../../src/components/TerminalPanel', () => ({
+  TerminalPanel: ({ onData }: { onData?: (data: string) => void }) => (
+    <section data-testid="terminal-panel-mock">
+      <button type="button" onClick={() => onData?.('draft')}>
+        Type draft
+      </button>
+    </section>
+  )
 }));
 
 import App from '../../src/App';
@@ -267,6 +279,82 @@ describe('Terminal launch flags', () => {
     });
     expect(mocks.api.terminalKill).toHaveBeenCalledWith('session-1');
     expect(screen.getByTestId('full-access-toggle')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('preserves the current draft when full access is toggled', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 'thread-1',
+          fullAccessFlag: true
+        })
+      );
+    });
+
+    await user.click(screen.getByRole('button', { name: /Type draft/i }));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith('session-1', 'draft');
+    });
+
+    await user.click(screen.getByTestId('full-access-toggle'));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 'thread-1',
+          fullAccessFlag: false
+        })
+      );
+    });
+
+    await waitFor(() => {
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith('session-2', 'draft');
+    });
+  });
+
+  it('waits for the replacement Claude session to hydrate before replaying the draft', async () => {
+    let replacementSessionReads = 0;
+    mocks.api.terminalReadOutput.mockImplementation(async (sessionId: string) => {
+      if (sessionId === 'session-2') {
+        replacementSessionReads += 1;
+        return replacementSessionReads === 1 ? '' : '? for shortcuts';
+      }
+      return '? for shortcuts';
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await user.click(screen.getByRole('button', { name: /Type draft/i }));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith('session-1', 'draft');
+    });
+
+    await user.click(screen.getByTestId('full-access-toggle'));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith('session-2', 'draft');
+    });
+
+    const replacementReadIndex = mocks.api.terminalReadOutput.mock.calls.findIndex(
+      ([sessionId]: [string]) => sessionId === 'session-2'
+    );
+    const replayIndex = mocks.api.terminalWrite.mock.calls.findIndex(
+      ([sessionId, payload]: [string, string]) => sessionId === 'session-2' && payload === 'draft'
+    );
+
+    expect(replacementReadIndex).toBeGreaterThanOrEqual(0);
+    expect(replayIndex).toBeGreaterThanOrEqual(0);
+    expect(mocks.api.terminalReadOutput.mock.invocationCallOrder[replacementReadIndex]).toBeLessThan(
+      mocks.api.terminalWrite.mock.invocationCallOrder[replayIndex]
+    );
   });
 
   it('toggles full access in-place for rdev without reconnecting', async () => {

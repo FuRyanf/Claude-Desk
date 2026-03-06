@@ -385,6 +385,11 @@ pub fn runs_dir(workspace_id: &str, thread_id: &str) -> Result<PathBuf> {
     Ok(thread_dir(workspace_id, thread_id)?.join("runs"))
 }
 
+pub fn workspace_shell_sessions_dir(workspace_id: &str) -> Result<PathBuf> {
+    let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
+    Ok(ensure_base_dirs()?.join("workspace-shells").join(workspace_id))
+}
+
 pub fn create_thread(workspace_id: &str, agent_id: Option<String>) -> Result<ThreadMetadata> {
     let now = Utc::now();
     let thread = ThreadMetadata {

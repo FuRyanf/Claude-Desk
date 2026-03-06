@@ -16,6 +16,7 @@ use crate::models::{
     GitPullForNewThreadResult, GitWorkspaceStatus, RunClaudeRequest, RunClaudeResponse, Settings,
     SkillInfo,
     TerminalStartResponse, ThreadMetadata, TranscriptEntry, Workspace,
+    WorkspaceShellStartResponse,
 };
 
 struct AppState {
@@ -420,6 +421,25 @@ async fn terminal_start_session(
 }
 
 #[tauri::command]
+async fn workspace_shell_start_session(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    workspace_path: String,
+    initial_cwd: Option<String>,
+    env_vars: Option<std::collections::HashMap<String, String>>,
+) -> Result<WorkspaceShellStartResponse, String> {
+    runner::workspace_shell_start_session(
+        app,
+        state.runner.clone(),
+        workspace_path,
+        initial_cwd,
+        env_vars,
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn terminal_write(
     state: State<'_, AppState>,
     session_id: String,
@@ -625,6 +645,7 @@ fn main() {
             run_claude,
             cancel_run,
             terminal_start_session,
+            workspace_shell_start_session,
             terminal_write,
             terminal_resize,
             terminal_kill,

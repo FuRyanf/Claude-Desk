@@ -2,6 +2,7 @@ export type RunStatus = 'Idle' | 'Running' | 'Succeeded' | 'Failed' | 'Canceled'
 export type ContextPack = 'Minimal' | 'Git Diff' | 'Debug';
 export type TerminalSessionMode = 'resumed' | 'new';
 export type WorkspaceKind = 'local' | 'rdev' | 'ssh';
+export type AppearanceMode = 'dark' | 'light' | 'system';
 
 export interface Workspace {
   id: string;
@@ -70,6 +71,7 @@ export interface GitPullForNewThreadResult {
 
 export interface Settings {
   claudeCliPath?: string | null;
+  appearanceMode?: AppearanceMode | null;
 }
 
 export interface AppUpdateInfo {
@@ -85,6 +87,8 @@ export interface SkillInfo {
   description: string;
   entryPoints: string[];
   path: string;
+  relativePath: string;
+  warning?: string | null;
 }
 
 export interface ContextFilePreview {
@@ -118,9 +122,13 @@ export interface TerminalStartResponse {
   thread: ThreadMetadata;
 }
 
+export interface WorkspaceShellStartResponse {
+  sessionId: string;
+}
+
 export interface TerminalDataEvent {
   sessionId: string;
-  threadId?: string;
+  threadId?: string | null;
   data: string;
   sequence?: number;
 }
