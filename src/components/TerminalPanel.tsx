@@ -25,6 +25,8 @@ const STREAM_REPAIR_IDLE_DELAY_MS = 120;
 const OUTPUT_QUEUE_WARN_PENDING_BYTES = 128 * 1024;
 const OUTPUT_QUEUE_WARN_LATENCY_MS = 96;
 const OUTPUT_QUEUE_WARN_COOLDOWN_MS = 2_000;
+const MULTILINE_ENTER_SEQUENCE = '\x1b\r';
+const MULTILINE_ENTER_DUPLICATE_SUPPRESSION_MS = 64;
 
 interface TerminalPanelProps {
   sessionId?: string | null;
@@ -97,6 +99,7 @@ export function TerminalPanel({
   const streamRepairTimerRef = useRef<number | null>(null);
   const bytesSinceRepairRef = useRef(0);
   const lastStreamRepairAtRef = useRef(0);
+  const suppressPlainEnterUntilRef = useRef(0);
 
   const syncFollowOutputPaused = useCallback((nextPaused: boolean) => {
     setFollowOutputPaused((current) => (current === nextPaused ? current : nextPaused));
@@ -394,7 +397,10 @@ export function TerminalPanel({
           !event.altKey
         ) {
           if (!readOnlyRef.current && inputEnabledRef.current) {
-            inputBufferRef.current += '\n';
+            event.preventDefault();
+            event.stopPropagation();
+            suppressPlainEnterUntilRef.current = Date.now() + MULTILINE_ENTER_DUPLICATE_SUPPRESSION_MS;
+            inputBufferRef.current += MULTILINE_ENTER_SEQUENCE;
             scheduleOutgoingInputFlush();
           }
           return false;
@@ -526,6 +532,14 @@ export function TerminalPanel({
           return;
         }
 
+        if ((data === '\r' || data === '\n') && Date.now() < suppressPlainEnterUntilRef.current) {
+          suppressPlainEnterUntilRef.current = 0;
+          return;
+        }
+        if (Date.now() >= suppressPlainEnterUntilRef.current) {
+          suppressPlainEnterUntilRef.current = 0;
+        }
+
         inputBufferRef.current += data;
         if (
           data === '\r' ||
@@ -628,6 +642,7 @@ export function TerminalPanel({
         term.dispose();
         terminalRef.current = null;
         followStateRef.current = createFollowState();
+        suppressPlainEnterUntilRef.current = 0;
         inputBufferRef.current = '';
         if (inputFlushTimerRef.current !== null) {
           window.clearTimeout(inputFlushTimerRef.current);
@@ -713,6 +728,7 @@ export function TerminalPanel({
     clearPendingWrites();
     clearScheduledStreamRepair();
     bytesSinceRepairRef.current = 0;
+    suppressPlainEnterUntilRef.current = 0;
     inputBufferRef.current = '';
     if (inputFlushTimerRef.current !== null) {
       window.clearTimeout(inputFlushTimerRef.current);

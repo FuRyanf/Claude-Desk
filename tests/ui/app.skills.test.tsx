@@ -2,6 +2,8 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const MULTILINE_ENTER_SEQUENCE = '\x1b\r';
+
 const mocks = vi.hoisted(() => {
   const workspace = {
     id: 'ws-1',
@@ -201,6 +203,12 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 vi.mock('../../src/components/TerminalPanel', () => ({
   TerminalPanel: ({ onData }: { onData?: (data: string) => void }) => (
     <section data-testid="terminal-panel-mock">
+      <button type="button" onClick={() => onData?.('hey')}>
+        Type prompt
+      </button>
+      <button type="button" onClick={() => onData?.(MULTILINE_ENTER_SEQUENCE)}>
+        Shift Enter
+      </button>
       <button type="button" onClick={() => onData?.('ship it\r')}>
         Submit prompt
       </button>
@@ -265,6 +273,38 @@ describe('Skills management', () => {
     expect(lastPayload).toContain('Project skills to use for this request when relevant:');
     expect(lastPayload).toContain('Review (.claude/skills/review/SKILL.md)');
     expect(lastPayload.endsWith('\r')).toBe(true);
+  });
+
+  it('does not inject selected skills on Shift+Enter before the real submit', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(mocks.api.listSkills).toHaveBeenCalledWith('/tmp/workspace');
+    });
+
+    await user.click(await screen.findByRole('button', { name: /^skills$/i }));
+    await user.click((await screen.findByText('Review')).closest('button')!);
+
+    await waitFor(() => {
+      expect(mocks.api.setThreadSkills).toHaveBeenCalledWith('ws-1', 'thread-1', ['review']);
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Type prompt' }));
+    await user.click(screen.getByRole('button', { name: 'Shift Enter' }));
+
+    expect(mocks.api.renameThread).not.toHaveBeenCalled();
+    const terminalPayloads = mocks.api.terminalWrite.mock.calls.map((call) => call[1]);
+    expect(terminalPayloads).toContain('hey');
+    expect(terminalPayloads).toContain(MULTILINE_ENTER_SEQUENCE);
+    expect(
+      terminalPayloads.some(
+        (payload) => typeof payload === 'string' && payload.includes('Project skills to use for this request when relevant:')
+      )
+    ).toBe(false);
   });
 
   it('shows a calm empty state when the repo has no project skills', async () => {

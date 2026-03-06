@@ -2,6 +2,8 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const MULTILINE_ENTER_SEQUENCE = '\x1b\r';
+
 const mocks = vi.hoisted(() => {
   const workspace = {
     id: 'ws-1',
@@ -164,7 +166,7 @@ vi.mock('../../src/components/TerminalPanel', () => ({
       <button type="button" onClick={() => onData?.('Draft title')}>
         Type draft title
       </button>
-      <button type="button" onClick={() => onData?.('\n')}>
+      <button type="button" onClick={() => onData?.(MULTILINE_ENTER_SEQUENCE)}>
         Shift Enter
       </button>
       <button type="button" onClick={() => onData?.('\r')}>
@@ -194,7 +196,7 @@ describe('Shift+Enter terminal input', () => {
 
     expect(mocks.api.renameThread).not.toHaveBeenCalled();
     await waitFor(() => {
-      expect(mocks.api.terminalWrite).toHaveBeenCalledWith('session-1', '\n');
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith('session-1', MULTILINE_ENTER_SEQUENCE);
     });
 
     await user.click(screen.getByRole('button', { name: 'Enter' }));

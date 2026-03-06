@@ -259,7 +259,10 @@ function isDefaultThreadTitle(title: string): boolean {
 }
 
 function normalizeTerminalInputChunk(data: string): string {
-  return data;
+  // Claude Code treats Esc+Enter as "insert newline without submitting".
+  // We preserve that behavior in app-side draft parsing so Shift/Option+Enter
+  // stays multiline instead of looking like a normal submit.
+  return data.replace(/\x1b\r/g, '\n');
 }
 
 interface StripControlSequencesResult {
@@ -535,7 +538,14 @@ function stripHiddenPromptEchoes(text: string, prompts: string[]): string {
     if (!prompt) {
       continue;
     }
-    next = stripFirstOccurrence(next, prompt);
+    const variants = new Set([
+      prompt,
+      prompt.replace(/\n/g, '\r\n'),
+      prompt.replace(/\n/g, '\r')
+    ]);
+    for (const variant of variants) {
+      next = stripFirstOccurrence(next, variant);
+    }
   }
   return next;
 }
