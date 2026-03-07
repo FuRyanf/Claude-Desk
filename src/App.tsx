@@ -2509,12 +2509,13 @@ export default function App() {
         void api.terminalResize(response.sessionId, shellTerminalSize.cols, shellTerminalSize.rows);
         return response.sessionId;
       } catch (error) {
-        if (isCurrentRequest()) {
-          pendingShellSessionStartRef.current = null;
-          setShellTerminalStarting(false);
-          if (shellTerminalWorkspaceIdRef.current === workspace.id && shellTerminalSessionIdRef.current === null) {
-            setShellSessionBinding(null, workspace.id);
-          }
+        if (!isCurrentRequest()) {
+          return null;
+        }
+        pendingShellSessionStartRef.current = null;
+        setShellTerminalStarting(false);
+        if (shellTerminalWorkspaceIdRef.current === workspace.id && shellTerminalSessionIdRef.current === null) {
+          setShellSessionBinding(null, workspace.id);
         }
         throw error;
       }
@@ -2543,7 +2544,6 @@ export default function App() {
     setShellDrawerOpen(true);
     setShellTerminalFocusRequestId((current) => current + 1);
     void startWorkspaceShellSession(selectedWorkspace).catch((error) => {
-      setShellTerminalStarting(false);
       pushToast(`Failed to start workspace terminal: ${String(error)}`, 'error');
     });
   }, [
@@ -2572,7 +2572,6 @@ export default function App() {
       return;
     }
     void startWorkspaceShellSession(selectedWorkspace).catch((error) => {
-      setShellTerminalStarting(false);
       pushToast(`Failed to start workspace terminal: ${String(error)}`, 'error');
     });
   }, [
@@ -3295,6 +3294,7 @@ export default function App() {
           }
         }
         if (reopenShellAfterCheckout) {
+          setShellTerminalStarting(true);
           setShellDrawerOpen(true);
           setShellTerminalFocusRequestId((current) => current + 1);
           void startWorkspaceShellSession(selectedWorkspace).catch((error) => {

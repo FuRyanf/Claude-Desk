@@ -246,6 +246,40 @@ describe('Workspace shell lifecycle', () => {
     mocks.api.gitListBranches.mockResolvedValue([{ name: 'main', isCurrent: true, lastCommitUnix: 1700000000 }]);
   });
 
+  it('starts the workspace shell only once while the initial open is pending', async () => {
+    const user = userEvent.setup();
+    let resolveShellStart: ((value: { sessionId: string }) => void) | null = null;
+    mocks.api.workspaceShellStartSession.mockImplementationOnce(
+      async () =>
+        await new Promise((resolve) => {
+          resolveShellStart = resolve;
+        })
+    );
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Alpha thread/i });
+    await user.click(screen.getByRole('button', { name: 'Terminal' }));
+
+    await waitFor(() => {
+      expect(mocks.api.workspaceShellStartSession).toHaveBeenCalledTimes(1);
+      expect(mocks.api.workspaceShellStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ workspacePath: '/tmp/workspace-one' })
+      );
+    });
+
+    await new Promise<void>((resolve) => {
+      window.setTimeout(() => resolve(), 40);
+    });
+    expect(mocks.api.workspaceShellStartSession).toHaveBeenCalledTimes(1);
+
+    resolveShellStart?.({ sessionId: 'shell-session-ws1' });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('shell-session-ws1');
+    });
+  });
+
   it('kills stale shell starts when the selected workspace changes mid-launch', async () => {
     const user = userEvent.setup();
     let resolveFirstShellStart: ((value: { sessionId: string }) => void) | null = null;
@@ -291,6 +325,59 @@ describe('Workspace shell lifecycle', () => {
     expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('shell-session-ws2');
   });
 
+  it('keeps the replacement workspace shell marked as starting when a stale prior start fails', async () => {
+    const user = userEvent.setup();
+    let rejectFirstShellStart: ((reason?: unknown) => void) | null = null;
+    let resolveSecondShellStart: ((value: { sessionId: string }) => void) | null = null;
+
+    mocks.api.workspaceShellStartSession
+      .mockImplementationOnce(
+        async () =>
+          await new Promise((_, reject) => {
+            rejectFirstShellStart = reject;
+          })
+      )
+      .mockImplementationOnce(
+        async () =>
+          await new Promise((resolve) => {
+            resolveSecondShellStart = resolve;
+          })
+      );
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Alpha thread/i });
+    await user.click(screen.getByRole('button', { name: 'Terminal' }));
+
+    await waitFor(() => {
+      expect(mocks.api.workspaceShellStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ workspacePath: '/tmp/workspace-one' })
+      );
+    });
+
+    await user.click(screen.getByRole('button', { name: /Beta thread/i }));
+
+    await waitFor(() => {
+      expect(mocks.api.workspaceShellStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ workspacePath: '/tmp/workspace-two' })
+      );
+    });
+
+    rejectFirstShellStart?.(new Error('stale shell failed'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('Workspace Two');
+      expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('pending');
+      expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('true');
+    });
+
+    resolveSecondShellStart?.({ sessionId: 'shell-session-ws2' });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('shell-session-ws2');
+    });
+  });
+
   it('stops the active shell session before removing its workspace', async () => {
     const user = userEvent.setup();
     mocks.api.workspaceShellStartSession.mockResolvedValueOnce({
@@ -314,6 +401,42 @@ describe('Workspace shell lifecycle', () => {
     await waitFor(() => {
       expect(mocks.api.terminalKill).toHaveBeenCalledWith('shell-session-ws1');
       expect(mocks.api.removeWorkspace).toHaveBeenCalledWith('ws-1');
+    });
+    expect(screen.queryByTestId('workspace-shell-drawer')).not.toBeInTheDocument();
+  });
+
+  it('cancels a pending shell start before removing its workspace', async () => {
+    const user = userEvent.setup();
+    let resolveShellStart: ((value: { sessionId: string }) => void) | null = null;
+    mocks.api.workspaceShellStartSession.mockImplementationOnce(
+      async () =>
+        await new Promise((resolve) => {
+          resolveShellStart = resolve;
+        })
+    );
+
+    render(<App />);
+
+    const workspaceRow = await screen.findByRole('button', { name: /Workspace One/i });
+    await user.click(screen.getByRole('button', { name: 'Terminal' }));
+
+    await waitFor(() => {
+      expect(mocks.api.workspaceShellStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ workspacePath: '/tmp/workspace-one' })
+      );
+    });
+
+    await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Remove project' }));
+
+    await waitFor(() => {
+      expect(mocks.api.removeWorkspace).toHaveBeenCalledWith('ws-1');
+    });
+
+    resolveShellStart?.({ sessionId: 'shell-session-ws1-late' });
+
+    await waitFor(() => {
+      expect(mocks.api.terminalKill).toHaveBeenCalledWith('shell-session-ws1-late');
     });
     expect(screen.queryByTestId('workspace-shell-drawer')).not.toBeInTheDocument();
   });
