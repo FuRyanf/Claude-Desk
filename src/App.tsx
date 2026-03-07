@@ -838,6 +838,7 @@ export default function App() {
   const [fullAccessUpdating, setFullAccessUpdating] = useState(false);
   const [startingByThread, setStartingByThread] = useState<Record<string, boolean>>({});
   const [readyByThread, setReadyByThread] = useState<Record<string, boolean>>({});
+  const [creatingThreadByWorkspace, setCreatingThreadByWorkspace] = useState<Record<string, boolean>>({});
   const [resumeFailureModal, setResumeFailureModal] = useState<{
     threadId: string;
     workspaceId: string;
@@ -850,6 +851,8 @@ export default function App() {
   const focusedTerminalKindRef = useRef<'claude' | 'shell' | null>(null);
   const shellTerminalSessionIdRef = useRef<string | null>(null);
   const shellTerminalWorkspaceIdRef = useRef<string | null>(null);
+  const shellSessionStartRequestIdRef = useRef(0);
+  const pendingShellSessionStartRef = useRef<{ requestId: number; workspaceId: string } | null>(null);
   const activeRunsByThreadRef = useRef(runStore.activeRunsByThread);
   const workingByThreadRef = useRef(runStore.workingByThread);
   const sidebarResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
@@ -870,6 +873,7 @@ export default function App() {
   const outputControlCarryByThreadRef = useRef<Record<string, string>>({});
   const threadTitleInitializedRef = useRef<Record<string, true>>({});
   const deletedThreadIdsRef = useRef<Record<string, true>>({});
+  const creatingThreadByWorkspaceRef = useRef<Record<string, true>>({});
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
   const hiddenInjectedPromptsByThreadRef = useRef<Record<string, string[]>>({});
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
@@ -1023,6 +1027,51 @@ export default function App() {
   shellTerminalWorkspaceIdRef.current = shellTerminalWorkspaceId;
   activeRunsByThreadRef.current = runStore.activeRunsByThread;
   workingByThreadRef.current = runStore.workingByThread;
+
+  const setWorkspaceCreatingThread = useCallback((workspaceId: string, creating: boolean) => {
+    if (!workspaceId) {
+      return;
+    }
+    if (creating) {
+      creatingThreadByWorkspaceRef.current[workspaceId] = true;
+      setCreatingThreadByWorkspace((current) =>
+        current[workspaceId] ? current : { ...current, [workspaceId]: true }
+      );
+      return;
+    }
+
+    delete creatingThreadByWorkspaceRef.current[workspaceId];
+    setCreatingThreadByWorkspace((current) => removeThreadFlag(current, workspaceId));
+  }, []);
+
+  const setShellSessionBinding = useCallback((sessionId: string | null, workspaceId: string | null) => {
+    shellTerminalSessionIdRef.current = sessionId;
+    shellTerminalWorkspaceIdRef.current = workspaceId;
+    setShellTerminalSessionId(sessionId);
+    setShellTerminalWorkspaceId(workspaceId);
+  }, []);
+
+  const bumpShellSessionStartRequestId = useCallback(() => {
+    const next = shellSessionStartRequestIdRef.current + 1;
+    shellSessionStartRequestIdRef.current = next;
+    return next;
+  }, []);
+
+  const invalidatePendingShellSessionStart = useCallback(
+    (workspaceId?: string | null) => {
+      if (
+        workspaceId &&
+        pendingShellSessionStartRef.current &&
+        pendingShellSessionStartRef.current.workspaceId !== workspaceId
+      ) {
+        return;
+      }
+      bumpShellSessionStartRequestId();
+      pendingShellSessionStartRef.current = null;
+      setShellTerminalStarting(false);
+    },
+    [bumpShellSessionStartRequestId]
+  );
 
   useEffect(() => {
     persistSkillUsageMap(skillUsageMap);
@@ -1413,6 +1462,17 @@ export default function App() {
     }
     delete terminalSnapshotRefreshTimersBySessionRef.current[sessionId];
   }, []);
+
+  const clearTerminalSessionTracking = useCallback(
+    (sessionId: string) => {
+      delete sessionMetaBySessionIdRef.current[sessionId];
+      delete pendingSnapshotBySessionRef.current[sessionId];
+      delete terminalDataSequenceBySessionRef.current[sessionId];
+      delete liveDataSeenBySessionRef.current[sessionId];
+      clearSessionSnapshotRefreshTimers(sessionId);
+    },
+    [clearSessionSnapshotRefreshTimers]
+  );
 
   const noteThreadOutput = useCallback((threadId: string, chunk: string) => {
     const previousCarry = outputControlCarryByThreadRef.current[threadId] ?? '';
@@ -2325,41 +2385,140 @@ export default function App() {
     [addAttachmentPathsForSelectedThread, pushToast, selectedThread]
   );
 
-  const startWorkspaceShellSession = useCallback(
-    async (workspace: Workspace): Promise<string | null> => {
-      const existingSessionId = shellTerminalSessionIdRef.current;
-      const existingWorkspaceId = shellTerminalWorkspaceIdRef.current;
-      if (existingSessionId && existingWorkspaceId === workspace.id) {
-        setShellTerminalStarting(false);
-        return existingSessionId;
+  const stopShellSessionForWorkspace = useCallback(
+    async (
+      workspaceId: string,
+      options?: {
+        closeDrawer?: boolean;
+        clearContent?: boolean;
+      }
+    ) => {
+      if (!workspaceId) {
+        return;
       }
 
-      if (existingSessionId && existingWorkspaceId && existingWorkspaceId !== workspace.id) {
+      const shouldCloseDrawer =
+        Boolean(options?.closeDrawer) && shellTerminalWorkspaceIdRef.current === workspaceId;
+      invalidatePendingShellSessionStart(workspaceId);
+
+      const sessionId =
+        shellTerminalWorkspaceIdRef.current === workspaceId ? shellTerminalSessionIdRef.current : null;
+
+      if (sessionId) {
         try {
-          await api.terminalKill(existingSessionId);
+          await withTimeout(api.terminalKill(sessionId), 900);
         } catch {
           // best effort
         }
       }
 
-      setShellTerminalStarting(true);
-      setShellTerminalContent('');
-      setShellTerminalSessionId(null);
-      setShellTerminalWorkspaceId(workspace.id);
-
-      await waitForTerminalDataListenerReady();
-      const response = await api.workspaceShellStartSession({
-        workspacePath: workspace.path,
-        initialCwd: workspace.kind === 'local' ? workspace.path : null
-      });
-
-      setShellTerminalSessionId(response.sessionId);
-      setShellTerminalWorkspaceId(workspace.id);
+      if (shellTerminalWorkspaceIdRef.current === workspaceId || sessionId) {
+        setShellSessionBinding(null, null);
+      }
       setShellTerminalStarting(false);
-      void api.terminalResize(response.sessionId, shellTerminalSize.cols, shellTerminalSize.rows);
-      return response.sessionId;
+      setFocusedTerminalKind((current) => (current === 'shell' ? null : current));
+
+      if (options?.clearContent ?? true) {
+        setShellTerminalContent('');
+      }
+
+      if (shouldCloseDrawer) {
+        setShellDrawerOpen(false);
+      }
     },
-    [shellTerminalSize.cols, shellTerminalSize.rows, waitForTerminalDataListenerReady]
+    [invalidatePendingShellSessionStart, setShellSessionBinding]
+  );
+
+  const startWorkspaceShellSession = useCallback(
+    async (workspace: Workspace): Promise<string | null> => {
+      const requestId = bumpShellSessionStartRequestId();
+      pendingShellSessionStartRef.current = {
+        requestId,
+        workspaceId: workspace.id
+      };
+      const isCurrentRequest = () =>
+        pendingShellSessionStartRef.current?.requestId === requestId &&
+        pendingShellSessionStartRef.current?.workspaceId === workspace.id;
+
+      const existingSessionId = shellTerminalSessionIdRef.current;
+      const existingWorkspaceId = shellTerminalWorkspaceIdRef.current;
+      if (existingSessionId && existingWorkspaceId === workspace.id) {
+        const stillAlive = await api
+          .terminalResize(existingSessionId, shellTerminalSize.cols, shellTerminalSize.rows)
+          .catch(() => false);
+        if (!isCurrentRequest()) {
+          return null;
+        }
+        if (stillAlive) {
+          pendingShellSessionStartRef.current = null;
+          setShellTerminalStarting(false);
+          return existingSessionId;
+        }
+        setShellSessionBinding(null, workspace.id);
+      }
+
+      if (existingSessionId && existingWorkspaceId && existingWorkspaceId !== workspace.id) {
+        try {
+          await withTimeout(api.terminalKill(existingSessionId), 900);
+        } catch {
+          // best effort
+        }
+        if (shellTerminalSessionIdRef.current === existingSessionId) {
+          setShellSessionBinding(null, null);
+        }
+      }
+
+      setShellTerminalStarting(true);
+      if (existingWorkspaceId !== workspace.id) {
+        setShellTerminalContent('');
+      }
+      setShellSessionBinding(null, workspace.id);
+
+      try {
+        await waitForTerminalDataListenerReady();
+        const response = await api.workspaceShellStartSession({
+          workspacePath: workspace.path,
+          initialCwd: workspace.kind === 'local' ? workspace.path : null
+        });
+
+        if (!isCurrentRequest()) {
+          if (import.meta.env.DEV && import.meta.env.MODE !== 'test') {
+            console.debug('[workspace-shell] dropped stale session start', {
+              workspaceId: workspace.id,
+              sessionId: response.sessionId
+            });
+          }
+          try {
+            await withTimeout(api.terminalKill(response.sessionId), 900);
+          } catch {
+            // best effort
+          }
+          return null;
+        }
+
+        pendingShellSessionStartRef.current = null;
+        setShellSessionBinding(response.sessionId, workspace.id);
+        setShellTerminalStarting(false);
+        void api.terminalResize(response.sessionId, shellTerminalSize.cols, shellTerminalSize.rows);
+        return response.sessionId;
+      } catch (error) {
+        if (isCurrentRequest()) {
+          pendingShellSessionStartRef.current = null;
+          setShellTerminalStarting(false);
+          if (shellTerminalWorkspaceIdRef.current === workspace.id && shellTerminalSessionIdRef.current === null) {
+            setShellSessionBinding(null, workspace.id);
+          }
+        }
+        throw error;
+      }
+    },
+    [
+      bumpShellSessionStartRequestId,
+      setShellSessionBinding,
+      shellTerminalSize.cols,
+      shellTerminalSize.rows,
+      waitForTerminalDataListenerReady
+    ]
   );
 
   const toggleWorkspaceShellDrawer = useCallback(() => {
@@ -2368,6 +2527,7 @@ export default function App() {
     }
 
     if (shellDrawerOpen && shellTerminalWorkspaceId === selectedWorkspace.id) {
+      invalidatePendingShellSessionStart(selectedWorkspace.id);
       setShellDrawerOpen(false);
       setFocusedTerminalKind((current) => (current === 'shell' ? null : current));
       return;
@@ -2379,13 +2539,21 @@ export default function App() {
       setShellTerminalStarting(false);
       pushToast(`Failed to start workspace terminal: ${String(error)}`, 'error');
     });
-  }, [pushToast, selectedWorkspace, shellDrawerOpen, shellTerminalWorkspaceId, startWorkspaceShellSession]);
+  }, [
+    invalidatePendingShellSessionStart,
+    pushToast,
+    selectedWorkspace,
+    shellDrawerOpen,
+    shellTerminalWorkspaceId,
+    startWorkspaceShellSession
+  ]);
 
   useEffect(() => {
     if (!shellDrawerOpen) {
       return;
     }
     if (!selectedWorkspace) {
+      invalidatePendingShellSessionStart();
       setShellDrawerOpen(false);
       setShellTerminalStarting(false);
       return;
@@ -2398,6 +2566,7 @@ export default function App() {
       pushToast(`Failed to start workspace terminal: ${String(error)}`, 'error');
     });
   }, [
+    invalidatePendingShellSessionStart,
     pushToast,
     selectedWorkspace,
     shellDrawerOpen,
@@ -2476,11 +2645,7 @@ export default function App() {
       }
 
       finishSessionBinding(sessionId);
-      delete sessionMetaBySessionIdRef.current[sessionId];
-      delete pendingSnapshotBySessionRef.current[sessionId];
-      delete terminalDataSequenceBySessionRef.current[sessionId];
-      delete liveDataSeenBySessionRef.current[sessionId];
-      clearSessionSnapshotRefreshTimers(sessionId);
+      clearTerminalSessionTracking(sessionId);
       setStartingByThread((current) => removeThreadFlag(current, thread.id));
       setReadyByThread((current) => removeThreadFlag(current, thread.id));
 
@@ -2497,7 +2662,7 @@ export default function App() {
       autoRecoverInFlightRef.current = false;
     }
   }, [
-    clearSessionSnapshotRefreshTimers,
+    clearTerminalSessionTracking,
     ensureSessionForThread,
     finishSessionBinding,
     hasCachedTerminalLog,
@@ -2746,32 +2911,42 @@ export default function App() {
 
   const onNewThreadInWorkspace = useCallback(
     async (workspaceId: string) => {
-      const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
-      if (workspace?.kind === 'local' && workspace.gitPullOnMasterForNewThreads) {
-        try {
-          const pullResult = await api.gitPullMasterForNewThread(workspace.path);
-          if (pullResult.outcome === 'pulled') {
-            pushToast(pullResult.message, 'info');
-            if (selectedWorkspaceIdRef.current === workspaceId) {
-              await refreshGitInfo();
-            }
-          } else {
-            pushToast(pullResult.message, 'error');
-          }
-        } catch (error) {
-          pushToast(`Git pull pre-step failed: ${String(error)}`, 'error');
-        }
+      if (creatingThreadByWorkspaceRef.current[workspaceId]) {
+        return;
       }
 
-      if (selectedWorkspaceIdRef.current !== workspaceId) {
-        setSelectedWorkspace(workspaceId);
+      setWorkspaceCreatingThread(workspaceId, true);
+
+      try {
+        const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
+        if (workspace?.kind === 'local' && workspace.gitPullOnMasterForNewThreads) {
+          try {
+            const pullResult = await api.gitPullMasterForNewThread(workspace.path);
+            if (pullResult.outcome === 'pulled') {
+              pushToast(pullResult.message, 'info');
+              if (selectedWorkspaceIdRef.current === workspaceId) {
+                await refreshGitInfo();
+              }
+            } else {
+              pushToast(pullResult.message, 'error');
+            }
+          } catch (error) {
+            pushToast(`Git pull pre-step failed: ${String(error)}`, 'error');
+          }
+        }
+
+        if (selectedWorkspaceIdRef.current !== workspaceId) {
+          setSelectedWorkspace(workspaceId);
+        }
+        const thread = await createThread(workspaceId);
+        markThreadUserInput(workspaceId, thread.id);
+        delete deletedThreadIdsRef.current[thread.id];
+        setSelectedThread(thread.id);
+        setTerminalFocusRequestId((current) => current + 1);
+        await refreshThreadsForWorkspace(workspaceId);
+      } finally {
+        setWorkspaceCreatingThread(workspaceId, false);
       }
-      const thread = await createThread(workspaceId);
-      markThreadUserInput(workspaceId, thread.id);
-      delete deletedThreadIdsRef.current[thread.id];
-      setSelectedThread(thread.id);
-      setTerminalFocusRequestId((current) => current + 1);
-      await refreshThreadsForWorkspace(workspaceId);
     },
     [
       createThread,
@@ -2779,6 +2954,7 @@ export default function App() {
       pushToast,
       refreshGitInfo,
       refreshThreadsForWorkspace,
+      setWorkspaceCreatingThread,
       setSelectedThread,
       setSelectedWorkspace,
       workspaces
@@ -2860,8 +3036,7 @@ export default function App() {
           // best effort
         }
         finishSessionBinding(existingSessionId);
-        delete sessionMetaBySessionIdRef.current[existingSessionId];
-        delete pendingSnapshotBySessionRef.current[existingSessionId];
+        clearTerminalSessionTracking(existingSessionId);
       }
 
       try {
@@ -2918,6 +3093,7 @@ export default function App() {
       pushToast,
       refreshThreadsForWorkspace,
       runStore,
+      clearTerminalSessionTracking,
       clearThreadUnread,
       clearThreadWorkingStopTimer,
       stopThreadWorking,
@@ -2965,10 +3141,7 @@ export default function App() {
       setThreadRunState(threadId, 'Canceled', null, endedAt);
       clearThreadWorkingStopTimer(threadId);
       stopThreadWorking(threadId);
-      delete sessionMetaBySessionIdRef.current[sessionId];
-      delete pendingSnapshotBySessionRef.current[sessionId];
-      delete terminalDataSequenceBySessionRef.current[sessionId];
-      clearSessionSnapshotRefreshTimers(sessionId);
+      clearTerminalSessionTracking(sessionId);
       runLifecycleByThreadRef.current[threadId] = markRunExited();
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
@@ -2980,8 +3153,8 @@ export default function App() {
       setThreadRunState,
       stopThreadWorking,
       updateTerminalLogMap,
+      clearTerminalSessionTracking,
       clearThreadWorkingStopTimer,
-      clearSessionSnapshotRefreshTimers
     ]
   );
 
@@ -3086,7 +3259,16 @@ export default function App() {
         return false;
       }
 
+      const reopenShellAfterCheckout =
+        shellDrawerOpen && shellTerminalWorkspaceIdRef.current === selectedWorkspace.id;
+
       await stopSessionsForBranchSwitch();
+      if (reopenShellAfterCheckout) {
+        await stopShellSessionForWorkspace(selectedWorkspace.id, {
+          closeDrawer: true,
+          clearContent: true
+        });
+      }
 
       try {
         await api.gitCheckoutBranch(selectedWorkspace.path, branchName);
@@ -3102,13 +3284,31 @@ export default function App() {
             }));
           }
         }
+        if (reopenShellAfterCheckout) {
+          setShellDrawerOpen(true);
+          setShellTerminalFocusRequestId((current) => current + 1);
+          void startWorkspaceShellSession(selectedWorkspace).catch((error) => {
+            pushToast(`Failed to restart workspace terminal: ${String(error)}`, 'error');
+          });
+        }
         return true;
       } catch (error) {
         pushToast(`Branch checkout failed: ${String(error)}`, 'error');
         throw error;
       }
     },
-    [pushToast, refreshGitInfo, refreshSkillsForWorkspace, selectedThread, selectedWorkspace, stopSessionsForBranchSwitch, updateTerminalLogMap]
+    [
+      pushToast,
+      refreshGitInfo,
+      refreshSkillsForWorkspace,
+      selectedThread,
+      selectedWorkspace,
+      shellDrawerOpen,
+      startWorkspaceShellSession,
+      stopSessionsForBranchSwitch,
+      stopShellSessionForWorkspace,
+      updateTerminalLogMap
+    ]
   );
 
   useEffect(() => {
@@ -3383,6 +3583,18 @@ export default function App() {
         return;
       }
 
+      const activeSessionIdForThread = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
+      if (activeSessionIdForThread && activeSessionIdForThread !== event.sessionId) {
+        if (import.meta.env.DEV && import.meta.env.MODE !== 'test') {
+          console.debug('[terminal-data] dropped chunk for inactive session', {
+            eventSessionId: event.sessionId,
+            activeSessionId: activeSessionIdForThread,
+            threadId
+          });
+        }
+        return;
+      }
+
       const visibleEventData = stripThreadHiddenInjectedPrompts(threadId, event.data);
       const hasMeaningfulOutput = noteThreadOutput(threadId, visibleEventData);
       const isSelectedThread = selectedThreadIdRef.current === threadId;
@@ -3467,14 +3679,11 @@ export default function App() {
   const handleTerminalExitEvent = useCallback(
     (event: TerminalExitEvent) => {
       const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
-      delete sessionMetaBySessionIdRef.current[event.sessionId];
-      delete pendingSnapshotBySessionRef.current[event.sessionId];
-      delete terminalDataSequenceBySessionRef.current[event.sessionId];
-      delete liveDataSeenBySessionRef.current[event.sessionId];
-      clearSessionSnapshotRefreshTimers(event.sessionId);
+      clearTerminalSessionTracking(event.sessionId);
 
       if (shellTerminalSessionIdRef.current === event.sessionId) {
-        setShellTerminalSessionId(null);
+        invalidatePendingShellSessionStart(shellTerminalWorkspaceIdRef.current);
+        setShellSessionBinding(null, shellTerminalWorkspaceIdRef.current);
         setShellTerminalStarting(false);
         void api
           .terminalReadOutput(event.sessionId)
@@ -3554,12 +3763,14 @@ export default function App() {
     [
       finishSessionBinding,
       hasUnseenMeaningfulOutputSinceRead,
+      invalidatePendingShellSessionStart,
       refreshThreadsForWorkspace,
       setThreadRunState,
+      setShellSessionBinding,
       stopThreadWorking,
       updateTerminalLogMap,
+      clearTerminalSessionTracking,
       clearThreadWorkingStopTimer,
-      clearSessionSnapshotRefreshTimers,
       markThreadUnread
     ]
   );
@@ -3998,6 +4209,10 @@ export default function App() {
         clearThreadWorkingStopTimer(threadId);
         stopThreadWorking(threadId);
       }
+      await stopShellSessionForWorkspace(workspace.id, {
+        closeDrawer: true,
+        clearContent: true
+      });
       await stopSessionsForWorkspace(workspace.id);
 
       const removed = await api.removeWorkspace(workspace.id);
@@ -4090,6 +4305,7 @@ export default function App() {
       refreshWorkspaces,
       clearThreadWorkingStopTimer,
       setSelectedThread,
+      stopShellSessionForWorkspace,
       stopThreadWorking,
       stopSessionsForWorkspace,
       updateTerminalLogMap
@@ -4118,6 +4334,7 @@ export default function App() {
         selectedWorkspaceId={selectedWorkspaceId}
         selectedThreadId={selectedThreadId}
         threadSearch={threadSearch}
+        creatingThreadByWorkspace={creatingThreadByWorkspace}
         onOpenWorkspacePicker={openWorkspacePicker}
         onOpenSettings={openSettings}
         onNewThreadInWorkspace={onNewThreadInWorkspace}
@@ -4374,6 +4591,7 @@ export default function App() {
           starting={shellTerminalStarting}
           focusRequestId={shellTerminalFocusRequestId}
           onClose={() => {
+            invalidatePendingShellSessionStart(shellTerminalWorkspaceIdRef.current);
             setShellDrawerOpen(false);
             setFocusedTerminalKind((current) => (current === 'shell' ? null : current));
           }}

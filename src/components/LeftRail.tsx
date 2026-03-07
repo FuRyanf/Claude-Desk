@@ -9,6 +9,7 @@ interface LeftRailProps {
   selectedWorkspaceId?: string;
   selectedThreadId?: string;
   threadSearch: string;
+  creatingThreadByWorkspace?: Record<string, boolean>;
   isThreadWorking?: (threadId: string) => boolean;
   hasUnreadThreadOutput?: (threadId: string) => boolean;
   getThreadDisplayTimestampMs: (thread: ThreadMetadata) => number;
@@ -400,6 +401,7 @@ function LeftRailComponent({
   selectedWorkspaceId,
   selectedThreadId,
   threadSearch,
+  creatingThreadByWorkspace = {},
   isThreadWorking,
   hasUnreadThreadOutput,
   getThreadDisplayTimestampMs,
@@ -588,6 +590,7 @@ function LeftRailComponent({
             const isSelectedWorkspace = workspace.id === selectedWorkspaceId;
             const isExpanded = expandedWorkspaceIds[workspace.id] !== false;
             const isRemoteWorkspace = isRemoteWorkspaceKind(workspace.kind);
+            const isCreatingThread = Boolean(creatingThreadByWorkspace[workspace.id]);
             const gitPullEnabled = workspace.kind === 'local' && Boolean(workspace.gitPullOnMasterForNewThreads);
             const allThreads = threadsByWorkspace[workspace.id] ?? [];
             const visibleThreads = allThreads.filter((thread) => {
@@ -752,6 +755,8 @@ function LeftRailComponent({
                         type="button"
                         className="workspace-new-thread-row"
                         data-testid={`workspace-new-thread-${workspace.id}`}
+                        disabled={isCreatingThread}
+                        aria-busy={isCreatingThread}
                         onClick={async () => {
                           await onNewThreadInWorkspace(workspace.id);
                         }}

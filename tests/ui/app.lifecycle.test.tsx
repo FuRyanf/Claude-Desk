@@ -745,6 +745,52 @@ describe('Thread lifecycle integration', () => {
     });
   });
 
+  it('suppresses duplicate new-thread creation while the first request is still pending', async () => {
+    const user = userEvent.setup();
+    let resolveCreateThread: ((value: Awaited<ReturnType<typeof mocks.api.createThread>>) => void) | null = null;
+    mocks.api.createThread.mockImplementationOnce(
+      async () =>
+        await new Promise((resolve) => {
+          resolveCreateThread = resolve;
+        })
+    );
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Workspace/i });
+    const newThreadButton = screen.getByTestId('workspace-new-thread-ws-1');
+
+    await user.click(newThreadButton);
+    await user.click(newThreadButton);
+
+    expect(mocks.api.createThread).toHaveBeenCalledTimes(1);
+    expect(newThreadButton).toBeDisabled();
+
+    resolveCreateThread?.({
+      id: 'thread-3',
+      workspaceId: 'ws-1',
+      agentId: 'claude-code',
+      fullAccess: false,
+      enabledSkills: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      title: 'New thread',
+      isArchived: false,
+      lastRunStatus: 'Idle',
+      lastRunStartedAt: null,
+      lastRunEndedAt: null,
+      claudeSessionId: null,
+      lastResumeAt: null,
+      lastNewSessionAt: null
+    });
+
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-3' })
+      );
+    });
+  });
+
   it('runs git pull pre-step before creating a thread when project setting is enabled', async () => {
     const user = userEvent.setup();
     render(<App />);
