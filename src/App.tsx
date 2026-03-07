@@ -2397,12 +2397,12 @@ export default function App() {
         return;
       }
 
-      const shouldCloseDrawer =
-        Boolean(options?.closeDrawer) && shellTerminalWorkspaceIdRef.current === workspaceId;
+      const ownsVisibleShellWorkspace = shellTerminalWorkspaceIdRef.current === workspaceId;
+      const ownsPendingShellStart = pendingShellSessionStartRef.current?.workspaceId === workspaceId;
+      const shouldCloseDrawer = Boolean(options?.closeDrawer) && ownsVisibleShellWorkspace;
       invalidatePendingShellSessionStart(workspaceId);
 
-      const sessionId =
-        shellTerminalWorkspaceIdRef.current === workspaceId ? shellTerminalSessionIdRef.current : null;
+      const sessionId = ownsVisibleShellWorkspace ? shellTerminalSessionIdRef.current : null;
 
       if (sessionId) {
         try {
@@ -2412,13 +2412,19 @@ export default function App() {
         }
       }
 
-      if (shellTerminalWorkspaceIdRef.current === workspaceId || sessionId) {
+      if (ownsVisibleShellWorkspace || sessionId) {
         setShellSessionBinding(null, null);
       }
-      setShellTerminalStarting(false);
-      setFocusedTerminalKind((current) => (current === 'shell' ? null : current));
 
-      if (options?.clearContent ?? true) {
+      if (ownsVisibleShellWorkspace || ownsPendingShellStart) {
+        setShellTerminalStarting(false);
+      }
+
+      if (ownsVisibleShellWorkspace) {
+        setFocusedTerminalKind((current) => (current === 'shell' ? null : current));
+      }
+
+      if ((options?.clearContent ?? true) && ownsVisibleShellWorkspace) {
         setShellTerminalContent('');
       }
 
@@ -2443,9 +2449,10 @@ export default function App() {
       const existingSessionId = shellTerminalSessionIdRef.current;
       const existingWorkspaceId = shellTerminalWorkspaceIdRef.current;
       if (existingSessionId && existingWorkspaceId === workspace.id) {
-        const stillAlive = await api
+        const stillAlive =
+          (await api
           .terminalResize(existingSessionId, shellTerminalSize.cols, shellTerminalSize.rows)
-          .catch(() => false);
+          .catch(() => false)) === true;
         if (!isCurrentRequest()) {
           return null;
         }
@@ -2556,6 +2563,9 @@ export default function App() {
       invalidatePendingShellSessionStart();
       setShellDrawerOpen(false);
       setShellTerminalStarting(false);
+      return;
+    }
+    if (pendingShellSessionStartRef.current?.workspaceId === selectedWorkspace.id) {
       return;
     }
     if (shellTerminalWorkspaceId === selectedWorkspace.id && shellTerminalSessionId) {
@@ -3684,7 +3694,6 @@ export default function App() {
       if (shellTerminalSessionIdRef.current === event.sessionId) {
         invalidatePendingShellSessionStart(shellTerminalWorkspaceIdRef.current);
         setShellSessionBinding(null, shellTerminalWorkspaceIdRef.current);
-        setShellTerminalStarting(false);
         void api
           .terminalReadOutput(event.sessionId)
           .then((snapshot) => {

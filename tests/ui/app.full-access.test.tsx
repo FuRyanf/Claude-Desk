@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -34,6 +34,25 @@ const mocks = vi.hoisted(() => {
 
   let threadState = [{ ...baseThread }];
   let sessionCounter = 0;
+  let terminalDataHandler: ((
+    event: { sessionId: string; threadId?: string; data: string; sequence?: number }
+  ) => void) | null = null;
+
+  const terminalStartSessionImpl = async (params: { threadId: string }) => {
+    const thread = threadState.find((item) => item.id === params.threadId) ?? threadState[0];
+    return {
+      sessionId: `session-${++sessionCounter}`,
+      sessionMode: thread?.claudeSessionId ? 'resumed' as const : 'new' as const,
+      resumeSessionId: thread?.claudeSessionId ?? null,
+      thread: {
+        ...thread,
+        claudeSessionId: thread?.claudeSessionId ?? null,
+        lastResumeAt: thread?.claudeSessionId ? new Date().toISOString() : null,
+        lastNewSessionAt: thread?.claudeSessionId ? null : new Date().toISOString()
+      }
+    };
+  };
+  const terminalReadOutputImpl = async () => '? for shortcuts';
 
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
@@ -141,26 +160,13 @@ const mocks = vi.hoisted(() => {
       releaseUrl: null
     })),
     installLatestUpdate: vi.fn(async () => true),
-    terminalStartSession: vi.fn(async (params: { threadId: string }) => {
-      const thread = threadState.find((item) => item.id === params.threadId) ?? threadState[0];
-      return {
-        sessionId: `session-${++sessionCounter}`,
-        sessionMode: thread?.claudeSessionId ? 'resumed' : 'new',
-        resumeSessionId: thread?.claudeSessionId ?? null,
-        thread: {
-          ...thread,
-          claudeSessionId: thread?.claudeSessionId ?? null,
-          lastResumeAt: thread?.claudeSessionId ? new Date().toISOString() : null,
-          lastNewSessionAt: thread?.claudeSessionId ? null : new Date().toISOString()
-        }
-      };
-    }),
+    terminalStartSession: vi.fn(terminalStartSessionImpl),
     terminalWrite: vi.fn(async () => true),
     terminalResize: vi.fn(async () => true),
     terminalKill: vi.fn(async () => true),
     terminalSendSignal: vi.fn(async () => true),
     terminalGetLastLog: vi.fn(async () => ''),
-    terminalReadOutput: vi.fn(async () => '? for shortcuts'),
+    terminalReadOutput: vi.fn(terminalReadOutputImpl),
     runClaude: vi.fn(async () => ({ runId: 'run-1' })),
     cancelRun: vi.fn(async () => true),
     generateCommitMessage: vi.fn(async () => 'chore: update'),
@@ -173,11 +179,16 @@ const mocks = vi.hoisted(() => {
     workspace = { ...baseWorkspace };
     threadState = [{ ...baseThread }];
     sessionCounter = 0;
+    terminalDataHandler = null;
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
       }
     });
+    api.terminalStartSession.mockReset();
+    api.terminalStartSession.mockImplementation(terminalStartSessionImpl);
+    api.terminalReadOutput.mockReset();
+    api.terminalReadOutput.mockImplementation(terminalReadOutputImpl);
   };
 
   return {
@@ -190,7 +201,19 @@ const mocks = vi.hoisted(() => {
     confirmDialog: vi.fn(async () => true),
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
-    onTerminalData: vi.fn(async () => () => undefined),
+    emitTerminalData: (event: { sessionId: string; threadId?: string; data: string; sequence?: number }) => {
+      terminalDataHandler?.(event);
+    },
+    onTerminalData: vi.fn(
+      async (handler: (event: { sessionId: string; threadId?: string; data: string; sequence?: number }) => void) => {
+        terminalDataHandler = handler;
+        return () => {
+          if (terminalDataHandler === handler) {
+            terminalDataHandler = null;
+          }
+        };
+      }
+    ),
     onTerminalExit: vi.fn(async () => () => undefined),
     onThreadUpdated: vi.fn(async () => () => undefined)
   };
@@ -211,8 +234,9 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }));
 
 vi.mock('../../src/components/TerminalPanel', () => ({
-  TerminalPanel: ({ onData }: { onData?: (data: string) => void }) => (
+  TerminalPanel: ({ content, onData }: { content?: string; onData?: (data: string) => void }) => (
     <section data-testid="terminal-panel-mock">
+      <pre data-testid="terminal-content-mock">{content ?? ''}</pre>
       <button type="button" onClick={() => onData?.('draft')}>
         Type draft
       </button>
@@ -279,6 +303,47 @@ describe('Terminal launch flags', () => {
     });
     expect(mocks.api.terminalKill).toHaveBeenCalledWith('session-1');
     expect(screen.getByTestId('full-access-toggle')).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('drops stale terminal data after full-access restart replaces the session', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 'thread-1',
+          fullAccessFlag: true
+        })
+      );
+    });
+
+    await user.click(screen.getByTestId('full-access-toggle'));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalKill).toHaveBeenCalledWith('session-1');
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 'thread-1',
+          fullAccessFlag: false
+        })
+      );
+    });
+    await waitFor(() => {
+      expect(mocks.api.terminalResize).toHaveBeenCalledWith('session-2', expect.any(Number), expect.any(Number));
+    });
+
+    act(() => {
+      mocks.emitTerminalData({ sessionId: 'session-1', threadId: 'thread-1', data: 'STALE_OLD_SESSION\n' });
+      mocks.emitTerminalData({ sessionId: 'session-2', threadId: 'thread-1', data: 'FRESH_ACTIVE_SESSION\n' });
+    });
+
+    await waitFor(() => {
+      const rendered = screen.getByTestId('terminal-content-mock').textContent ?? '';
+      expect(rendered).toContain('FRESH_ACTIVE_SESSION');
+      expect(rendered).not.toContain('STALE_OLD_SESSION');
+    });
   });
 
   it('preserves the current draft when full access is toggled', async () => {

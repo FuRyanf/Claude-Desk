@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => {
       id: 'ws-1',
       name: 'Workspace One',
       path: '/tmp/workspace-one',
+      kind: 'local' as const,
+      rdevSshCommand: null,
+      sshCommand: null,
       gitPullOnMasterForNewThreads: false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -16,6 +19,9 @@ const mocks = vi.hoisted(() => {
       id: 'ws-2',
       name: 'Workspace Two',
       path: '/tmp/workspace-two',
+      kind: 'local' as const,
+      rdevSshCommand: null,
+      sshCommand: null,
       gitPullOnMasterForNewThreads: false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -232,6 +238,12 @@ import App from '../../src/App';
 describe('Workspace shell lifecycle', () => {
   beforeEach(() => {
     mocks.reset();
+    mocks.api.workspaceShellStartSession.mockReset();
+    mocks.api.workspaceShellStartSession.mockResolvedValue({
+      sessionId: 'shell-session-default'
+    });
+    mocks.api.gitListBranches.mockReset();
+    mocks.api.gitListBranches.mockResolvedValue([{ name: 'main', isCurrent: true, lastCommitUnix: 1700000000 }]);
   });
 
   it('kills stale shell starts when the selected workspace changes mid-launch', async () => {
@@ -304,5 +316,43 @@ describe('Workspace shell lifecycle', () => {
       expect(mocks.api.removeWorkspace).toHaveBeenCalledWith('ws-1');
     });
     expect(screen.queryByTestId('workspace-shell-drawer')).not.toBeInTheDocument();
+  });
+
+  it('tears down and restarts the workspace shell around branch checkout', async () => {
+    const user = userEvent.setup();
+    mocks.api.workspaceShellStartSession
+      .mockResolvedValueOnce({
+        sessionId: 'shell-session-ws1'
+      })
+      .mockResolvedValueOnce({
+        sessionId: 'shell-session-ws1-restarted'
+      });
+    mocks.api.gitListBranches.mockResolvedValueOnce([
+      { name: 'main', isCurrent: true, lastCommitUnix: 1700000000 },
+      { name: 'feature/test', isCurrent: false, lastCommitUnix: 1690000000 }
+    ]);
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Alpha thread/i });
+    await user.click(screen.getByRole('button', { name: 'Terminal' }));
+
+    await waitFor(() => {
+      expect(mocks.api.workspaceShellStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ workspacePath: '/tmp/workspace-one' })
+      );
+    });
+
+    await user.click(await screen.findByRole('button', { name: /^main$/i }));
+    await screen.findByRole('dialog', { name: 'Branch switcher' });
+    await user.click(await screen.findByRole('button', { name: 'feature/test' }));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalKill).toHaveBeenCalledWith('shell-session-ws1');
+      expect(mocks.api.gitCheckoutBranch).toHaveBeenCalledWith('/tmp/workspace-one', 'feature/test');
+      expect(mocks.api.workspaceShellStartSession).toHaveBeenCalledTimes(2);
+    });
+
+    expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('shell-session-ws1-restarted');
   });
 });
