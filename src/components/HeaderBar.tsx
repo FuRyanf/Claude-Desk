@@ -1,6 +1,10 @@
 import * as React from 'react';
 import type { GitInfo, ThreadMetadata, Workspace } from '../types';
 
+const REFRESH_DISPLAY_HINT =
+  'If the terminal looks broken, try dragging the window edge slightly to force a reflow.';
+const REFRESH_DISPLAY_HINT_LINGER_MS = 2200;
+
 interface HeaderBarProps {
   workspace?: Workspace;
   selectedThread?: ThreadMetadata;
@@ -30,6 +34,32 @@ export function HeaderBar({
   onOpenTerminal,
   terminalOpen = false
 }: HeaderBarProps) {
+  const refreshHintId = React.useId();
+  const [showRefreshHint, setShowRefreshHint] = React.useState(false);
+  const refreshHintTimerRef = React.useRef<number | null>(null);
+
+  const clearRefreshHintTimer = React.useCallback(() => {
+    if (refreshHintTimerRef.current !== null) {
+      window.clearTimeout(refreshHintTimerRef.current);
+      refreshHintTimerRef.current = null;
+    }
+  }, []);
+
+  const openRefreshHint = React.useCallback(() => {
+    clearRefreshHintTimer();
+    setShowRefreshHint(true);
+  }, [clearRefreshHintTimer]);
+
+  const scheduleRefreshHintHide = React.useCallback(() => {
+    clearRefreshHintTimer();
+    refreshHintTimerRef.current = window.setTimeout(() => {
+      refreshHintTimerRef.current = null;
+      setShowRefreshHint(false);
+    }, REFRESH_DISPLAY_HINT_LINGER_MS);
+  }, [clearRefreshHintTimer]);
+
+  React.useEffect(() => () => clearRefreshHintTimer(), [clearRefreshHintTimer]);
+
   return (
     <header className="header-bar" data-testid="header">
       <div className={selectedThread ? 'workspace-summary thread-context' : 'workspace-summary'}>
@@ -46,16 +76,36 @@ export function HeaderBar({
         <button type="button" onClick={onOpenWorkspace} className="ghost-button" disabled={!workspace}>
           Open
         </button>
-        <button
-          type="button"
-          className="fix-display-button"
-          data-testid="fix-display-button"
-          onClick={onRepairDisplay}
-          disabled={repairDisplayDisabled}
-          title="Force the terminal to repaint without restarting the session."
+        <div
+          className="fix-display-button-wrapper"
+          onMouseEnter={openRefreshHint}
+          onMouseLeave={scheduleRefreshHintHide}
+          onFocus={openRefreshHint}
+          onBlur={scheduleRefreshHintHide}
         >
-          Refresh Display
-        </button>
+          <button
+            type="button"
+            className="fix-display-button"
+            data-testid="fix-display-button"
+            onClick={() => {
+              openRefreshHint();
+              scheduleRefreshHintHide();
+              onRepairDisplay?.();
+            }}
+            disabled={repairDisplayDisabled}
+            aria-describedby={refreshHintId}
+          >
+            Refresh Display
+          </button>
+          <span
+            id={refreshHintId}
+            role="tooltip"
+            className={`header-hover-tip${showRefreshHint ? ' visible' : ''}`}
+            aria-hidden={!showRefreshHint}
+          >
+            {REFRESH_DISPLAY_HINT}
+          </span>
+        </div>
         {updateAvailable ? (
           <button
             type="button"

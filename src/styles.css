@@ -2073,6 +2073,37 @@ body.sidebar-resizing {
   outline-offset: 1px;
 }
 
+.fix-display-button-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+.header-hover-tip {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: 260px;
+  background: var(--surface-tooltip);
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 450;
+  line-height: 1.45;
+  padding: 8px 10px;
+  border-radius: 10px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+  white-space: normal;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 120ms ease-out, transform 120ms ease-out;
+  z-index: 24;
+}
+
+.header-hover-tip.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 .full-access-toggle {
   min-width: 144px;
   height: 32px;

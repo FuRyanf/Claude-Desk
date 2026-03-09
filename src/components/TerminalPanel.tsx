@@ -27,6 +27,13 @@ const OUTPUT_QUEUE_WARN_LATENCY_MS = 96;
 const OUTPUT_QUEUE_WARN_COOLDOWN_MS = 2_000;
 const MULTILINE_ENTER_SEQUENCE = '\x1b\r';
 const MULTILINE_ENTER_DUPLICATE_SUPPRESSION_MS = 64;
+const DECTCEM_HIDE = '\x1b[?25l';
+const DECTCEM_SHOW = '\x1b[?25h';
+
+interface PendingRepairState {
+  preserveViewport: boolean;
+  scrollbackOffset: number;
+}
 
 interface TerminalPanelProps {
   sessionId?: string | null;
@@ -36,6 +43,7 @@ interface TerminalPanelProps {
   contentLimitChars?: number;
   readOnly?: boolean;
   inputEnabled?: boolean;
+  cursorVisible?: boolean;
   overlayMessage?: string;
   focusRequestId?: number;
   repairRequestId?: number;
@@ -52,6 +60,7 @@ export function TerminalPanel({
   contentLimitChars,
   readOnly = false,
   inputEnabled = true,
+  cursorVisible = true,
   overlayMessage,
   focusRequestId = 0,
   repairRequestId = 0,
@@ -79,6 +88,7 @@ export function TerminalPanel({
   const onFocusChangeRef = useRef(onFocusChange);
   const readOnlyRef = useRef(readOnly);
   const inputEnabledRef = useRef(inputEnabled);
+  const cursorVisibleRef = useRef(cursorVisible);
   const previousInputEnabledRef = useRef(inputEnabled);
   const sessionRef = useRef<string | null>(sessionId);
   const followStateRef = useRef(createFollowState());
@@ -108,7 +118,7 @@ export function TerminalPanel({
   const bytesSinceRepairRef = useRef(0);
   const lastStreamRepairAtRef = useRef(0);
   const suppressPlainEnterUntilRef = useRef(0);
-  const pendingRepairStateRef = useRef<{ preserveViewport: boolean; scrollbackOffset: number } | null>(null);
+  const pendingRepairStateRef = useRef<PendingRepairState | null>(null);
 
   interface ResetTerminalContentOptions {
     preserveViewport?: boolean;
@@ -340,6 +350,9 @@ export function TerminalPanel({
       bulkWritingRef.current = true;
       clearPendingWrites();
       term.reset();
+      if (!cursorVisibleRef.current) {
+        term.write(DECTCEM_HIDE);
+      }
       if (nextContent.length > 0) {
         queueWrite(nextContent);
         writeQueueRef.current.flushImmediate();
@@ -453,6 +466,9 @@ export function TerminalPanel({
       term.loadAddon(fitAddon);
       term.loadAddon(new WebLinksAddon(openExternalLink));
       term.open(host);
+      if (!cursorVisibleRef.current) {
+        term.write(DECTCEM_HIDE);
+      }
       term.attachCustomKeyEventHandler((event) => {
         if (
           event.type === 'keydown' &&
@@ -786,6 +802,7 @@ export function TerminalPanel({
   useEffect(() => {
     readOnlyRef.current = readOnly;
     inputEnabledRef.current = inputEnabled;
+    cursorVisibleRef.current = cursorVisible;
 
     const term = terminalRef.current;
     if (!term) {
@@ -794,6 +811,7 @@ export function TerminalPanel({
     }
 
     term.options.disableStdin = readOnly || !inputEnabled;
+    term.write(cursorVisible ? DECTCEM_SHOW : DECTCEM_HIDE);
 
     const wasEnabled = previousInputEnabledRef.current;
     if (!wasEnabled && inputEnabled && !readOnly && shouldAutoFollow(followStateRef.current)) {
@@ -809,7 +827,7 @@ export function TerminalPanel({
       }, 80);
     }
     previousInputEnabledRef.current = inputEnabled;
-  }, [inputEnabled, readOnly, scrollToBottomSoon]);
+  }, [cursorVisible, inputEnabled, readOnly, scrollToBottomSoon]);
 
   useEffect(() => {
     const term = terminalRef.current;

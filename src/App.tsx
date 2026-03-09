@@ -4437,6 +4437,7 @@ export default function App() {
               contentLimitChars={TERMINAL_LOG_BUFFER_CHARS}
               readOnly={false}
               inputEnabled={Boolean(selectedSessionId) && isSelectedThreadReady && !isSelectedThreadStarting}
+              cursorVisible={false}
               overlayMessage={
                 !selectedSessionId || (isSelectedThreadStarting && !hasSelectedTerminalContent)
                   ? 'Starting Claude session...'

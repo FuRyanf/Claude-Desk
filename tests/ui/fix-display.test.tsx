@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -160,6 +160,7 @@ describe('"Refresh Display" button', () => {
   beforeEach(() => {
     mocks.reset();
     window.localStorage.clear();
+    vi.useRealTimers();
   });
 
   it('renders in the header actions', async () => {
@@ -197,6 +198,35 @@ describe('"Refresh Display" button', () => {
     await user.click(screen.getByTestId('fix-display-button'));
 
     expect(mocks.api.setThreadFullAccess).not.toHaveBeenCalled();
+  });
+
+  it('shows a lingering hint on hover', async () => {
+    render(<App />);
+    await screen.findByRole('button', { name: /Test Thread/i });
+
+    const button = screen.getByTestId('fix-display-button');
+    const wrapper = button.parentElement as HTMLElement;
+    const tooltipText = 'If the terminal looks broken, try dragging the window edge slightly to force a reflow.';
+
+    fireEvent.mouseEnter(wrapper);
+
+    const tooltip = screen.getByRole('tooltip');
+    expect(tooltip).toHaveTextContent(tooltipText);
+    expect(tooltip).toHaveClass('visible');
+
+    vi.useFakeTimers();
+    fireEvent.mouseLeave(wrapper);
+    expect(tooltip).toHaveClass('visible');
+
+    await act(async () => {
+      vi.advanceTimersByTime(2100);
+    });
+    expect(tooltip).toHaveClass('visible');
+
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(tooltip).not.toHaveClass('visible');
   });
 
   it('wiki button opens the wiki link', async () => {
