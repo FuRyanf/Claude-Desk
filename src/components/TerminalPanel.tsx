@@ -59,11 +59,18 @@ export function TerminalPanel({
   onResize,
   onFocusChange
 }: TerminalPanelProps) {
-  const [fallback, setFallback] = useState(() => import.meta.env.MODE === 'test');
+  const [fallback, setFallback] = useState(
+    () =>
+      import.meta.env.MODE === 'test' &&
+      !(globalThis as { __CLAUDE_DESK_ENABLE_XTERM_TESTS__?: boolean }).__CLAUDE_DESK_ENABLE_XTERM_TESTS__
+  );
   const [followOutputPaused, setFollowOutputPaused] = useState(false);
+  const [terminalInstanceVersion, setTerminalInstanceVersion] = useState(0);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const contentRef = useRef(content);
+  const contentByteCountRef = useRef(contentByteCount ?? content.length);
+  const contentGenerationRef = useRef(contentGeneration ?? 0);
   const renderedContentRef = useRef(content);
   const renderedByteCountRef = useRef(contentByteCount ?? content.length);
   const renderedGenerationRef = useRef(contentGeneration ?? 0);
@@ -101,6 +108,12 @@ export function TerminalPanel({
   const bytesSinceRepairRef = useRef(0);
   const lastStreamRepairAtRef = useRef(0);
   const suppressPlainEnterUntilRef = useRef(0);
+  const pendingRepairStateRef = useRef<{ preserveViewport: boolean; scrollbackOffset: number } | null>(null);
+
+  interface ResetTerminalContentOptions {
+    preserveViewport?: boolean;
+    afterWrite?: ((term: Terminal) => void) | null;
+  }
 
   const syncFollowOutputPaused = useCallback((nextPaused: boolean) => {
     setFollowOutputPaused((current) => (current === nextPaused ? current : nextPaused));
@@ -312,11 +325,15 @@ export function TerminalPanel({
   }, []);
 
   const resetTerminalContent = useCallback(
-    (nextContent: string) => {
+    (nextContent: string, options: ResetTerminalContentOptions = {}) => {
       const term = terminalRef.current;
       if (!term) {
         return;
       }
+      const preserveViewport = Boolean(options.preserveViewport);
+      const scrollbackOffset = preserveViewport
+        ? Math.max(0, term.buffer.active.baseY - term.buffer.active.viewportY)
+        : 0;
 
       const bulkWriteEpoch = bulkWriteEpochRef.current + 1;
       bulkWriteEpochRef.current = bulkWriteEpoch;
@@ -336,15 +353,34 @@ export function TerminalPanel({
           return;
         }
         bulkWritingRef.current = false;
-        followStateRef.current = createFollowState();
-        syncFollowOutputPaused(false);
         bytesSinceRepairRef.current = 0;
         clearScheduledStreamRepair();
-        scrollToBottomSoon(term);
+        if (preserveViewport) {
+          const targetLine = Math.max(0, term.buffer.active.baseY - scrollbackOffset);
+          term.scrollToLine(targetLine);
+          followStateRef.current = {
+            mode: 'pausedByUser',
+            viewportY: term.buffer.active.viewportY,
+            baseY: term.buffer.active.baseY
+          };
+          syncFollowOutputPaused(true);
+        } else {
+          followStateRef.current = createFollowState();
+          syncFollowOutputPaused(false);
+          scrollToBottomSoon(term);
+        }
+        options.afterWrite?.(term);
         scheduleTerminalRefresh(term);
       });
     },
-    [clearPendingWrites, clearScheduledStreamRepair, queueWrite, scheduleTerminalRefresh, scrollToBottomSoon, syncFollowOutputPaused]
+    [
+      clearPendingWrites,
+      clearScheduledStreamRepair,
+      queueWrite,
+      scheduleTerminalRefresh,
+      scrollToBottomSoon,
+      syncFollowOutputPaused
+    ]
   );
 
   useEffect(() => {
@@ -361,7 +397,9 @@ export function TerminalPanel({
 
   useEffect(() => {
     contentRef.current = content;
-  }, [content]);
+    contentByteCountRef.current = contentByteCount ?? content.length;
+    contentGenerationRef.current = contentGeneration ?? 0;
+  }, [content, contentByteCount, contentGeneration]);
 
   useEffect(() => {
     if (fallback) {
@@ -374,6 +412,8 @@ export function TerminalPanel({
     }
 
     try {
+      const pendingRepairState = pendingRepairStateRef.current;
+      const initialContent = contentRef.current;
       const term = new Terminal({
         cursorBlink: false,
         convertEol: false,
@@ -498,6 +538,41 @@ export function TerminalPanel({
       };
       fitWithReflowRef.current = fitWithReflow;
 
+      const finalizeTerminalReplay = () => {
+        if (terminalRef.current !== term) {
+          return;
+        }
+
+        renderedContentRef.current = contentRef.current;
+        renderedByteCountRef.current = contentByteCountRef.current;
+        renderedGenerationRef.current = contentGenerationRef.current;
+        clearScheduledStreamRepair();
+        bytesSinceRepairRef.current = 0;
+        lastStreamRepairAtRef.current = Date.now();
+
+        fitWithReflow();
+
+        if (pendingRepairState?.preserveViewport) {
+          // Preserve the user's relative distance from the bottom of the scrollback.
+          // This is only approximate if the replayed terminal wraps differently after reflow.
+          const targetLine = Math.max(0, term.buffer.active.baseY - pendingRepairState.scrollbackOffset);
+          term.scrollToLine(targetLine);
+          followStateRef.current = {
+            mode: 'pausedByUser',
+            viewportY: term.buffer.active.viewportY,
+            baseY: term.buffer.active.baseY
+          };
+          syncFollowOutputPaused(true);
+        } else {
+          followStateRef.current = createFollowState();
+          syncFollowOutputPaused(false);
+          scrollToBottomSoon(term);
+        }
+
+        pendingRepairStateRef.current = null;
+        scheduleTerminalRefresh(term);
+      };
+
       // Synchronous best-effort fit (renderer may not have dims yet — that's OK).
       fitAndNotify();
       // Deferred fits use fitWithReflow to force correct metrics.
@@ -540,18 +615,16 @@ export function TerminalPanel({
         fitWithReflow();
       }, 500);
 
-      if (contentRef.current.length > 0) {
-        followStateRef.current = {
-          mode: 'following',
-          viewportY: followStateRef.current.viewportY,
-          baseY: followStateRef.current.baseY
-        };
-        queueWrite(contentRef.current);
+      if (initialContent.length > 0) {
+        queueWrite(initialContent);
         writeQueueRef.current.flushImmediate();
       }
-      renderedContentRef.current = contentRef.current;
-      renderedByteCountRef.current = contentByteCount ?? contentRef.current.length;
-      renderedGenerationRef.current = contentGeneration ?? 0;
+      renderedContentRef.current = initialContent;
+      renderedByteCountRef.current = contentByteCountRef.current;
+      renderedGenerationRef.current = contentGenerationRef.current;
+      void writeQueueRef.current.whenIdle().then(() => {
+        finalizeTerminalReplay();
+      });
 
       const onDataDisposable = term.onData((data) => {
         if (readOnlyRef.current || !inputEnabledRef.current) {
@@ -666,8 +739,8 @@ export function TerminalPanel({
         clearScheduledStreamRepair();
         bytesSinceRepairRef.current = 0;
         term.dispose();
+        host.textContent = '';
         terminalRef.current = null;
-        followStateRef.current = createFollowState();
         suppressPlainEnterUntilRef.current = 0;
         inputBufferRef.current = '';
         if (inputFlushTimerRef.current !== null) {
@@ -702,7 +775,8 @@ export function TerminalPanel({
     scheduleStreamRepair,
     scrollToBottomSoon,
     scheduleOutgoingInputFlush,
-    syncFollowOutputPaused
+    syncFollowOutputPaused,
+    terminalInstanceVersion
   ]);
 
   useEffect(() => {
@@ -871,9 +945,19 @@ export function TerminalPanel({
     if (!term) {
       return;
     }
+    const preserveViewport = !shouldAutoFollow(followStateRef.current);
+    pendingRepairStateRef.current = {
+      preserveViewport,
+      scrollbackOffset: preserveViewport
+        ? Math.max(0, term.buffer.active.baseY - term.buffer.active.viewportY)
+        : 0
+    };
+    clearPendingWrites();
     clearScheduledStreamRepair();
-    runStreamRepair(term);
-  }, [clearScheduledStreamRepair, repairRequestId, runStreamRepair]);
+    bulkWriteEpochRef.current += 1;
+    streamRepairEpochRef.current += 1;
+    setTerminalInstanceVersion((current) => current + 1);
+  }, [clearPendingWrites, clearScheduledStreamRepair, repairRequestId]);
 
   const jumpToLatest = useCallback(() => {
     const term = terminalRef.current;
