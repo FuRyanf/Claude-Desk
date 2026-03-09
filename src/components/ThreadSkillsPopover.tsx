@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { createPortal } from 'react-dom';
 
-import { getSkillUsageStats, sortSkillsForDisplay, type SkillUsageMap } from '../lib/skillUsage';
+import { getSkillUsageStats, matchesSkillSearch, sortSkillsForDisplay, type SkillUsageMap } from '../lib/skillUsage';
 import { isRemoteWorkspaceKind } from '../lib/workspaceKind';
 import type { SkillInfo, ThreadMetadata, Workspace } from '../types';
 
@@ -79,8 +79,10 @@ export function ThreadSkillsPopover({
 }: ThreadSkillsPopoverProps) {
   const [open, setOpen] = React.useState(false);
   const [position, setPosition] = React.useState<SkillsPopoverPosition | null>(null);
+  const [searchQuery, setSearchQuery] = React.useState('');
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
   const popoverRef = React.useRef<HTMLElement | null>(null);
+  const searchInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const selectedSkillIds = thread?.enabledSkills ?? [];
   const skillCount = countEnabledSkills(thread);
@@ -99,6 +101,14 @@ export function ThreadSkillsPopover({
     }
     return sortSkillsForDisplay(skills, workspace.path, usageMap);
   }, [skills, usageMap, workspace]);
+  const filteredSkills = React.useMemo(() => {
+    if (!searchQuery.trim()) {
+      return sortedSkills;
+    }
+    return sortedSkills.filter((skill) => matchesSkillSearch(skill, searchQuery));
+  }, [searchQuery, sortedSkills]);
+  const remoteWorkspace = workspace ? isRemoteWorkspaceKind(workspace.kind) : false;
+  const triggerDisabled = !thread || !workspace;
 
   const updatePosition = React.useCallback(() => {
     const trigger = triggerRef.current;
@@ -170,13 +180,42 @@ export function ThreadSkillsPopover({
 
   React.useEffect(() => {
     if (!open) {
+      setSearchQuery('');
       return;
     }
     updatePosition();
   }, [error, loading, open, skills.length, sortedSkills, updatePosition]);
 
-  const remoteWorkspace = workspace ? isRemoteWorkspaceKind(workspace.kind) : false;
-  const triggerDisabled = !thread || !workspace;
+  React.useEffect(() => {
+    if (!open || remoteWorkspace || !position) {
+      return;
+    }
+
+    let cancelled = false;
+    const timeoutIds: number[] = [];
+    const focusSearchInput = () => {
+      if (cancelled) {
+        return;
+      }
+      const input = searchInputRef.current;
+      if (!input) {
+        return;
+      }
+      input.focus({ preventScroll: true });
+      if (document.activeElement !== input) {
+        timeoutIds.push(window.setTimeout(focusSearchInput, 32));
+      }
+    };
+    const frame = window.requestAnimationFrame(() => {
+      focusSearchInput();
+      timeoutIds.push(window.setTimeout(focusSearchInput, 96));
+    });
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(frame);
+      timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
+    };
+  }, [open, position, remoteWorkspace]);
 
   return (
     <>
@@ -243,6 +282,22 @@ export function ThreadSkillsPopover({
                     : 'Choose one or more skills below to use them in this thread.'}
               </div>
 
+              {!remoteWorkspace ? (
+                <div className="skills-search">
+                  <input
+                    ref={searchInputRef}
+                    type="search"
+                    className="skills-search-input"
+                    placeholder="Search skills"
+                    aria-label="Search skills"
+                    autoFocus
+                    value={searchQuery}
+                    onChange={(event) => setSearchQuery(event.target.value)}
+                    spellCheck={false}
+                  />
+                </div>
+              ) : null}
+
               {selectedSkills.length > 0 || missingSkillIds.length > 0 ? (
                 <div className="skills-chip-list" aria-label="Selected skills">
                   {selectedSkills.map((skill) => (
@@ -291,9 +346,13 @@ export function ThreadSkillsPopover({
                 <div className="skills-empty">
                   No project skills found. Add folders like `.claude/skills/review/SKILL.md` to make them available here.
                 </div>
+              ) : filteredSkills.length === 0 ? (
+                <div className="skills-empty" role="status">
+                  No skills match "{searchQuery.trim()}".
+                </div>
               ) : (
                 <div className="skills-list">
-                  {sortedSkills.map((skill) => {
+                  {filteredSkills.map((skill) => {
                     const selected = selectedSkillIds.includes(skill.id);
                     const usage = workspace ? getSkillUsageStats(usageMap, workspace.path, skill.id) : { lastUsedAt: 0, pinned: false };
                     return (

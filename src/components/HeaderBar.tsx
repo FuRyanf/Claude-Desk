@@ -11,64 +11,9 @@ interface HeaderBarProps {
   onInstallUpdate: () => void;
   onOpenWorkspace: () => void;
   onRepairDisplay?: () => void;
+  repairDisplayDisabled?: boolean;
   onOpenTerminal: () => void;
   terminalOpen?: boolean;
-}
-
-const DISPLAY_ISSUE_TIP_MS = 10_000;
-
-function DisplayIssueTip({ onRepairDisplay }: { onRepairDisplay?: () => void }) {
-  const [showTip, setShowTip] = React.useState(false);
-  const timerRef = React.useRef<number | null>(null);
-
-  const clearTipTimer = React.useCallback(() => {
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-  }, []);
-
-  const handleClick = () => {
-    onRepairDisplay?.();
-
-    if (showTip) {
-      clearTipTimer();
-      setShowTip(false);
-      return;
-    }
-
-    setShowTip(true);
-    clearTipTimer();
-    timerRef.current = window.setTimeout(() => {
-      setShowTip(false);
-      timerRef.current = null;
-    }, DISPLAY_ISSUE_TIP_MS);
-  };
-
-  React.useEffect(() => {
-    return () => {
-      clearTipTimer();
-    };
-  }, [clearTipTimer]);
-
-  return (
-    <div className="display-issue-tip-wrapper">
-      <button
-        type="button"
-        className="fix-display-button"
-        data-testid="fix-display-button"
-        onClick={handleClick}
-        title="Having display issues? Click for a quick fix tip."
-      >
-        Display issue?
-      </button>
-      {showTip ? (
-        <div className="display-issue-tip" role="status">
-          Try slightly dragging a window edge to rerender the terminal.
-        </div>
-      ) : null}
-    </div>
-  );
 }
 
 export function HeaderBar({
@@ -81,6 +26,7 @@ export function HeaderBar({
   onInstallUpdate,
   onOpenWorkspace,
   onRepairDisplay,
+  repairDisplayDisabled = false,
   onOpenTerminal,
   terminalOpen = false
 }: HeaderBarProps) {
@@ -100,7 +46,16 @@ export function HeaderBar({
         <button type="button" onClick={onOpenWorkspace} className="ghost-button" disabled={!workspace}>
           Open
         </button>
-        <DisplayIssueTip onRepairDisplay={onRepairDisplay} />
+        <button
+          type="button"
+          className="fix-display-button"
+          data-testid="fix-display-button"
+          onClick={onRepairDisplay}
+          disabled={repairDisplayDisabled}
+          title="Force the terminal to repaint without restarting the session."
+        >
+          Refresh Display
+        </button>
         {updateAvailable ? (
           <button
             type="button"

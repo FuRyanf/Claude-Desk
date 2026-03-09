@@ -160,7 +160,9 @@ const mocks = vi.hoisted(() => {
     openInTerminal: vi.fn(async () => undefined),
     openExternalUrl: vi.fn(async () => undefined),
     openTerminalCommand: vi.fn(async () => undefined),
-    copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics')
+    copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
+    validateImportableClaudeSession: vi.fn(async () => true),
+    writeTextToClipboard: vi.fn(async () => undefined)
   };
 
   const reset = () => {
@@ -242,6 +244,57 @@ describe('Skills management', () => {
     expect(
       screen.getByText(/selected skills are prepended off-screen before claude receives your next submitted prompt/i)
     ).toBeInTheDocument();
+  });
+
+  it('autofocuses the search field and filters the visible skills list in real time', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: /^skills$/i }));
+
+    const searchInput = await screen.findByRole('searchbox', { name: 'Search skills' });
+    await waitFor(() => {
+      expect(searchInput).toHaveFocus();
+    });
+
+    expect(screen.getByText('Review')).toBeInTheDocument();
+    expect(screen.getByText('Refactor')).toBeInTheDocument();
+
+    await user.type(searchInput, 'refactor stable');
+
+    expect(screen.getByText('Refactor')).toBeInTheDocument();
+    expect(screen.queryByText('Review')).not.toBeInTheDocument();
+
+    await user.clear(searchInput);
+
+    expect(await screen.findByText('Review')).toBeInTheDocument();
+  });
+
+  it('keeps skill selection working while the list is filtered', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: /^skills$/i }));
+
+    const searchInput = await screen.findByRole('searchbox', { name: 'Search skills' });
+    await user.type(searchInput, 'review shipping');
+    await user.click((await screen.findByText('Review')).closest('button')!);
+
+    await waitFor(() => {
+      expect(mocks.api.setThreadSkills).toHaveBeenCalledWith('ws-1', 'thread-1', ['review']);
+    });
+  });
+
+  it('shows a no-match state when search excludes every skill', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: /^skills$/i }));
+
+    const searchInput = await screen.findByRole('searchbox', { name: 'Search skills' });
+    await user.type(searchInput, 'totally missing');
+
+    expect(screen.getByRole('status')).toHaveTextContent('No skills match "totally missing".');
   });
 
   it('injects selected skills invisibly into the next submitted terminal prompt', async () => {

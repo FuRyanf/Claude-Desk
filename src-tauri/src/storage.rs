@@ -221,7 +221,10 @@ pub fn add_ssh_workspace(
         return Err(anyhow!("Please enter an ssh command."));
     }
 
-    let first_token = normalized_command.split_whitespace().next().unwrap_or_default();
+    let first_token = normalized_command
+        .split_whitespace()
+        .next()
+        .unwrap_or_default();
     if first_token != "ssh" {
         return Err(anyhow!(
             "SSH command must start with `ssh` (example: ssh user@host)"
@@ -387,7 +390,9 @@ pub fn runs_dir(workspace_id: &str, thread_id: &str) -> Result<PathBuf> {
 
 pub fn workspace_shell_sessions_dir(workspace_id: &str) -> Result<PathBuf> {
     let workspace_id = validate_storage_segment(workspace_id, "workspace id")?;
-    Ok(ensure_base_dirs()?.join("workspace-shells").join(workspace_id))
+    Ok(ensure_base_dirs()?
+        .join("workspace-shells")
+        .join(workspace_id))
 }
 
 pub fn create_thread(workspace_id: &str, agent_id: Option<String>) -> Result<ThreadMetadata> {
@@ -817,10 +822,8 @@ mod tests {
     fn add_ssh_workspace_persists_command_and_kind() {
         let _guard = test_lock().lock().expect("lock poisoned");
 
-        let temp_root = std::env::temp_dir().join(format!(
-            "claude-desk-ssh-workspace-test-{}",
-            Uuid::new_v4()
-        ));
+        let temp_root =
+            std::env::temp_dir().join(format!("claude-desk-ssh-workspace-test-{}", Uuid::new_v4()));
         std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
 
         let added = add_ssh_workspace(
@@ -864,8 +867,8 @@ mod tests {
             .expect("should set remote path");
         assert_eq!(updated.remote_path.as_deref(), Some("~/projects/foo"));
 
-        let cleared = set_workspace_remote_path(&added.id, Some("   "))
-            .expect("should clear remote path");
+        let cleared =
+            set_workspace_remote_path(&added.id, Some("   ")).expect("should clear remote path");
         assert!(cleared.remote_path.is_none());
 
         std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
@@ -998,8 +1001,8 @@ mod tests {
     fn set_thread_claude_session_id_overwrites_and_trims() {
         let _guard = test_lock().lock().expect("lock poisoned");
 
-        let temp_root = std::env::temp_dir()
-            .join(format!("claude-desk-force-session-test-{}", Uuid::new_v4()));
+        let temp_root =
+            std::env::temp_dir().join(format!("claude-desk-force-session-test-{}", Uuid::new_v4()));
         let workspace_path = temp_root.join("workspace");
         fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
 
@@ -1032,8 +1035,8 @@ mod tests {
             Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
         );
 
-        let cleared =
-            set_thread_claude_session_id(&workspace.id, &thread.id, "   ").expect("clear should succeed");
+        let cleared = set_thread_claude_session_id(&workspace.id, &thread.id, "   ")
+            .expect("clear should succeed");
         assert!(cleared.claude_session_id.is_none());
 
         std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");

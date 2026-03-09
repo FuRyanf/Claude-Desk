@@ -170,7 +170,9 @@ const mocks = vi.hoisted(() => {
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
     openTerminalCommand: vi.fn(async () => undefined),
-    copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics')
+    copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
+    validateImportableClaudeSession: vi.fn(async () => true),
+    writeTextToClipboard: vi.fn(async () => undefined)
   };
 
   const reset = () => {

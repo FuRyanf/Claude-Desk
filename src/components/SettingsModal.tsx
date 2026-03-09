@@ -7,6 +7,7 @@ interface SettingsModalProps {
   initialCliPath: string;
   initialAppearanceMode: AppearanceMode;
   detectedCliPath?: string | null;
+  copyEnvDiagnosticsDisabled?: boolean;
   onClose: () => void;
   onSave: (settings: { cliPath: string; appearanceMode: AppearanceMode }) => void;
   onCopyEnvDiagnostics?: () => void | Promise<void>;
@@ -35,6 +36,7 @@ export function SettingsModal({
   initialCliPath,
   initialAppearanceMode,
   detectedCliPath,
+  copyEnvDiagnosticsDisabled = false,
   onClose,
   onSave,
   onCopyEnvDiagnostics
@@ -120,7 +122,12 @@ export function SettingsModal({
         </div>
 
         <footer className="modal-actions settings-modal-actions">
-          <button type="button" className="ghost-button" onClick={() => void onCopyEnvDiagnostics?.()}>
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={() => void onCopyEnvDiagnostics?.()}
+            disabled={copyEnvDiagnosticsDisabled}
+          >
             Copy terminal env diagnostics
           </button>
           <div className="settings-modal-actions-right">

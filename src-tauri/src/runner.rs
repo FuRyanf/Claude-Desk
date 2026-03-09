@@ -112,6 +112,50 @@ fn sanitize_env_diagnostics_stdout(raw: &str) -> String {
     result
 }
 
+fn sanitize_claude_project_dir_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn claude_projects_root() -> Result<PathBuf> {
+    let home_dir = dirs::home_dir().ok_or_else(|| anyhow!("Unable to resolve home directory"))?;
+    Ok(home_dir.join(".claude").join("projects"))
+}
+
+fn claude_project_dir_for_workspace(workspace_path: &str) -> PathBuf {
+    let normalized_workspace_path = fs::canonicalize(workspace_path)
+        .unwrap_or_else(|_| PathBuf::from(workspace_path))
+        .to_string_lossy()
+        .to_string();
+    PathBuf::from(sanitize_claude_project_dir_name(&normalized_workspace_path))
+}
+
+fn find_any_claude_session_project_dir(
+    projects_root: &Path,
+    claude_session_id: &str,
+) -> Result<Option<PathBuf>> {
+    let expected_file_name = format!("{claude_session_id}.jsonl");
+    for entry in fs::read_dir(projects_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let candidate = entry.path().join(&expected_file_name);
+        if candidate.is_file() {
+            return Ok(Some(entry.path()));
+        }
+    }
+    Ok(None)
+}
+
 fn shell_escape_arg(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
@@ -190,10 +234,7 @@ fn build_terminal_shell_command(
     }
 
     let exec_claude_command = if workspace_kind == WorkspaceKind::Ssh {
-        if let Some(path) = remote_path
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+        if let Some(path) = remote_path.map(str::trim).filter(|value| !value.is_empty()) {
             format!(
                 "cd {} && exec {}",
                 shell_escape_arg(path),
@@ -234,7 +275,13 @@ fn build_workspace_shell_command(
             let post_connect_command = remote_path
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .map(|value| format!("cd {} && exec {}", shell_escape_arg(value), shell_escape_arg(shell_path)));
+                .map(|value| {
+                    format!(
+                        "cd {} && exec {}",
+                        shell_escape_arg(value),
+                        shell_escape_arg(shell_path)
+                    )
+                });
             Ok((Some(remote_command), post_connect_command))
         }
     }
@@ -549,7 +596,8 @@ impl TerminalSessionManager {
         let matching_session_ids = sessions
             .iter()
             .filter(|(_, session)| {
-                session.workspace_id == workspace_id && session.kind == TerminalSessionKind::WorkspaceShell
+                session.workspace_id == workspace_id
+                    && session.kind == TerminalSessionKind::WorkspaceShell
             })
             .map(|(session_id, _)| session_id.clone())
             .collect::<Vec<_>>();
@@ -1674,10 +1722,41 @@ pub fn copy_terminal_env_diagnostics(workspace_path: String) -> Result<String> {
     Ok(diagnostics)
 }
 
+pub fn validate_importable_claude_session(
+    workspace_path: String,
+    claude_session_id: String,
+) -> Result<()> {
+    let projects_root = claude_projects_root()?;
+    if !projects_root.is_dir() {
+        return Err(anyhow!(
+            "Claude local session history was not found in {}.",
+            projects_root.to_string_lossy()
+        ));
+    }
+
+    let expected_project_dir =
+        projects_root.join(claude_project_dir_for_workspace(&workspace_path));
+    let expected_session_path = expected_project_dir.join(format!("{claude_session_id}.jsonl"));
+    if expected_session_path.is_file() {
+        return Ok(());
+    }
+
+    if find_any_claude_session_project_dir(&projects_root, &claude_session_id)?.is_some() {
+        return Err(anyhow!(
+            "This Claude session belongs to a different workspace. Import it from the original project folder instead."
+        ));
+    }
+
+    Err(anyhow!(
+        "No local Claude conversation was found with session ID {claude_session_id}."
+    ))
+}
+
 fn extract_mounted_volume_path(hdiutil_output: &str) -> Option<String> {
-    hdiutil_output
-        .lines()
-        .find_map(|line| line.find("/Volumes/").map(|index| line[index..].trim().to_string()))
+    hdiutil_output.lines().find_map(|line| {
+        line.find("/Volumes/")
+            .map(|index| line[index..].trim().to_string())
+    })
 }
 
 pub fn install_latest_update() -> Result<()> {
@@ -2160,18 +2239,30 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_claude_project_dir_name_matches_cli_storage_shape() {
+        assert_eq!(
+            sanitize_claude_project_dir_name("/private/tmp/claude-desk-smoke-secondary"),
+            "-private-tmp-claude-desk-smoke-secondary"
+        );
+        assert_eq!(
+            sanitize_claude_project_dir_name("/Users/rfu/Claude Desk"),
+            "-Users-rfu-Claude-Desk"
+        );
+    }
+
+    #[test]
     fn resolve_claude_command_for_rdev_uses_remote_binary() {
         let settings = Settings::default();
-        let command =
-            resolve_claude_command_for_workspace(WorkspaceKind::Rdev, &settings).expect("rdev command should resolve");
+        let command = resolve_claude_command_for_workspace(WorkspaceKind::Rdev, &settings)
+            .expect("rdev command should resolve");
         assert_eq!(command, "claude");
     }
 
     #[test]
     fn resolve_claude_command_for_ssh_uses_remote_binary() {
         let settings = Settings::default();
-        let command =
-            resolve_claude_command_for_workspace(WorkspaceKind::Ssh, &settings).expect("ssh command should resolve");
+        let command = resolve_claude_command_for_workspace(WorkspaceKind::Ssh, &settings)
+            .expect("ssh command should resolve");
         assert_eq!(command, "claude");
     }
 
@@ -2187,8 +2278,8 @@ mod tests {
             claude_cli_path: Some(cli_path.to_string_lossy().to_string()),
             ..Settings::default()
         };
-        let command =
-            resolve_claude_command_for_workspace(WorkspaceKind::Local, &settings).expect("local command should resolve");
+        let command = resolve_claude_command_for_workspace(WorkspaceKind::Local, &settings)
+            .expect("local command should resolve");
         assert_eq!(command, cli_path.to_string_lossy());
 
         let _ = fs::remove_dir_all(&tmp_dir);

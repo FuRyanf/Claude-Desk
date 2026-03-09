@@ -1,12 +1,4 @@
-/**
- * Tests for the "Display issue?" button.
- *
- * The button lives in the header actions and shows a semi-persistent
- * inline tip telling users to drag a window edge to rerender the
- * terminal.
- */
-
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -42,6 +34,9 @@ const mocks = vi.hoisted(() => {
   };
 
   let threadState = [{ ...baseThread }];
+  const terminalPanel = vi.fn((props: { repairRequestId?: number }) => (
+    <section data-testid="terminal-panel-mock" data-repair-request-id={String(props.repairRequestId ?? 0)} />
+  ));
 
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
@@ -110,11 +105,14 @@ const mocks = vi.hoisted(() => {
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
     openExternalUrl: vi.fn(async () => undefined),
-    copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics')
+    copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
+    validateImportableClaudeSession: vi.fn(async () => true),
+    writeTextToClipboard: vi.fn(async () => undefined)
   };
 
   const reset = () => {
     threadState = [{ ...baseThread }];
+    terminalPanel.mockClear();
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -125,6 +123,7 @@ const mocks = vi.hoisted(() => {
   return {
     api,
     reset,
+    terminalPanel,
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
     onRunStream: vi.fn(async () => () => undefined),
@@ -150,16 +149,14 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }));
 
 vi.mock('../../src/components/TerminalPanel', () => ({
-  TerminalPanel: () => (
-    <section data-testid="terminal-panel-mock" />
-  )
+  TerminalPanel: (props: { repairRequestId?: number }) => mocks.terminalPanel(props)
 }));
 
 import App from '../../src/App';
 
 // ── tests ────────────────────────────────────────────────────────────────────
 
-describe('"Display issue?" button', () => {
+describe('"Refresh Display" button', () => {
   beforeEach(() => {
     mocks.reset();
     window.localStorage.clear();
@@ -168,7 +165,7 @@ describe('"Display issue?" button', () => {
   it('renders in the header actions', async () => {
     render(<App />);
     await screen.findByRole('button', { name: /Test Thread/i });
-    expect(screen.getByTestId('fix-display-button')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh Display' })).toBeInTheDocument();
   });
 
   it('is always visible regardless of thread selection', async () => {
@@ -178,20 +175,18 @@ describe('"Display issue?" button', () => {
     });
   });
 
-  it('clicking the button shows an inline tip message', async () => {
+  it('clicking the button requests a terminal display repair', async () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByRole('button', { name: /Test Thread/i });
 
-    // Tip not visible initially
-    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.getByTestId('terminal-panel-mock')).toHaveAttribute('data-repair-request-id', '0');
 
     await user.click(screen.getByTestId('fix-display-button'));
 
-    // Tip appears
-    const tip = await screen.findByRole('status');
-    expect(tip).toBeInTheDocument();
-    expect(tip.textContent).toMatch(/drag/i);
+    await waitFor(() => {
+      expect(screen.getByTestId('terminal-panel-mock')).toHaveAttribute('data-repair-request-id', '1');
+    });
   });
 
   it('clicking the button does not modify thread state', async () => {
@@ -202,39 +197,6 @@ describe('"Display issue?" button', () => {
     await user.click(screen.getByTestId('fix-display-button'));
 
     expect(mocks.api.setThreadFullAccess).not.toHaveBeenCalled();
-  });
-
-  it('clicking the button again hides the inline tip immediately', async () => {
-    const user = userEvent.setup();
-    render(<App />);
-    await screen.findByRole('button', { name: /Test Thread/i });
-
-    await user.click(screen.getByTestId('fix-display-button'));
-    expect(screen.getByRole('status')).toBeInTheDocument();
-
-    await user.click(screen.getByTestId('fix-display-button'));
-    expect(screen.queryByRole('status')).not.toBeInTheDocument();
-  });
-
-  it('hides the inline tip after the timeout elapses', async () => {
-    render(<App />);
-    await screen.findByRole('button', { name: /Test Thread/i });
-
-    vi.useFakeTimers();
-    try {
-      act(() => {
-        fireEvent.click(screen.getByTestId('fix-display-button'));
-      });
-      expect(screen.getByRole('status')).toBeInTheDocument();
-
-      act(() => {
-        vi.advanceTimersByTime(10_000);
-      });
-      expect(screen.queryByRole('status')).not.toBeInTheDocument();
-    } finally {
-      vi.runOnlyPendingTimers();
-      vi.useRealTimers();
-    }
   });
 
   it('wiki button opens the wiki link', async () => {

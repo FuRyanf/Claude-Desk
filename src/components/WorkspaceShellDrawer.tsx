@@ -10,6 +10,7 @@ interface WorkspaceShellDrawerProps {
   content: string;
   starting?: boolean;
   focusRequestId?: number;
+  repairRequestId?: number;
   onClose: () => void;
   onData: (data: string) => void;
   onResize: (cols: number, rows: number) => void;
@@ -23,6 +24,7 @@ export function WorkspaceShellDrawer({
   content,
   starting = false,
   focusRequestId = 0,
+  repairRequestId = 0,
   onClose,
   onData,
   onResize,
@@ -64,6 +66,7 @@ export function WorkspaceShellDrawer({
                 : undefined
           }
           focusRequestId={focusRequestId}
+          repairRequestId={repairRequestId}
           onData={onData}
           onResize={onResize}
           onFocusChange={onFocusChange}

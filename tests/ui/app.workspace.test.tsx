@@ -170,7 +170,9 @@ const mocks = vi.hoisted(() => {
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
     openTerminalCommand: vi.fn(async () => undefined),
-    copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics')
+    copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
+    validateImportableClaudeSession: vi.fn(async () => true),
+    writeTextToClipboard: vi.fn(async () => undefined)
   };
   const openDialog = vi.fn(async () => null);
   const confirmDialog = vi.fn(async () => true);
@@ -402,6 +404,29 @@ describe('Workspace add flow', () => {
     expect(await screen.findByRole('button', { name: /bloody-faraday/i })).toBeInTheDocument();
   });
 
+  it('copies terminal diagnostics through the native clipboard bridge for a selected local workspace', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
+    const input = await screen.findByLabelText('Manual path');
+    await user.clear(input);
+    await user.type(input, '/tmp/workspace-added');
+    await user.click(screen.getByRole('button', { name: 'Add project' }));
+
+    await user.click(await screen.findByRole('button', { name: 'Settings' }));
+
+    const diagnosticsButton = await screen.findByRole('button', { name: 'Copy terminal env diagnostics' });
+    expect(diagnosticsButton).toBeEnabled();
+
+    await user.click(diagnosticsButton);
+
+    await waitFor(() => {
+      expect(mocks.api.copyTerminalEnvDiagnostics).toHaveBeenCalledWith('/tmp/workspace-added');
+      expect(mocks.api.writeTextToClipboard).toHaveBeenCalledWith('diagnostics');
+    });
+  });
+
   it('imports a Claude session into a new thread from workspace menu', async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -447,6 +472,10 @@ describe('Workspace add flow', () => {
     await user.click(screen.getByRole('button', { name: 'Import' }));
 
     await waitFor(() => {
+      expect(mocks.api.validateImportableClaudeSession).toHaveBeenCalledWith(
+        '/tmp/workspace-added',
+        '123e4567-e89b-12d3-a456-426614174000'
+      );
       expect(mocks.api.createThread).toHaveBeenCalledWith('ws-added', 'claude-code');
       expect(mocks.api.setThreadClaudeSessionId).toHaveBeenCalledWith(
         'ws-added',
@@ -465,8 +494,44 @@ describe('Workspace add flow', () => {
     const startCallOrder = mocks.api.terminalStartSession.mock.invocationCallOrder.find(
       (value: number) => value > 0
     ) ?? 0;
+    const validateCallOrder = mocks.api.validateImportableClaudeSession.mock.invocationCallOrder[0] ?? 0;
+    expect(validateCallOrder).toBeGreaterThan(0);
+    expect(validateCallOrder).toBeLessThan(setCallOrder);
     expect(setCallOrder).toBeGreaterThan(0);
     expect(startCallOrder).toBeGreaterThan(0);
     expect(setCallOrder).toBeLessThan(startCallOrder);
+  });
+
+  it('blocks importing a Claude session that belongs to a different local workspace', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
+    const input = await screen.findByLabelText('Manual path');
+    await user.clear(input);
+    await user.type(input, '/tmp/workspace-added');
+    await user.click(screen.getByRole('button', { name: 'Add project' }));
+    const workspaceRow = await screen.findByRole('button', { name: /workspace-added/i });
+
+    mocks.api.validateImportableClaudeSession.mockRejectedValueOnce(
+      new Error('This Claude session belongs to a different workspace.')
+    );
+
+    await user.pointer([{ target: workspaceRow, keys: '[MouseRight]' }]);
+    await user.click(await screen.findByRole('button', { name: 'Import session…' }));
+    await user.type(
+      await screen.findByLabelText('Claude session ID'),
+      '123e4567-e89b-12d3-a456-426614174000'
+    );
+    await user.click(screen.getByRole('button', { name: 'Import' }));
+
+    expect(
+      await screen.findByText(/this claude session belongs to a different workspace/i)
+    ).toBeInTheDocument();
+    expect(mocks.api.createThread).not.toHaveBeenCalled();
+    expect(mocks.api.setThreadClaudeSessionId).not.toHaveBeenCalled();
+    expect(mocks.api.terminalStartSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: 'thread-import' })
+    );
   });
 });

@@ -97,6 +97,7 @@ export function TerminalPanel({
   const scrollRafRef = useRef<number | null>(null);
   const scrollPauseCooldownRef = useRef(0);
   const streamRepairTimerRef = useRef<number | null>(null);
+  const streamRepairEpochRef = useRef(0);
   const bytesSinceRepairRef = useRef(0);
   const lastStreamRepairAtRef = useRef(0);
   const suppressPlainEnterUntilRef = useRef(0);
@@ -191,7 +192,7 @@ export function TerminalPanel({
     }
   }, []);
 
-  const runStreamRepair = useCallback(
+  const applyStreamRepair = useCallback(
     (term: Terminal) => {
       if (terminalRef.current !== term) {
         return;
@@ -202,6 +203,31 @@ export function TerminalPanel({
       scheduleTerminalRefresh(term);
     },
     [scheduleTerminalRefresh]
+  );
+
+  const runStreamRepair = useCallback(
+    (term: Terminal) => {
+      if (terminalRef.current !== term) {
+        return;
+      }
+
+      const repairEpoch = streamRepairEpochRef.current + 1;
+      streamRepairEpochRef.current = repairEpoch;
+
+      writeQueueRef.current.flushImmediate();
+      applyStreamRepair(term);
+
+      void writeQueueRef.current.whenIdle().then(() => {
+        if (terminalRef.current !== term) {
+          return;
+        }
+        if (streamRepairEpochRef.current !== repairEpoch) {
+          return;
+        }
+        applyStreamRepair(term);
+      });
+    },
+    [applyStreamRepair]
   );
 
   const scheduleStreamRepair = useCallback(

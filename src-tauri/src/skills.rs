@@ -99,7 +99,10 @@ fn skill_roots(workspace_path: &str) -> Vec<(PathBuf, &'static str)> {
     let workspace = Path::new(workspace_path);
     vec![
         (workspace.join(PROJECT_SKILLS_DIR), PROJECT_SKILLS_DIR),
-        (workspace.join(LEGACY_PROJECT_SKILLS_DIR), LEGACY_PROJECT_SKILLS_DIR),
+        (
+            workspace.join(LEGACY_PROJECT_SKILLS_DIR),
+            LEGACY_PROJECT_SKILLS_DIR,
+        ),
     ]
 }
 
@@ -205,7 +208,10 @@ mod tests {
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].id, "refactor");
         assert_eq!(discovered[0].name, "Refactor Skill");
-        assert_eq!(discovered[0].relative_path, ".claude/skills/refactor/SKILL.md");
+        assert_eq!(
+            discovered[0].relative_path,
+            ".claude/skills/refactor/SKILL.md"
+        );
         assert!(discovered[0]
             .entry_points
             .iter()
@@ -216,8 +222,10 @@ mod tests {
 
     #[test]
     fn falls_back_to_legacy_workspace_skills_dir() {
-        let workspace =
-            std::env::temp_dir().join(format!("claude-desk-legacy-skills-test-{}", uuid::Uuid::new_v4()));
+        let workspace = std::env::temp_dir().join(format!(
+            "claude-desk-legacy-skills-test-{}",
+            uuid::Uuid::new_v4()
+        ));
         let skill_dir = workspace.join("skills").join("review");
         fs::create_dir_all(&skill_dir).expect("failed to create fixture skill directory");
         fs::write(

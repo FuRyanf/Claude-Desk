@@ -137,3 +137,21 @@ export function sortSkillsForDisplay(
     return left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
   });
 }
+
+export function matchesSkillSearch(
+  skill: Pick<SkillInfo, 'id' | 'name' | 'description'>,
+  query: string
+): boolean {
+  const terms = query
+    .trim()
+    .toLocaleLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (terms.length === 0) {
+    return true;
+  }
+
+  const haystack = `${skill.name}\n${skill.id}\n${skill.description}`.toLocaleLowerCase();
+  return terms.every((term) => haystack.includes(term));
+}

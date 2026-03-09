@@ -805,6 +805,7 @@ export default function App() {
   const [shellTerminalContent, setShellTerminalContent] = useState('');
   const [shellTerminalStarting, setShellTerminalStarting] = useState(false);
   const [shellTerminalFocusRequestId, setShellTerminalFocusRequestId] = useState(0);
+  const [shellTerminalRepairRequestId, setShellTerminalRepairRequestId] = useState(0);
 
   const [settings, setSettings] = useState<Settings>(() =>
     normalizeSettings({
@@ -992,6 +993,14 @@ export default function App() {
   const handleShellTerminalFocusChange = useCallback((focused: boolean) => {
     setFocusedTerminalKind((current) => (focused ? 'shell' : current === 'shell' ? null : current));
   }, []);
+
+  const repairActiveTerminalDisplay = useCallback(() => {
+    if (focusedTerminalKind === 'shell' || (!selectedThread && shellDrawerOpen)) {
+      setShellTerminalRepairRequestId((current) => current + 1);
+      return;
+    }
+    setTerminalRepairRequestId((current) => current + 1);
+  }, [focusedTerminalKind, selectedThread, shellDrawerOpen]);
 
   const resolveTerminalDataListenerReady = useCallback(() => {
     if (terminalDataListenerReadyRef.current) {
@@ -3929,6 +3938,19 @@ export default function App() {
     }
   }, []);
 
+  const writeTextToClipboard = useCallback(async (value: string) => {
+    try {
+      await api.writeTextToClipboard(value);
+      return;
+    } catch (error) {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        return;
+      }
+      throw error;
+    }
+  }, []);
+
   const copyEnvDiagnostics = useCallback(async () => {
     if (!selectedWorkspace) {
       pushToast('Select a workspace first.', 'error');
@@ -3941,16 +3963,12 @@ export default function App() {
 
     try {
       const diagnostics = await api.copyTerminalEnvDiagnostics(selectedWorkspace.path);
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(diagnostics);
-        pushToast('Copied terminal environment diagnostics to clipboard.', 'info');
-      } else {
-        pushToast('Diagnostics saved to artifacts/env-diagnostics.txt.', 'info');
-      }
+      await writeTextToClipboard(diagnostics);
+      pushToast('Copied terminal environment diagnostics to clipboard.', 'info');
     } catch (error) {
       pushToast(`Failed to collect diagnostics: ${String(error)}`, 'error');
     }
-  }, [pushToast, selectedWorkspace]);
+  }, [pushToast, selectedWorkspace, writeTextToClipboard]);
 
   const openSettings = useCallback(() => {
     setSettingsOpen(true);
@@ -4099,8 +4117,7 @@ export default function App() {
         return;
       }
       const command = `claude --resume ${sessionId}`;
-      void navigator.clipboard
-        .writeText(command)
+      void writeTextToClipboard(command)
         .then(() => {
           pushToast('Resume command copied to clipboard.', 'info');
         })
@@ -4108,7 +4125,7 @@ export default function App() {
           pushToast(`Failed to copy resume command: ${String(error)}`, 'error');
         });
     },
-    [pushToast]
+    [pushToast, writeTextToClipboard]
   );
 
   const copyWorkspaceCommand = useCallback(
@@ -4120,8 +4137,7 @@ export default function App() {
         pushToast('No remote command configured for this workspace.', 'error');
         return;
       }
-      void navigator.clipboard
-        .writeText(command)
+      void writeTextToClipboard(command)
         .then(() => {
           pushToast('Remote command copied to clipboard.', 'info');
         })
@@ -4129,7 +4145,7 @@ export default function App() {
           pushToast(`Failed to copy remote command: ${String(error)}`, 'error');
         });
     },
-    [pushToast]
+    [pushToast, writeTextToClipboard]
   );
 
   const onImportSession = useCallback((workspace: Workspace) => {
@@ -4145,6 +4161,9 @@ export default function App() {
       setImportingSession(true);
       setImportSessionError(null);
       try {
+        if (importSessionWorkspace.kind === 'local') {
+          await api.validateImportableClaudeSession(importSessionWorkspace.path, claudeSessionId);
+        }
         const thread = await api.createThread(importSessionWorkspace.id, 'claude-code');
         const importedThread = await api.setThreadClaudeSessionId(
           importSessionWorkspace.id,
@@ -4390,9 +4409,8 @@ export default function App() {
               openWorkspaceInFinder(selectedWorkspace);
             }
           }}
-          onRepairDisplay={() => {
-            setTerminalRepairRequestId((current) => current + 1);
-          }}
+          onRepairDisplay={repairActiveTerminalDisplay}
+          repairDisplayDisabled={!selectedThread && !shellDrawerOpen}
           onOpenTerminal={() => {
             toggleWorkspaceShellDrawer();
           }}
@@ -4599,6 +4617,7 @@ export default function App() {
           content={shellTerminalContent}
           starting={shellTerminalStarting}
           focusRequestId={shellTerminalFocusRequestId}
+          repairRequestId={shellTerminalRepairRequestId}
           onClose={() => {
             invalidatePendingShellSessionStart(shellTerminalWorkspaceIdRef.current);
             setShellDrawerOpen(false);
@@ -4626,6 +4645,7 @@ export default function App() {
         initialCliPath={settings.claudeCliPath ?? ''}
         initialAppearanceMode={normalizeAppearanceMode(settings.appearanceMode)}
         detectedCliPath={detectedCliPath}
+        copyEnvDiagnosticsDisabled={!selectedWorkspace || selectedWorkspace.kind !== 'local'}
         onClose={() => setSettingsOpen(false)}
         onSave={(nextSettings) => void saveSettings(nextSettings)}
         onCopyEnvDiagnostics={() => void copyEnvDiagnostics()}

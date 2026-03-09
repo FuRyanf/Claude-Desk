@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { sortSkillsForDisplay, type SkillUsageMap } from '../../src/lib/skillUsage';
+import { matchesSkillSearch, sortSkillsForDisplay, type SkillUsageMap } from '../../src/lib/skillUsage';
 
 describe('skill usage ranking', () => {
   it('sorts pinned skills first, then most recently used, then alphabetical', () => {
@@ -45,5 +45,21 @@ describe('skill usage ranking', () => {
       'charlie',
       'alpha'
     ]);
+  });
+
+  it('matches multi-word search terms across name, id, and description', () => {
+    const skill = {
+      id: 'refactor',
+      name: 'Review',
+      description: 'Keep behavior stable while cleaning up internals.',
+      entryPoints: [],
+      path: '/tmp/workspace/.claude/skills/review',
+      relativePath: '.claude/skills/review/SKILL.md',
+      warning: null
+    };
+
+    expect(matchesSkillSearch(skill, 'review stable')).toBe(true);
+    expect(matchesSkillSearch(skill, 'REFACTOR internals')).toBe(true);
+    expect(matchesSkillSearch(skill, 'review missing')).toBe(false);
   });
 });

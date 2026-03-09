@@ -14,8 +14,7 @@ use tauri::{Manager, State};
 use crate::models::{
     AppUpdateInfo, ContextPreview, GitBranchEntry, GitDiffSummary, GitInfo,
     GitPullForNewThreadResult, GitWorkspaceStatus, RunClaudeRequest, RunClaudeResponse, Settings,
-    SkillInfo,
-    TerminalStartResponse, ThreadMetadata, TranscriptEntry, Workspace,
+    SkillInfo, TerminalStartResponse, ThreadMetadata, TranscriptEntry, Workspace,
     WorkspaceShellStartResponse,
 };
 
@@ -108,8 +107,12 @@ fn add_ssh_workspace(
     display_name: Option<String>,
     remote_path: Option<String>,
 ) -> Result<Workspace, String> {
-    storage::add_ssh_workspace(&ssh_command, display_name.as_deref(), remote_path.as_deref())
-        .map_err(|error| error.to_string())
+    storage::add_ssh_workspace(
+        &ssh_command,
+        display_name.as_deref(),
+        remote_path.as_deref(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -578,6 +581,22 @@ fn copy_terminal_env_diagnostics(workspace_path: String) -> Result<String, Strin
 }
 
 #[tauri::command]
+fn validate_importable_claude_session(
+    workspace_path: String,
+    claude_session_id: String,
+) -> Result<bool, String> {
+    runner::validate_importable_claude_session(workspace_path, claude_session_id)
+        .map(|_| true)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn write_text_to_clipboard(text: String) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+    clipboard.set_text(text).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn write_image_to_clipboard(path: String) -> Result<(), String> {
     let img = image::open(&path).map_err(|error| error.to_string())?;
     let rgba = img.to_rgba8();
@@ -589,7 +608,9 @@ fn write_image_to_clipboard(path: String) -> Result<(), String> {
         bytes: std::borrow::Cow::Owned(pixels),
     };
     let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
-    clipboard.set_image(img_data).map_err(|error| error.to_string())
+    clipboard
+        .set_image(img_data)
+        .map_err(|error| error.to_string())
 }
 
 fn main() {
@@ -658,6 +679,8 @@ fn main() {
             open_external_url,
             open_terminal_command,
             copy_terminal_env_diagnostics,
+            validate_importable_claude_session,
+            write_text_to_clipboard,
             write_image_to_clipboard
         ])
         .run(tauri::generate_context!())

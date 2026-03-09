@@ -127,6 +127,10 @@ export const api = {
   openTerminalCommand: (command: string) => invoke<void>('open_terminal_command', { command }),
   copyTerminalEnvDiagnostics: (workspacePath: string) =>
     invoke<string>('copy_terminal_env_diagnostics', { workspacePath }),
+  validateImportableClaudeSession: (workspacePath: string, claudeSessionId: string) =>
+    invoke<boolean>('validate_importable_claude_session', { workspacePath, claudeSessionId }),
+  writeTextToClipboard: (text: string) =>
+    invoke<void>('write_text_to_clipboard', { text }),
   writeImageToClipboard: (path: string) =>
     invoke<void>('write_image_to_clipboard', { path })
 };
