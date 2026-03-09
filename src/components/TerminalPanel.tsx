@@ -530,6 +530,35 @@ export function TerminalPanel({
         scheduleTerminalRefresh(term);
       };
 
+      const fitPreservingViewport = () => {
+        const preserveViewport = !shouldAutoFollow(followStateRef.current);
+        const scrollbackOffset = preserveViewport
+          ? Math.max(0, term.buffer.active.baseY - term.buffer.active.viewportY)
+          : 0;
+
+        fitAndNotify();
+
+        if (preserveViewport) {
+          const targetLine = Math.max(0, term.buffer.active.baseY - scrollbackOffset);
+          term.scrollToLine(targetLine);
+          followStateRef.current = {
+            mode: 'pausedByUser',
+            viewportY: term.buffer.active.viewportY,
+            baseY: term.buffer.active.baseY
+          };
+          syncFollowOutputPaused(true);
+          scheduleTerminalRefresh(term);
+          return;
+        }
+
+        followStateRef.current = {
+          mode: 'following',
+          viewportY: term.buffer.active.viewportY,
+          baseY: term.buffer.active.baseY
+        };
+        syncFollowOutputPaused(false);
+      };
+
       // fitAddon.fit() short-circuits when the proposed cols/rows match the
       // current grid — it skips term.resize(), so xterm never re-measures
       // character metrics.  term.resize(same, same) also short-circuits.
@@ -724,7 +753,7 @@ export function TerminalPanel({
         }
         resizeFrameRef.current = window.requestAnimationFrame(() => {
           resizeFrameRef.current = null;
-          fitAndNotify();
+          fitPreservingViewport();
         });
       });
       observer.observe(host);

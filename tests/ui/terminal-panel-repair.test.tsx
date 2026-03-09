@@ -1,8 +1,10 @@
-import { fireEvent, render, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const DECTCEM_HIDE = '\u001b[?25l';
 const DECTCEM_SHOW = '\u001b[?25h';
+
+let resizeObserverCallback: ResizeObserverCallback | null = null;
 
 const mocks = vi.hoisted(() => {
   const fit = vi.fn();
@@ -201,14 +203,15 @@ describe('TerminalPanel manual repair', () => {
     (globalThis as { __CLAUDE_DESK_ENABLE_XTERM_TESTS__?: boolean }).__CLAUDE_DESK_ENABLE_XTERM_TESTS__ = true;
     mocks.fit.mockClear();
     mocks.terminals.length = 0;
-
-    if (typeof globalThis.ResizeObserver === 'undefined') {
-      globalThis.ResizeObserver = class {
-        observe() {}
-        disconnect() {}
-        unobserve() {}
-      } as typeof ResizeObserver;
-    }
+    resizeObserverCallback = null;
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) {
+        resizeObserverCallback = callback;
+      }
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    } as typeof ResizeObserver;
   });
 
   afterEach(() => {
@@ -427,6 +430,64 @@ describe('TerminalPanel manual repair', () => {
     await waitFor(() => {
       expect(repairedTerm.scrollToLine).toHaveBeenCalledWith(4);
     });
+  });
+
+  it('preserves relative scroll position through host resize while paused', async () => {
+    const originalRaf = window.requestAnimationFrame;
+    const originalCancelRaf = window.cancelAnimationFrame;
+    window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    }) as typeof window.requestAnimationFrame;
+    window.cancelAnimationFrame = (() => {}) as typeof window.cancelAnimationFrame;
+
+    try {
+      const content = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+      const { container } = render(
+        <TerminalPanel
+          sessionId="session-1"
+          content={content}
+          readOnly={false}
+          inputEnabled
+          repairRequestId={0}
+        />
+      );
+
+      await waitFor(() => {
+        expect(mocks.terminals).toHaveLength(1);
+      });
+
+      const firstTerm = mocks.terminals[0];
+      await waitFor(() => {
+        expect(firstTerm.write).toHaveBeenCalledWith(content, expect.any(Function));
+      });
+
+      firstTerm.buffer.active.baseY = 20;
+      firstTerm.buffer.active.viewportY = 12;
+
+      const host = container.querySelector('.terminal-host');
+      expect(host).not.toBeNull();
+      fireEvent.wheel(host as HTMLElement, { deltaY: -32 });
+      firstTerm.buffer.active.baseY = 20;
+      firstTerm.buffer.active.viewportY = 12;
+
+      mocks.fit.mockImplementationOnce(() => {
+        firstTerm.buffer.active.baseY = 28;
+      });
+
+      expect(resizeObserverCallback).not.toBeNull();
+
+      await act(async () => {
+        resizeObserverCallback?.([], {} as ResizeObserver);
+      });
+
+      await waitFor(() => {
+        expect(firstTerm.scrollToLine).toHaveBeenCalledWith(20);
+      });
+    } finally {
+      window.requestAnimationFrame = originalRaf;
+      window.cancelAnimationFrame = originalCancelRaf;
+    }
   });
 
   it('keeps the final terminal instance consistent across repeated repair requests', async () => {
