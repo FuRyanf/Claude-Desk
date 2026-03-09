@@ -73,9 +73,17 @@ export function HeaderBar({
       </div>
 
       <div className="header-actions">
-        <button type="button" onClick={onOpenWorkspace} className="ghost-button" disabled={!workspace}>
-          Open
-        </button>
+        {updateAvailable ? (
+          <button
+            type="button"
+            onClick={onInstallUpdate}
+            className="update-button"
+            disabled={updating}
+            title={updateVersionLabel ? `Update to ${updateVersionLabel}` : 'Update available'}
+          >
+            {updating ? 'Updating…' : 'Update'}
+          </button>
+        ) : null}
         <div
           className="fix-display-button-wrapper"
           onMouseEnter={openRefreshHint}
@@ -106,17 +114,9 @@ export function HeaderBar({
             {REFRESH_DISPLAY_HINT}
           </span>
         </div>
-        {updateAvailable ? (
-          <button
-            type="button"
-            onClick={onInstallUpdate}
-            className="update-button"
-            disabled={updating}
-            title={updateVersionLabel ? `Update to ${updateVersionLabel}` : 'Update available'}
-          >
-            {updating ? 'Updating…' : 'Update'}
-          </button>
-        ) : null}
+        <button type="button" onClick={onOpenWorkspace} className="ghost-button" disabled={!workspace}>
+          Open
+        </button>
         <button
           type="button"
           onClick={onOpenTerminal}

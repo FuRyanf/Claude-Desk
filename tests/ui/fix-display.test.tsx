@@ -229,6 +229,29 @@ describe('"Refresh Display" button', () => {
     expect(tooltip).not.toHaveClass('visible');
   });
 
+  it('orders header actions with update first when available', async () => {
+    mocks.api.checkForUpdate.mockResolvedValueOnce({
+      currentVersion: '0.1.0',
+      latestVersion: '0.1.1',
+      updateAvailable: true,
+      releaseNotes: null,
+      releaseUrl: null
+    });
+
+    render(<App />);
+    await screen.findByRole('button', { name: /Test Thread/i });
+    await screen.findByRole('button', { name: 'Update' });
+
+    const headerActions = screen.getByTestId('header').querySelector('.header-actions');
+    expect(headerActions).not.toBeNull();
+
+    const actionLabels = Array.from(headerActions?.querySelectorAll('button') ?? []).map((button) =>
+      button.textContent?.trim()
+    );
+
+    expect(actionLabels).toEqual(['Update', 'Refresh Display', 'Open', 'Terminal']);
+  });
+
   it('wiki button opens the wiki link', async () => {
     const user = userEvent.setup();
     render(<App />);
