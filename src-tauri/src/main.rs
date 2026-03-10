@@ -217,8 +217,13 @@ fn list_threads(workspace_id: String) -> Result<Vec<ThreadMetadata>, String> {
 }
 
 #[tauri::command]
-fn create_thread(workspace_id: String, agent_id: Option<String>) -> Result<ThreadMetadata, String> {
-    storage::create_thread(&workspace_id, agent_id).map_err(|error| error.to_string())
+fn create_thread(
+    workspace_id: String,
+    agent_id: Option<String>,
+    full_access: Option<bool>,
+) -> Result<ThreadMetadata, String> {
+    storage::create_thread(&workspace_id, agent_id, full_access.unwrap_or(false))
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

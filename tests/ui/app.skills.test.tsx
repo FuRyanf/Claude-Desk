@@ -178,9 +178,11 @@ const mocks = vi.hoisted(() => {
   return {
     api,
     reset,
+    currentThread: () => threadState[0],
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
+    onTerminalReady: vi.fn(async () => () => undefined),
     onTerminalExit: vi.fn(async () => () => undefined),
     onThreadUpdated: vi.fn(async () => () => undefined),
     openDialog: vi.fn(async () => null),
@@ -193,6 +195,7 @@ vi.mock('../../src/lib/api', () => ({
   onRunStream: mocks.onRunStream,
   onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
+  onTerminalReady: mocks.onTerminalReady,
   onTerminalExit: mocks.onTerminalExit,
   onThreadUpdated: mocks.onThreadUpdated
 }));
@@ -326,6 +329,63 @@ describe('Skills management', () => {
     expect(lastPayload).toContain('Project skills to use for this request when relevant:');
     expect(lastPayload).toContain('Review (.claude/skills/review/SKILL.md)');
     expect(lastPayload.endsWith('\r')).toBe(true);
+
+    await waitFor(() => {
+      expect(mocks.api.setThreadSkills).toHaveBeenLastCalledWith('ws-1', 'thread-1', []);
+    });
+  });
+
+  it('clears selected skills after a queued submit flushes when startup completes', async () => {
+    let resolveStart:
+      | ((value: {
+          sessionId: string;
+          sessionMode: 'new';
+          resumeSessionId: null;
+          thread: ReturnType<typeof mocks.currentThread>;
+        }) => void)
+      | null = null;
+    mocks.api.terminalStartSession.mockImplementationOnce(
+      async () =>
+        await new Promise<{
+          sessionId: string;
+          sessionMode: 'new';
+          resumeSessionId: null;
+          thread: ReturnType<typeof mocks.currentThread>;
+        }>((resolve) => {
+          resolveStart = resolve;
+        })
+    );
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: /^skills$/i }));
+    await user.click((await screen.findByText('Review')).closest('button')!);
+
+    await waitFor(() => {
+      expect(mocks.api.setThreadSkills).toHaveBeenCalledWith('ws-1', 'thread-1', ['review']);
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Submit prompt' }));
+    expect(mocks.api.terminalWrite).not.toHaveBeenCalled();
+
+    resolveStart?.({
+      sessionId: 'session-1',
+      sessionMode: 'new',
+      resumeSessionId: null,
+      thread: mocks.currentThread()
+    });
+
+    await waitFor(() => {
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith(
+        'session-1',
+        expect.stringContaining('Project skills to use for this request when relevant:')
+      );
+    });
+
+    await waitFor(() => {
+      expect(mocks.api.setThreadSkills).toHaveBeenLastCalledWith('ws-1', 'thread-1', []);
+    });
   });
 
   it('does not inject selected skills on Shift+Enter before the real submit', async () => {

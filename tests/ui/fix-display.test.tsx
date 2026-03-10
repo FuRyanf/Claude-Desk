@@ -129,6 +129,7 @@ const mocks = vi.hoisted(() => {
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
+    onTerminalReady: vi.fn(async () => () => undefined),
     onTerminalExit: vi.fn(async () => () => undefined),
     onThreadUpdated: vi.fn(async () => () => undefined)
   };
@@ -139,6 +140,7 @@ vi.mock('../../src/lib/api', () => ({
   onRunStream: mocks.onRunStream,
   onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
+  onTerminalReady: mocks.onTerminalReady,
   onTerminalExit: mocks.onTerminalExit,
   onThreadUpdated: mocks.onThreadUpdated
 }));

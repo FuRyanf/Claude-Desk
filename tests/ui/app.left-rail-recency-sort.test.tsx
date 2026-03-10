@@ -185,6 +185,7 @@ const mocks = vi.hoisted(() => {
         }
       };
     }),
+    onTerminalReady: vi.fn(async () => () => undefined),
     onTerminalExit: vi.fn(
       async (handler: (event: { sessionId: string; code: number | null; signal: number | null }) => void) => {
         terminalExitHandler = handler;
@@ -204,6 +205,7 @@ vi.mock('../../src/lib/api', () => ({
   onRunStream: mocks.onRunStream,
   onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
+  onTerminalReady: mocks.onTerminalReady,
   onTerminalExit: mocks.onTerminalExit,
   onThreadUpdated: mocks.onThreadUpdated
 }));

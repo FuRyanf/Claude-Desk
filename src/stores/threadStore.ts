@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 
 import { api } from '../lib/api';
-import type { RunStatus, ThreadMetadata } from '../types';
+import type { CreateThreadOptions, RunStatus, ThreadMetadata } from '../types';
 
 const LAST_USER_INPUT_AT_STORAGE_KEY = 'claude-desk:last-user-input-at';
 
@@ -122,7 +122,7 @@ export interface ThreadStore {
   selectedWorkspaceId?: string;
   selectedThreadId?: string;
   listThreads: (workspaceId: string) => Promise<ThreadMetadata[]>;
-  createThread: (workspaceId: string) => Promise<ThreadMetadata>;
+  createThread: (workspaceId: string, options?: CreateThreadOptions) => Promise<ThreadMetadata>;
   setThreadFullAccess: (workspaceId: string, threadId: string, fullAccess: boolean) => Promise<ThreadMetadata>;
   setThreadSkills: (workspaceId: string, threadId: string, enabledSkills: string[]) => Promise<ThreadMetadata>;
   renameThread: (workspaceId: string, threadId: string, title: string) => Promise<ThreadMetadata>;
@@ -174,8 +174,11 @@ export function useThreadStore(): ThreadStore {
     return sortedVisibleThreads;
   }, []);
 
-  const createThread = useCallback(async (workspaceId: string) => {
-    const thread = await api.createThread(workspaceId, 'claude-code');
+  const createThread = useCallback(async (workspaceId: string, options?: CreateThreadOptions) => {
+    const thread =
+      options?.fullAccess === true
+        ? await api.createThread(workspaceId, 'claude-code', true)
+        : await api.createThread(workspaceId, 'claude-code');
     delete removedThreadIdsRef.current[thread.id];
     setThreadsByWorkspace((current) => upsertThread(current, lastUserInputAtByThreadRef.current, thread));
     setSelectedThreadId(thread.id);

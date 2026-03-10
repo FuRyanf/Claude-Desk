@@ -17,6 +17,7 @@ import type {
   SkillInfo,
   TerminalDataEvent,
   TerminalExitEvent,
+  TerminalReadyEvent,
   TerminalStartResponse,
   WorkspaceShellStartResponse,
   ThreadMetadata,
@@ -28,6 +29,7 @@ export const events = {
   runStream: 'claude://run-stream',
   runExit: 'claude://run-exit',
   terminalData: 'terminal:data',
+  terminalReady: 'terminal:ready',
   terminalExit: 'terminal:exit',
   threadUpdated: 'thread:updated'
 } as const;
@@ -60,8 +62,12 @@ export const api = {
     invoke<GitPullForNewThreadResult>('git_pull_master_for_new_thread', { workspacePath }),
   listThreads: (workspaceId: string) =>
     invoke<ThreadMetadata[]>('list_threads', { workspaceId }),
-  createThread: (workspaceId: string, agentId?: string) =>
-    invoke<ThreadMetadata>('create_thread', { workspaceId, agentId }),
+  createThread: (workspaceId: string, agentId?: string, fullAccess?: boolean) =>
+    invoke<ThreadMetadata>('create_thread', {
+      workspaceId,
+      agentId,
+      ...(typeof fullAccess === 'boolean' ? { fullAccess } : {})
+    }),
   renameThread: (workspaceId: string, threadId: string, title: string) =>
     invoke<ThreadMetadata>('rename_thread', { workspaceId, threadId, title }),
   archiveThread: (workspaceId: string, threadId: string) =>
@@ -153,6 +159,13 @@ export const onTerminalData = async (
   handler: (event: TerminalDataEvent) => void
 ): Promise<UnlistenFn> =>
   listen<TerminalDataEvent>(events.terminalData, (event) => {
+    handler(event.payload);
+  });
+
+export const onTerminalReady = async (
+  handler: (event: TerminalReadyEvent) => void
+): Promise<UnlistenFn> =>
+  listen<TerminalReadyEvent>(events.terminalReady, (event) => {
     handler(event.payload);
   });
 

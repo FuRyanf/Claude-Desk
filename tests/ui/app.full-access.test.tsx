@@ -2,6 +2,9 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON =
+  'Send a message first to establish the session, then toggle Full access. To start with Full access, use New thread options and choose Full access thread.';
+
 const mocks = vi.hoisted(() => {
   const baseWorkspace = {
     id: 'ws-1',
@@ -87,12 +90,15 @@ const mocks = vi.hoisted(() => {
       message: 'Checked out master and pulled latest changes.'
     })),
     listThreads: vi.fn(async () => threadState),
-    createThread: vi.fn(async () => {
+    createThread: vi.fn(async (_workspaceId: string, _agentId?: string, fullAccess?: boolean) => {
       const next = {
         ...baseThread,
         id: `thread-${threadState.length + 1}`,
         title: 'New thread',
-        fullAccess: false,
+        fullAccess: Boolean(fullAccess),
+        claudeSessionId: null,
+        lastResumeAt: null,
+        lastNewSessionAt: null,
         updatedAt: new Date().toISOString()
       };
       threadState = [next, ...threadState];
@@ -216,6 +222,7 @@ const mocks = vi.hoisted(() => {
         };
       }
     ),
+    onTerminalReady: vi.fn(async () => () => undefined),
     onTerminalExit: vi.fn(async () => () => undefined),
     onThreadUpdated: vi.fn(async () => () => undefined)
   };
@@ -226,6 +233,7 @@ vi.mock('../../src/lib/api', () => ({
   onRunStream: mocks.onRunStream,
   onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
+  onTerminalReady: mocks.onTerminalReady,
   onTerminalExit: mocks.onTerminalExit,
   onThreadUpdated: mocks.onThreadUpdated
 }));
@@ -241,6 +249,9 @@ vi.mock('../../src/components/TerminalPanel', () => ({
       <pre data-testid="terminal-content-mock">{content ?? ''}</pre>
       <button type="button" onClick={() => onData?.('draft')}>
         Type draft
+      </button>
+      <button type="button" onClick={() => onData?.('ship it\r')}>
+        Submit prompt
       </button>
     </section>
   )
@@ -273,6 +284,57 @@ describe('Terminal launch flags', () => {
     render(<App />);
     await screen.findByRole('button', { name: /Full Access Thread/i });
     expect(screen.getByTestId('full-access-toggle')).toBeInTheDocument();
+    expect(screen.getByTestId('full-access-toggle')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('blocks full access toggling for remote workspaces until the user sends a message', async () => {
+    mocks.setWorkspaceKind('ssh');
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(1);
+    });
+
+    const toggle = screen.getByTestId('full-access-toggle');
+    expect(toggle).toHaveAttribute('aria-disabled', 'true');
+    expect(toggle).toHaveAttribute('title', REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON);
+
+    await user.click(toggle);
+    expect(mocks.api.setThreadFullAccess).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'Submit prompt' }));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith('session-1', 'ship it\r');
+    });
+    await waitFor(() => {
+      expect(toggle).not.toHaveAttribute('aria-disabled');
+    });
+  });
+
+  it('creates a new full-access thread from the new thread options menu', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await user.click(screen.getByTestId('workspace-new-thread-options-ws-1'));
+    await user.click(await screen.findByRole('button', { name: 'Full access thread' }));
+
+    await waitFor(() => {
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code', true);
+    });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          threadId: 'thread-2',
+          fullAccessFlag: true
+        })
+      );
+    });
+
     expect(screen.getByTestId('full-access-toggle')).toHaveAttribute('aria-pressed', 'true');
   });
 
@@ -434,6 +496,12 @@ describe('Terminal launch flags', () => {
     await screen.findByRole('button', { name: /Full Access Thread/i });
     await waitFor(() => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Submit prompt' }));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith('session-1', 'ship it\r');
     });
 
     await user.click(screen.getByTestId('full-access-toggle'));

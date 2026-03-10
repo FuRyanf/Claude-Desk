@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,7 @@ use crate::git_tools;
 use crate::models::{
     ContextFilePreview, ContextPreview, RunClaudeRequest, RunClaudeResponse, RunExitEvent,
     RunMetadata, Settings, StreamEvent, TerminalDataEvent, TerminalExitEvent,
-    TerminalStartResponse, ThreadRunStatus, TranscriptEntry, WorkspaceKind,
+    TerminalReadyEvent, TerminalStartResponse, ThreadRunStatus, TranscriptEntry, WorkspaceKind,
     WorkspaceShellStartResponse,
 };
 use crate::skills;
@@ -29,9 +30,10 @@ use crate::storage;
 const STREAM_EVENT: &str = "claude://run-stream";
 const EXIT_EVENT: &str = "claude://run-exit";
 const TERMINAL_DATA_EVENT: &str = "terminal:data";
+const TERMINAL_READY_EVENT: &str = "terminal:ready";
 const TERMINAL_EXIT_EVENT: &str = "terminal:exit";
 const THREAD_UPDATED_EVENT: &str = "thread:updated";
-const SESSION_ID_PARSE_BUFFER_MAX: usize = 24 * 1024;
+const LAUNCH_OUTPUT_PARSE_BUFFER_MAX: usize = 16 * 1024;
 const POST_CONNECT_PROMPT_BUFFER_MAX: usize = 16 * 1024;
 const POST_CONNECT_COMMAND_AFTER_SSH_START_TIMEOUT: Duration = Duration::from_secs(6);
 const TERMINAL_LOG_SNAPSHOT_MAX_BYTES: u64 = 512 * 1024;
@@ -360,6 +362,87 @@ fn should_dispatch_post_connect_command(
             && elapsed_since_connect_start >= POST_CONNECT_COMMAND_AFTER_SSH_START_TIMEOUT)
 }
 
+fn trim_launch_output_parse_buffer(buffer: &mut String) {
+    if buffer.len() <= LAUNCH_OUTPUT_PARSE_BUFFER_MAX {
+        return;
+    }
+    let drain_len = buffer.len() - (LAUNCH_OUTPUT_PARSE_BUFFER_MAX / 2);
+    buffer.drain(..drain_len);
+}
+
+fn normalize_launch_probe_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn looks_like_launch_command_echo_line(line: &str, launch_command: &str) -> bool {
+    let normalized_line = normalize_launch_probe_text(line);
+    if normalized_line.is_empty() {
+        return false;
+    }
+
+    let normalized_command = normalize_launch_probe_text(launch_command);
+    if normalized_command.is_empty() {
+        return false;
+    }
+
+    if normalized_command.contains(&normalized_line) || normalized_line.contains(&normalized_command) {
+        return true;
+    }
+
+    for marker in [" exec ", " env ", " claude ", "claude "] {
+        if let Some(index) = normalized_line.find(marker.trim_start()) {
+            let tail = normalized_line[index..].trim();
+            if !tail.is_empty()
+                && (normalized_command.contains(tail) || tail.contains(&normalized_command))
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn chunk_mentions_launch_command(
+    probe_buffer: &mut String,
+    chunk: &str,
+    launch_command: &str,
+) -> bool {
+    let clean = strip_ansi_sequences(chunk);
+    if clean.is_empty() {
+        return false;
+    }
+
+    probe_buffer.push_str(&clean);
+    trim_launch_output_parse_buffer(probe_buffer);
+    let normalized_probe = normalize_launch_probe_text(probe_buffer);
+    let normalized_command = normalize_launch_probe_text(launch_command);
+    !normalized_probe.is_empty()
+        && !normalized_command.is_empty()
+        && (normalized_probe.contains(&normalized_command)
+            || normalized_command.contains(&normalized_probe))
+}
+
+fn chunk_has_non_echo_launch_output(
+    output_probe: &mut String,
+    chunk: &str,
+    launch_command: &str,
+) -> bool {
+    let clean = strip_ansi_sequences(chunk);
+    if clean.trim().is_empty() {
+        return false;
+    }
+
+    output_probe.push_str(&clean.replace('\r', "\n"));
+    trim_launch_output_parse_buffer(output_probe);
+
+    output_probe
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .any(|line| !looks_like_launch_command_echo_line(line, launch_command))
+}
+
 fn is_uuid_like(value: &str) -> bool {
     if value.len() != 36 {
         return false;
@@ -453,27 +536,39 @@ fn extract_claude_resume_session_id(text: &str) -> Option<String> {
     None
 }
 
-fn extract_resume_session_id_from_chunk(parse_buffer: &mut String, chunk: &str) -> Option<String> {
-    let clean = strip_ansi_sequences(chunk);
-    if clean.is_empty() {
-        return None;
-    }
-
-    parse_buffer.push_str(&clean);
-    if parse_buffer.len() > SESSION_ID_PARSE_BUFFER_MAX {
-        let drain_len = parse_buffer.len() - (SESSION_ID_PARSE_BUFFER_MAX / 2);
-        parse_buffer.drain(..drain_len);
-    }
-
-    extract_claude_resume_session_id(parse_buffer)
-}
-
 fn recover_session_id_from_logs(workspace_id: &str, thread_id: &str) -> Option<String> {
     let snapshot = terminal_get_last_log(workspace_id, thread_id).ok()?;
     if snapshot.trim().is_empty() {
         return None;
     }
     extract_claude_resume_session_id(&strip_ansi_sequences(&snapshot))
+}
+
+fn emit_terminal_ready(
+    app: &AppHandle,
+    workspace_id: &str,
+    thread_id: &str,
+    session_id: &str,
+    launch_session_id: &str,
+    confirm_generated_session_id: bool,
+) {
+    if confirm_generated_session_id {
+        if let Ok(Some(updated_thread)) = storage::set_thread_claude_session_id_if_missing(
+            workspace_id,
+            thread_id,
+            launch_session_id,
+        ) {
+            let _ = app.emit(THREAD_UPDATED_EVENT, updated_thread);
+        }
+    }
+
+    let _ = app.emit(
+        TERMINAL_READY_EVENT,
+        TerminalReadyEvent {
+            session_id: session_id.to_string(),
+            thread_id: Some(thread_id.to_string()),
+        },
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -514,9 +609,11 @@ struct TerminalSession {
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
+    killed: Arc<AtomicBool>,
 }
 
 fn terminate_terminal_session_process(session: &TerminalSession) {
+    session.killed.store(true, Ordering::Release);
     if let Some(pid) = session.process_id {
         let result = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         if result == 0 {
@@ -984,13 +1081,14 @@ pub async fn terminal_start_session(
     } else {
         false
     };
-    thread.claude_session_id = launch_session_id.clone();
 
     let session_mode = if generated_session_id {
         thread.last_new_session_at = Some(started_at);
+        thread.claude_session_id = None;
         TerminalSessionMode::New
     } else {
         thread.last_resume_at = Some(started_at);
+        thread.claude_session_id = launch_session_id.clone();
         TerminalSessionMode::Resumed
     };
     let launch_session_id =
@@ -1032,6 +1130,9 @@ pub async fn terminal_start_session(
         workspace.remote_path.as_deref(),
         &claude_shell_command,
     )?;
+    let launch_command_for_readiness = post_connect_command
+        .clone()
+        .unwrap_or_else(|| shell_command.clone());
     let command_manifest = vec![
         shell_path.clone(),
         "-lic".to_string(),
@@ -1048,7 +1149,7 @@ pub async fn terminal_start_session(
             "sessionMode": session_mode.as_str(),
             "resumeSessionId": resume_session_id.clone(),
             "claudeSessionId": thread.claude_session_id.clone(),
-            "launchSessionId": launch_session_id,
+            "launchSessionId": launch_session_id.clone(),
             "cwd": cwd,
             "envVars": env_vars,
             "command": command_manifest,
@@ -1062,7 +1163,7 @@ pub async fn terminal_start_session(
                 WorkspaceKind::Rdev => "rdev",
                 WorkspaceKind::Ssh => "ssh"
             },
-            "postConnectCommand": post_connect_command
+            "postConnectCommand": post_connect_command.clone()
         }),
     )?;
 
@@ -1111,6 +1212,7 @@ pub async fn terminal_start_session(
             .open(&output_log_path)?,
     ));
 
+    let session_killed = Arc::new(AtomicBool::new(false));
     let session = Arc::new(TerminalSession {
         session_id: session_id.clone(),
         workspace_id: workspace_id.clone(),
@@ -1126,6 +1228,7 @@ pub async fn terminal_start_session(
         master: Arc::new(Mutex::new(pty_pair.master)),
         writer: Arc::new(Mutex::new(writer)),
         child: Arc::new(Mutex::new(child)),
+        killed: session_killed.clone(),
     });
     state.terminal_sessions.insert(session.clone())?;
 
@@ -1139,11 +1242,16 @@ pub async fn terminal_start_session(
     let mut pending_post_connect_command = post_connect_command;
     let mut post_connect_prompt_probe = String::new();
     let mut saw_ssh_connection_start = false;
-    let mut should_capture_session_id = false;
+    let mut launch_command_dispatched =
+        workspace.kind == WorkspaceKind::Local || pending_post_connect_command.is_none();
+    let mut launch_dispatch_probe = String::new();
+    let mut launch_output_probe = String::new();
+    let mut ready_emitted = false;
+    let launch_session_id_for_confirmation = launch_session_id.clone();
+    let should_confirm_generated_session_id = generated_session_id;
     std::thread::spawn(move || {
         let mut buffer = [0u8; 32_768];
         let mut utf8_carry = Vec::<u8>::new();
-        let mut session_id_parse_buffer = String::new();
         let mut chunk_sequence: u64 = 0;
         loop {
             let read = match reader.read(&mut buffer) {
@@ -1181,27 +1289,44 @@ pub async fn terminal_start_session(
                             if let Ok(mut writer) = post_connect_writer.lock() {
                                 let _ = writer.write_all(format!("{command}\r").as_bytes());
                                 let _ = writer.flush();
+                                launch_dispatch_probe.clear();
+                                launch_output_probe.clear();
                             }
                         }
                         post_connect_prompt_probe.clear();
                     }
                 }
 
-                if should_capture_session_id {
-                    if let Some(captured_session_id) =
-                        extract_resume_session_id_from_chunk(&mut session_id_parse_buffer, &chunk)
-                    {
-                        if let Ok(Some(updated_thread)) =
-                            storage::set_thread_claude_session_id_if_missing(
-                                &data_workspace_id,
-                                &data_thread_id,
-                                &captured_session_id,
-                            )
-                        {
-                            should_capture_session_id = false;
-                            let _ = data_app.emit(THREAD_UPDATED_EVENT, updated_thread);
-                        }
-                    }
+                if !launch_command_dispatched
+                    && chunk_mentions_launch_command(
+                        &mut launch_dispatch_probe,
+                        &chunk,
+                        &launch_command_for_readiness,
+                    )
+                {
+                    launch_command_dispatched = true;
+                    launch_dispatch_probe.clear();
+                    launch_output_probe.clear();
+                }
+
+                if !ready_emitted
+                    && launch_command_dispatched
+                    && !session_killed.load(Ordering::Acquire)
+                    && chunk_has_non_echo_launch_output(
+                        &mut launch_output_probe,
+                        &chunk,
+                        &launch_command_for_readiness,
+                    )
+                {
+                    ready_emitted = true;
+                    emit_terminal_ready(
+                        &data_app,
+                        &data_workspace_id,
+                        &data_thread_id,
+                        &data_session_id,
+                        &launch_session_id_for_confirmation,
+                        should_confirm_generated_session_id,
+                    );
                 }
                 chunk_sequence = chunk_sequence.saturating_add(1);
                 let _ = data_app.emit(
@@ -1218,20 +1343,23 @@ pub async fn terminal_start_session(
 
         if !utf8_carry.is_empty() {
             let trailing = String::from_utf8_lossy(&utf8_carry).to_string();
-            if should_capture_session_id {
-                if let Some(captured_session_id) =
-                    extract_resume_session_id_from_chunk(&mut session_id_parse_buffer, &trailing)
-                {
-                    if let Ok(Some(updated_thread)) =
-                        storage::set_thread_claude_session_id_if_missing(
-                            &data_workspace_id,
-                            &data_thread_id,
-                            &captured_session_id,
-                        )
-                    {
-                        let _ = data_app.emit(THREAD_UPDATED_EVENT, updated_thread);
-                    }
-                }
+            if !ready_emitted
+                && launch_command_dispatched
+                && !session_killed.load(Ordering::Acquire)
+                && chunk_has_non_echo_launch_output(
+                    &mut launch_output_probe,
+                    &trailing,
+                    &launch_command_for_readiness,
+                )
+            {
+                emit_terminal_ready(
+                    &data_app,
+                    &data_workspace_id,
+                    &data_thread_id,
+                    &data_session_id,
+                    &launch_session_id_for_confirmation,
+                    should_confirm_generated_session_id,
+                );
             }
             chunk_sequence = chunk_sequence.saturating_add(1);
             let _ = data_app.emit(
@@ -1461,6 +1589,7 @@ pub async fn workspace_shell_start_session(
         master: Arc::new(Mutex::new(pty_pair.master)),
         writer: Arc::new(Mutex::new(writer)),
         child: Arc::new(Mutex::new(child)),
+        killed: Arc::new(AtomicBool::new(false)),
     });
     state.terminal_sessions.insert(session.clone())?;
 
@@ -1636,6 +1765,8 @@ pub fn terminal_kill(state: Arc<RunnerState>, session_id: String) -> Result<bool
     let Some(session) = state.terminal_sessions.get(&session_id)? else {
         return Ok(false);
     };
+
+    session.killed.store(true, Ordering::Release);
 
     let Some(pid) = session.process_id else {
         return Err(anyhow!("Terminal session process id is unavailable"));
@@ -2141,47 +2272,54 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn extracts_resume_session_id_from_chunked_terminal_output() {
-        let mut parse_buffer = String::new();
-        let chunks = [
-            "Welcome to Claude Code\n",
-            "Resume this session with: claude --resume 123e4567-e89b-12d3-a456-426614174000\n",
-            "Done.\n",
-        ];
-
-        let mut detected = None;
-        for chunk in chunks {
-            let maybe_id = extract_resume_session_id_from_chunk(&mut parse_buffer, chunk);
-            if maybe_id.is_some() {
-                detected = maybe_id;
-            }
-        }
-
-        assert_eq!(
-            detected.as_deref(),
-            Some("123e4567-e89b-12d3-a456-426614174000")
-        );
+    fn ignores_launch_command_echo_when_detecting_ready_output() {
+        let launch_command =
+            "exec env TERM=xterm-256color NO_COLOR= claude --session-id '123e4567-e89b-12d3-a456-426614174000'";
+        let mut probe = String::new();
+        assert!(!chunk_has_non_echo_launch_output(
+            &mut probe,
+            "[rfu@bloody-faraday workspace]$ exec env TERM=xterm-256color NO_COLOR= claude --session-id '123e4567-e89b-12d3-a456-426614174000'\r",
+            launch_command,
+        ));
     }
 
     #[test]
-    fn extracts_resume_session_id_when_ansi_codes_are_present() {
-        let mut parse_buffer = String::new();
-        let chunk = "\u{1b}[31mResume this session with:\u{1b}[0m claude --resume ABCDEFAB-CDEF-ABCD-EFAB-ABCDEFABCDEF";
-        let detected = extract_resume_session_id_from_chunk(&mut parse_buffer, chunk);
-        assert_eq!(
-            detected.as_deref(),
-            Some("abcdefab-cdef-abcd-efab-abcdefabcdef")
-        );
+    fn detects_non_echo_output_after_launch_command_echo() {
+        let launch_command =
+            "exec env TERM=xterm-256color NO_COLOR= claude --session-id '123e4567-e89b-12d3-a456-426614174000'";
+        let mut probe = String::new();
+        assert!(chunk_has_non_echo_launch_output(
+            &mut probe,
+            "[rfu@bloody-faraday workspace]$ exec env TERM=xterm-256color NO_COLOR= claude --session-id '123e4567-e89b-12d3-a456-426614174000'\r\nClaude Code v2.1.72\r\n",
+            launch_command,
+        ));
     }
 
     #[test]
-    fn ignores_non_uuid_resume_values() {
-        let mut parse_buffer = String::new();
-        let detected = extract_resume_session_id_from_chunk(
-            &mut parse_buffer,
-            "Resume this session with: claude --resume not-a-uuid",
+    fn waits_for_remote_launch_echo_before_treating_output_as_ready() {
+        let launch_command =
+            "exec env TERM=xterm-256color NO_COLOR= claude --session-id '123e4567-e89b-12d3-a456-426614174000'";
+        let mut dispatch_probe = String::new();
+        let ssh_noise =
+            "Starting ssh connection to li-productivity-agents/bloody-faraday\r\nCould not request local forwarding.\r\n";
+
+        assert!(
+            !chunk_mentions_launch_command(&mut dispatch_probe, ssh_noise, launch_command),
+            "ssh tunnel noise should not count as the remote launch echo"
         );
-        assert!(detected.is_none());
+
+        assert!(chunk_mentions_launch_command(
+            &mut dispatch_probe,
+            "[rfu@bloody-faraday li-productivity-agents]$ exec env TERM=xterm-256color NO_COLOR= claude --session-id '123e4567-e89b-12d3-a456-426614174000'\r\n",
+            launch_command,
+        ));
+
+        let mut output_probe = String::new();
+        assert!(chunk_has_non_echo_launch_output(
+            &mut output_probe,
+            "Claude Code v2.1.72\r\n",
+            launch_command,
+        ));
     }
 
     #[test]

@@ -395,13 +395,17 @@ pub fn workspace_shell_sessions_dir(workspace_id: &str) -> Result<PathBuf> {
         .join(workspace_id))
 }
 
-pub fn create_thread(workspace_id: &str, agent_id: Option<String>) -> Result<ThreadMetadata> {
+pub fn create_thread(
+    workspace_id: &str,
+    agent_id: Option<String>,
+    full_access: bool,
+) -> Result<ThreadMetadata> {
     let now = Utc::now();
     let thread = ThreadMetadata {
         id: Uuid::new_v4().to_string(),
         workspace_id: workspace_id.to_string(),
         agent_id: agent_id.unwrap_or_else(|| "claude-code".to_string()),
-        full_access: false,
+        full_access,
         enabled_skills: Vec::new(),
         created_at: now,
         updated_at: now,
@@ -890,7 +894,7 @@ mod tests {
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()))
+        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
             .expect("thread should be created");
         let thread_storage_dir =
             thread_dir(&workspace.id, &thread.id).expect("thread dir should resolve");
@@ -928,12 +932,40 @@ mod tests {
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()))
+        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
             .expect("thread should be created");
 
         let updated = set_thread_full_access(&workspace.id, &thread.id, true)
             .expect("full access should update");
         assert!(updated.full_access);
+
+        let reloaded =
+            read_thread_metadata(&workspace.id, &thread.id).expect("thread should reload");
+        assert!(reloaded.full_access);
+
+        std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn create_thread_can_start_with_full_access_enabled() {
+        let _guard = test_lock().lock().expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "claude-desk-create-thread-full-access-test-{}",
+            Uuid::new_v4()
+        ));
+        let workspace_path = temp_root.join("workspace");
+        fs::create_dir_all(&workspace_path).expect("failed to create workspace fixture");
+
+        std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &temp_root);
+
+        let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
+            .expect("workspace should be added");
+        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), true)
+            .expect("thread should be created");
+
+        assert!(thread.full_access);
 
         let reloaded =
             read_thread_metadata(&workspace.id, &thread.id).expect("thread should reload");
@@ -956,7 +988,7 @@ mod tests {
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()))
+        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
             .expect("thread should be created");
 
         let captured = set_thread_claude_session_id_if_missing(
@@ -1010,7 +1042,7 @@ mod tests {
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()))
+        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
             .expect("thread should be created");
 
         let updated = set_thread_claude_session_id(
@@ -1082,7 +1114,7 @@ mod tests {
 
         let workspace = add_workspace(workspace_path.to_string_lossy().as_ref())
             .expect("workspace should be added");
-        let thread = create_thread(&workspace.id, Some("claude-code".to_string()))
+        let thread = create_thread(&workspace.id, Some("claude-code".to_string()), false)
             .expect("thread should be created");
 
         let mut handles = Vec::new();

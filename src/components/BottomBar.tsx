@@ -16,6 +16,7 @@ interface BottomBarProps {
   attachmentDraftPaths: string[];
   attachmentsEnabled: boolean;
   fullAccessUpdating?: boolean;
+  fullAccessToggleBlockedReason?: string | null;
   gitInfo: GitInfo | null;
   onPickAttachments: () => Promise<void>;
   onAddAttachmentPaths: (paths: string[]) => boolean;
@@ -244,6 +245,7 @@ export function BottomBar({
   attachmentDraftPaths,
   attachmentsEnabled,
   fullAccessUpdating = false,
+  fullAccessToggleBlockedReason = null,
   gitInfo,
   onPickAttachments,
   onAddAttachmentPaths,
@@ -267,6 +269,7 @@ export function BottomBar({
   const branchTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const branchPopoverRef = React.useRef<HTMLElement | null>(null);
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
+  const fullAccessToggleBlocked = Boolean(fullAccessToggleBlockedReason);
 
   const filteredBranches = React.useMemo(() => {
     const query = branchSearch.trim().toLowerCase();
@@ -711,13 +714,28 @@ export function BottomBar({
         {skillsControl}
         <button
           type="button"
-          className={selectedThread?.fullAccess ? 'full-access-toggle enabled' : 'full-access-toggle'}
+          className={[
+            'full-access-toggle',
+            selectedThread?.fullAccess ? 'enabled' : '',
+            fullAccessToggleBlocked ? 'blocked' : ''
+          ]
+            .filter(Boolean)
+            .join(' ')}
           data-testid="full-access-toggle"
           aria-label="Toggle full access"
           aria-pressed={selectedThread?.fullAccess ?? false}
+          aria-disabled={fullAccessToggleBlocked || undefined}
           disabled={!selectedThread || fullAccessUpdating}
-          onClick={() => void onToggleFullAccess()}
-          title={!selectedThread ? 'Select a thread' : selectedThread.fullAccess ? 'Disable full access' : 'Enable full access'}
+          onClick={() => {
+            if (fullAccessToggleBlocked || !selectedThread || fullAccessUpdating) {
+              return;
+            }
+            void onToggleFullAccess();
+          }}
+          title={
+            fullAccessToggleBlockedReason ??
+            (!selectedThread ? 'Select a thread' : selectedThread.fullAccess ? 'Disable full access' : 'Enable full access')
+          }
         >
           <span className="full-access-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24">

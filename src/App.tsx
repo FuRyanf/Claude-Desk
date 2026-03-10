@@ -23,7 +23,7 @@ import { TerminalPanel } from './components/TerminalPanel';
 import { ThreadSkillsPopover } from './components/ThreadSkillsPopover';
 import { ToastRegion, type ToastItem } from './components/ToastRegion';
 import { WorkspaceShellDrawer } from './components/WorkspaceShellDrawer';
-import { api, onTerminalData, onTerminalExit, onThreadUpdated } from './lib/api';
+import { api, onTerminalData, onTerminalExit, onTerminalReady, onThreadUpdated } from './lib/api';
 import { clampTerminalLog as clampTerminalLogText } from './lib/terminalLogClamp';
 import {
   applyAppearanceMode,
@@ -69,16 +69,20 @@ import type {
   TerminalDataEvent,
   TerminalExitEvent,
   TerminalSessionMode,
+  CreateThreadOptions,
   ThreadMetadata,
   Workspace
 } from './types';
 
 const SELECTED_WORKSPACE_KEY = 'claude-desk:selected-workspace';
 const SIDEBAR_WIDTH_KEY = 'claude-desk:sidebar-width';
+const SHELL_DRAWER_HEIGHT_KEY = 'claude-desk:shell-drawer-height';
 const THREAD_LAST_READ_AT_KEY = 'claude-desk:last-read-at';
 const SIDEBAR_WIDTH_DEFAULT = 320;
 const SIDEBAR_WIDTH_MIN = 260;
 const SIDEBAR_WIDTH_MAX = 460;
+const SHELL_DRAWER_HEIGHT_DEFAULT = 280;
+const SHELL_DRAWER_HEIGHT_MIN = 220;
 const TERMINAL_LOG_BUFFER_CHARS = 280_000;
 const SNAPSHOT_BUFFER_MAX_CHARS = TERMINAL_LOG_BUFFER_CHARS;
 const TERMINAL_LOG_FLUSH_INTERVAL_MS = 16;
@@ -98,6 +102,8 @@ const MAX_ATTACHMENTS_PER_MESSAGE = 12;
 const MAX_HIDDEN_INJECTED_PROMPTS_PER_THREAD = 80;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
+const REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON =
+  'Send a message first to establish the session, then toggle Full access. To start with Full access, use New thread options and choose Full access thread.';
 
 function normalizeSettings(settings?: Settings | null): Settings {
   return {
@@ -721,6 +727,16 @@ function clampSidebarWidth(width: number): number {
   return Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, Math.round(width)));
 }
 
+function clampShellDrawerHeight(height: number, viewportHeight = window.innerHeight): number {
+  const safeViewportHeight = Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : 900;
+  const maxHeight = Math.min(
+    Math.round(safeViewportHeight * 0.82),
+    Math.max(0, safeViewportHeight - 160)
+  );
+  const effectiveMin = Math.min(SHELL_DRAWER_HEIGHT_MIN, maxHeight);
+  return Math.max(effectiveMin, Math.min(maxHeight, Math.round(height)));
+}
+
 function reorderWorkspacesByIds(currentWorkspaces: Workspace[], workspaceIds: string[]): Workspace[] {
   if (currentWorkspaces.length <= 1 || workspaceIds.length === 0) {
     return currentWorkspaces;
@@ -791,6 +807,17 @@ export default function App() {
   const [focusedTerminalKind, setFocusedTerminalKind] = useState<'claude' | 'shell' | null>(null);
   const [terminalSize, setTerminalSize] = useState({ cols: 120, rows: 32 });
   const [shellTerminalSize, setShellTerminalSize] = useState({ cols: 120, rows: 16 });
+  const [shellDrawerHeight, setShellDrawerHeight] = useState(() => {
+    const savedRaw = window.localStorage.getItem(SHELL_DRAWER_HEIGHT_KEY);
+    if (savedRaw !== null) {
+      const saved = Number(savedRaw);
+      if (Number.isFinite(saved)) {
+        return clampShellDrawerHeight(saved);
+      }
+    }
+    return SHELL_DRAWER_HEIGHT_DEFAULT;
+  });
+  const [isShellDrawerResizing, setIsShellDrawerResizing] = useState(false);
   const [lastTerminalLogByThread, setLastTerminalLogByThread] = useState<Record<string, string>>({});
   const [unreadOutputByThread, setUnreadOutputByThread] = useState<Record<string, boolean>>({});
   const [draftAttachmentsByThread, setDraftAttachmentsByThread] = useState<Record<string, string[]>>({});
@@ -839,6 +866,7 @@ export default function App() {
   const [fullAccessUpdating, setFullAccessUpdating] = useState(false);
   const [startingByThread, setStartingByThread] = useState<Record<string, boolean>>({});
   const [readyByThread, setReadyByThread] = useState<Record<string, boolean>>({});
+  const [hasInteractedByThread, setHasInteractedByThread] = useState<Record<string, boolean>>({});
   const [creatingThreadByWorkspace, setCreatingThreadByWorkspace] = useState<Record<string, boolean>>({});
   const [resumeFailureModal, setResumeFailureModal] = useState<{
     threadId: string;
@@ -857,6 +885,7 @@ export default function App() {
   const activeRunsByThreadRef = useRef(runStore.activeRunsByThread);
   const workingByThreadRef = useRef(runStore.workingByThread);
   const sidebarResizeStateRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const shellDrawerResizeStateRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const startingSessionByThreadRef = useRef<Record<string, PendingSessionStart>>({});
   const sessionStartRequestIdByThreadRef = useRef<Record<string, number>>({});
   const threadsByWorkspaceRef = useRef<Record<string, ThreadMetadata[]>>({});
@@ -876,6 +905,7 @@ export default function App() {
   const deletedThreadIdsRef = useRef<Record<string, true>>({});
   const creatingThreadByWorkspaceRef = useRef<Record<string, true>>({});
   const pendingInputByThreadRef = useRef<Record<string, string>>({});
+  const pendingSkillClearByThreadRef = useRef<Record<string, true>>({});
   const hiddenInjectedPromptsByThreadRef = useRef<Record<string, string[]>>({});
   const escapeSignalRef = useRef<{ sessionId: string; at: number } | null>(null);
   const pendingSnapshotBySessionRef = useRef<Record<string, PendingSnapshotHydration>>({});
@@ -938,6 +968,14 @@ export default function App() {
   const selectedSessionId = runStore.sessionForThread(selectedThreadId);
   const isSelectedThreadStarting = selectedThread ? Boolean(startingByThread[selectedThread.id]) : false;
   const isSelectedThreadReady = selectedThread ? Boolean(readyByThread[selectedThread.id]) : false;
+  const hasInteractedForSelectedThread = selectedThread ? Boolean(hasInteractedByThread[selectedThread.id]) : false;
+  const fullAccessToggleBlockedReason =
+    selectedThread &&
+    selectedWorkspace &&
+    isRemoteWorkspaceKind(selectedWorkspace.kind) &&
+    (isSelectedThreadStarting || !hasInteractedForSelectedThread)
+      ? REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON
+      : null;
 
   const selectedTerminalContent = useMemo(() => {
     if (!selectedThreadId) {
@@ -1221,6 +1259,10 @@ export default function App() {
   }, [sidebarWidth]);
 
   useEffect(() => {
+    window.localStorage.setItem(SHELL_DRAWER_HEIGHT_KEY, String(shellDrawerHeight));
+  }, [shellDrawerHeight]);
+
+  useEffect(() => {
     if (!isSidebarResizing) {
       return;
     }
@@ -1267,6 +1309,55 @@ export default function App() {
       window.removeEventListener('mouseup', finishResize);
     };
   }, [isSidebarResizing]);
+
+  useEffect(() => {
+    if (!isShellDrawerResizing) {
+      return;
+    }
+
+    const onMove = (clientY: number) => {
+      const state = shellDrawerResizeStateRef.current;
+      if (!state) {
+        return;
+      }
+      const safeClientY = Number.isFinite(clientY) ? clientY : state.startY;
+      const nextHeight = clampShellDrawerHeight(state.startHeight + (state.startY - safeClientY));
+      if (!Number.isFinite(nextHeight)) {
+        return;
+      }
+      setShellDrawerHeight(nextHeight);
+    };
+
+    const onPointerMove = (event: PointerEvent) => {
+      onMove(event.clientY);
+    };
+
+    const finishResize = () => {
+      shellDrawerResizeStateRef.current = null;
+      setIsShellDrawerResizing(false);
+    };
+
+    document.body.classList.add('shell-drawer-resizing');
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', finishResize);
+    window.addEventListener('pointercancel', finishResize);
+
+    return () => {
+      document.body.classList.remove('shell-drawer-resizing');
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', finishResize);
+      window.removeEventListener('pointercancel', finishResize);
+    };
+  }, [isShellDrawerResizing]);
+
+  useEffect(() => {
+    const clampToViewport = () => {
+      setShellDrawerHeight((current) => clampShellDrawerHeight(current));
+    };
+
+    window.addEventListener('resize', clampToViewport);
+    return () => window.removeEventListener('resize', clampToViewport);
+  }, []);
 
   const pushToast = useCallback((message: string, type: 'error' | 'info' = 'error') => {
     const id = todayId();
@@ -1656,6 +1747,18 @@ export default function App() {
     [sidebarWidth]
   );
 
+  const beginShellDrawerResize = useCallback(
+    (clientY: number) => {
+      const safeClientY = Number.isFinite(clientY) ? clientY : 0;
+      shellDrawerResizeStateRef.current = {
+        startY: safeClientY,
+        startHeight: shellDrawerHeight
+      };
+      setIsShellDrawerResizing(true);
+    },
+    [shellDrawerHeight]
+  );
+
   const startSidebarResize = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       if (typeof event.button === 'number' && event.button !== 0) {
@@ -1698,6 +1801,30 @@ export default function App() {
     setSelectedWorkspace(nextWorkspaceId);
   }, [setSelectedThread, setSelectedWorkspace]);
 
+  const primeRemoteThreadStartupOnSelection = useCallback(
+    (thread: ThreadMetadata | undefined, workspaceOverride?: Workspace | null) => {
+      if (!thread) {
+        return;
+      }
+
+      const workspace =
+        workspaceOverride ?? workspaces.find((candidate) => candidate.id === thread.workspaceId) ?? null;
+      if (!workspace || !isRemoteWorkspaceKind(workspace.kind)) {
+        return;
+      }
+      if ((sessionFailCountByThreadRef.current[thread.id] ?? 0) >= 3) {
+        return;
+      }
+      if (activeRunsByThreadRef.current[thread.id]?.sessionId || startingSessionByThreadRef.current[thread.id]) {
+        return;
+      }
+
+      setStartingByThread((current) => (current[thread.id] ? current : { ...current, [thread.id]: true }));
+      setReadyByThread((current) => removeThreadFlag(current, thread.id));
+    },
+    [workspaces]
+  );
+
   const refreshThreadsForWorkspace = useCallback(
     async (workspaceId: string) => {
       const threads = await listThreads(workspaceId);
@@ -1714,10 +1841,12 @@ export default function App() {
         (persistedThreadId && threads.some((thread) => thread.id === persistedThreadId) && persistedThreadId) ||
         threads[0]?.id;
 
+      const nextThread = threads.find((thread) => thread.id === nextThreadId);
+      primeRemoteThreadStartupOnSelection(nextThread);
       setSelectedThread(nextThreadId);
       return threads;
     },
-    [listThreads, setSelectedThread]
+    [listThreads, primeRemoteThreadStartupOnSelection, setSelectedThread]
   );
 
   const refreshSkillsForWorkspace = useCallback(async (workspace: Workspace) => {
@@ -1791,17 +1920,51 @@ export default function App() {
     setGitInfo(info);
   }, [selectedWorkspace]);
 
+  const clearThreadSkillsAfterSend = useCallback(
+    async (threadId: string) => {
+      delete pendingSkillClearByThreadRef.current[threadId];
+      const thread = Object.values(threadsByWorkspaceRef.current)
+        .flat()
+        .find((item) => item.id === threadId);
+      if (!thread || (thread.enabledSkills?.length ?? 0) === 0) {
+        return;
+      }
+
+      setSkillsUpdating(true);
+      try {
+        const updated = await setThreadSkills(thread.workspaceId, thread.id, []);
+        applyThreadUpdate(updated);
+      } catch (error) {
+        pushToast(`Failed to update skills: ${String(error)}`, 'error');
+      } finally {
+        setSkillsUpdating(false);
+      }
+    },
+    [applyThreadUpdate, pushToast, setThreadSkills]
+  );
+
   const flushPendingThreadInput = useCallback(async (threadId: string, sessionId: string) => {
     const pending = pendingInputByThreadRef.current[threadId];
     if (!pending) {
       return;
     }
+    const shouldClearSkills = Boolean(pendingSkillClearByThreadRef.current[threadId]);
     delete pendingInputByThreadRef.current[threadId];
     lastUserInputAtMsByThreadRef.current[threadId] = Date.now();
     lastUserInputSequenceByThreadRef.current[threadId] = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
     clearThreadUnread(threadId);
-    await api.terminalWrite(sessionId, pending);
-  }, [clearThreadUnread]);
+    try {
+      await api.terminalWrite(sessionId, pending);
+    } catch (error) {
+      if (shouldClearSkills) {
+        delete pendingSkillClearByThreadRef.current[threadId];
+      }
+      throw error;
+    }
+    if (shouldClearSkills) {
+      await clearThreadSkillsAfterSend(threadId);
+    }
+  }, [clearThreadUnread, clearThreadSkillsAfterSend]);
 
   const getThreadDraftInput = useCallback((threadId: string) => inputBufferByThreadRef.current[threadId] ?? '', []);
 
@@ -2221,6 +2384,7 @@ export default function App() {
       bumpSessionStartRequestId(threadId);
       delete startingSessionByThreadRef.current[threadId];
       delete pendingInputByThreadRef.current[threadId];
+      delete pendingSkillClearByThreadRef.current[threadId];
       setStartingByThread((current) => removeThreadFlag(current, threadId));
     },
     [bumpSessionStartRequestId]
@@ -2321,6 +2485,7 @@ export default function App() {
 
         const startedAt = new Date().toISOString();
         bindSession(thread.id, sessionId, startedAt);
+        setHasInteractedByThread((current) => removeThreadFlag(current, thread.id));
         sessionMetaBySessionIdRef.current[sessionId] = {
           threadId: thread.id,
           workspaceId: thread.workspaceId,
@@ -2538,15 +2703,19 @@ export default function App() {
     ]
   );
 
+  const closeWorkspaceShellDrawer = useCallback(() => {
+    invalidatePendingShellSessionStart(shellTerminalWorkspaceIdRef.current);
+    setShellDrawerOpen(false);
+    setFocusedTerminalKind((current) => (current === 'shell' ? null : current));
+  }, [invalidatePendingShellSessionStart]);
+
   const toggleWorkspaceShellDrawer = useCallback(() => {
     if (!selectedWorkspace) {
       return;
     }
 
     if (shellDrawerOpen && shellTerminalWorkspaceId === selectedWorkspace.id) {
-      invalidatePendingShellSessionStart(selectedWorkspace.id);
-      setShellDrawerOpen(false);
-      setFocusedTerminalKind((current) => (current === 'shell' ? null : current));
+      closeWorkspaceShellDrawer();
       return;
     }
 
@@ -2556,7 +2725,7 @@ export default function App() {
       pushToast(`Failed to start workspace terminal: ${String(error)}`, 'error');
     });
   }, [
-    invalidatePendingShellSessionStart,
+    closeWorkspaceShellDrawer,
     pushToast,
     selectedWorkspace,
     shellDrawerOpen,
@@ -2928,7 +3097,7 @@ export default function App() {
   );
 
   const onNewThreadInWorkspace = useCallback(
-    async (workspaceId: string) => {
+    async (workspaceId: string, options?: CreateThreadOptions) => {
       if (creatingThreadByWorkspaceRef.current[workspaceId]) {
         return;
       }
@@ -2956,9 +3125,10 @@ export default function App() {
         if (selectedWorkspaceIdRef.current !== workspaceId) {
           setSelectedWorkspace(workspaceId);
         }
-        const thread = await createThread(workspaceId);
+        const thread = await createThread(workspaceId, options);
         markThreadUserInput(workspaceId, thread.id);
         delete deletedThreadIdsRef.current[thread.id];
+        primeRemoteThreadStartupOnSelection(thread, workspace ?? null);
         setSelectedThread(thread.id);
         setTerminalFocusRequestId((current) => current + 1);
         await refreshThreadsForWorkspace(workspaceId);
@@ -2969,6 +3139,7 @@ export default function App() {
     [
       createThread,
       markThreadUserInput,
+      primeRemoteThreadStartupOnSelection,
       pushToast,
       refreshGitInfo,
       refreshThreadsForWorkspace,
@@ -3088,6 +3259,7 @@ export default function App() {
       delete lastUserInputSequenceByThreadRef.current[threadId];
       delete sessionFailCountByThreadRef.current[threadId];
       delete runLifecycleByThreadRef.current[threadId];
+      setHasInteractedByThread((current) => removeThreadFlag(current, threadId));
       updateTerminalLogMap((current) => {
         if (!(threadId in current)) return current;
         const next = { ...current };
@@ -3116,6 +3288,7 @@ export default function App() {
       clearThreadWorkingStopTimer,
       stopThreadWorking,
       setSelectedThread,
+      setHasInteractedByThread,
       updateTerminalLogMap
     ]
   );
@@ -3163,6 +3336,7 @@ export default function App() {
       runLifecycleByThreadRef.current[threadId] = markRunExited();
       setStartingByThread((current) => removeThreadFlag(current, threadId));
       setReadyByThread((current) => removeThreadFlag(current, threadId));
+      setHasInteractedByThread((current) => removeThreadFlag(current, threadId));
     },
     [
       finishSessionBinding,
@@ -3173,6 +3347,7 @@ export default function App() {
       updateTerminalLogMap,
       clearTerminalSessionTracking,
       clearThreadWorkingStopTimer,
+      setHasInteractedByThread,
     ]
   );
 
@@ -3205,10 +3380,12 @@ export default function App() {
       if (selectedWorkspaceIdRef.current !== workspaceId) {
         setSelectedWorkspace(workspaceId);
       }
+      const thread = (threadsByWorkspaceRef.current[workspaceId] ?? []).find((item) => item.id === threadId);
+      primeRemoteThreadStartupOnSelection(thread);
       setSelectedThread(threadId);
       setTerminalFocusRequestId((current) => current + 1);
     },
-    [clearThreadUnread, setSelectedThread, setSelectedWorkspace]
+    [clearThreadUnread, primeRemoteThreadStartupOnSelection, setSelectedThread, setSelectedWorkspace]
   );
 
   const restartThreadSession = useCallback(
@@ -3217,13 +3394,14 @@ export default function App() {
       if (selectedWorkspaceIdRef.current !== thread.workspaceId) {
         setSelectedWorkspace(thread.workspaceId);
       }
+      primeRemoteThreadStartupOnSelection(thread);
       setSelectedThread(thread.id);
       setResumeFailureModal(null);
       void ensureSessionForThread(thread).catch((error) => {
         pushToast(String(error), 'error');
       });
     },
-    [ensureSessionForThread, pushToast, setSelectedThread, setSelectedWorkspace, stopThreadSession]
+    [ensureSessionForThread, primeRemoteThreadStartupOnSelection, pushToast, setSelectedThread, setSelectedWorkspace, stopThreadSession]
   );
 
   const onStartFreshThreadSession = useCallback(
@@ -3839,6 +4017,30 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    let unlistenReady: (() => void) | null = null;
+
+    void onTerminalReady((event) => {
+      if (import.meta.env.DEV && import.meta.env.MODE !== 'test') {
+        console.debug('[terminal:ready]', event);
+      }
+    })
+      .then((off) => {
+        if (cancelled) {
+          off();
+          return;
+        }
+        unlistenReady = off;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      unlistenReady?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     let unlistenExit: (() => void) | null = null;
 
     void onTerminalExit((event: TerminalExitEvent) => {
@@ -4029,12 +4231,28 @@ export default function App() {
       return;
     }
 
+    const workspace = workspaces.find((item) => item.id === selectedThread.workspaceId) ?? null;
+    const hasInteractedThisSession =
+      (lastUserInputAtMsByThreadRef.current[selectedThread.id] ?? 0) >
+      (lastSessionStartAtMsByThreadRef.current[selectedThread.id] ?? 0);
+    if (
+      workspace &&
+      isRemoteWorkspaceKind(workspace.kind) &&
+      (
+        Boolean(startingByThread[selectedThread.id]) ||
+        Boolean(startingSessionByThreadRef.current[selectedThread.id]) ||
+        !hasInteractedThisSession
+      )
+    ) {
+      pushToast(REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON, 'info');
+      return;
+    }
+
     const nextValue = !selectedThread.fullAccess;
     const draftInput = getThreadDraftInput(selectedThread.id);
     setFullAccessUpdating(true);
     try {
       const updatedThread = await setThreadFullAccess(selectedThread.workspaceId, selectedThread.id, nextValue);
-      const workspace = workspaces.find((item) => item.id === updatedThread.workspaceId);
       if (workspace && isRemoteWorkspaceKind(workspace.kind)) {
         const switchedInPlace = await restartRdevClaudeInPlace(updatedThread);
         if (switchedInPlace) {
@@ -4054,6 +4272,7 @@ export default function App() {
       if (selectedWorkspaceIdRef.current !== updatedThread.workspaceId) {
         setSelectedWorkspace(updatedThread.workspaceId);
       }
+      primeRemoteThreadStartupOnSelection(updatedThread, workspace);
       setSelectedThread(updatedThread.id);
       const nextSessionId = await ensureSessionForThread(updatedThread);
       await waitForThreadReplayWindow(updatedThread.id, nextSessionId);
@@ -4068,6 +4287,8 @@ export default function App() {
     ensureSessionForThread,
     fullAccessUpdating,
     getThreadDraftInput,
+    startingByThread,
+    primeRemoteThreadStartupOnSelection,
     pushToast,
     replayThreadDraftInput,
     restartRdevClaudeInPlace,
@@ -4092,22 +4313,50 @@ export default function App() {
     [pushToast]
   );
 
-  const openWorkspaceInTerminal = useCallback(
-    (workspace: Workspace) => {
+  const launchWorkspaceInTerminal = useCallback(
+    async (workspace: Workspace): Promise<boolean> => {
       if (isRemoteWorkspaceKind(workspace.kind)) {
         const command =
           workspace.kind === 'rdev' ? workspace.rdevSshCommand?.trim() : workspace.sshCommand?.trim();
         if (!command) {
           pushToast('Missing remote shell command for this workspace.', 'error');
-          return;
+          return false;
         }
-        void api.openTerminalCommand(command);
-        return;
+        try {
+          await api.openTerminalCommand(command);
+          return true;
+        } catch (error) {
+          pushToast(`Failed to open terminal: ${String(error)}`, 'error');
+          return false;
+        }
       }
-      void api.openInTerminal(workspace.path);
+      try {
+        await api.openInTerminal(workspace.path);
+        return true;
+      } catch (error) {
+        pushToast(`Failed to open terminal: ${String(error)}`, 'error');
+        return false;
+      }
     },
     [pushToast]
   );
+
+  const openWorkspaceInTerminal = useCallback(
+    (workspace: Workspace) => {
+      void launchWorkspaceInTerminal(workspace);
+    },
+    [launchWorkspaceInTerminal]
+  );
+
+  const popOutWorkspaceShellToTerminal = useCallback(async () => {
+    if (!selectedWorkspace) {
+      return;
+    }
+    const opened = await launchWorkspaceInTerminal(selectedWorkspace);
+    if (opened) {
+      closeWorkspaceShellDrawer();
+    }
+  }, [closeWorkspaceShellDrawer, launchWorkspaceInTerminal, selectedWorkspace]);
 
   const copyResumeCommand = useCallback(
     (thread: ThreadMetadata) => {
@@ -4175,6 +4424,7 @@ export default function App() {
         if (selectedWorkspaceIdRef.current !== importSessionWorkspace.id) {
           setSelectedWorkspace(importSessionWorkspace.id);
         }
+        primeRemoteThreadStartupOnSelection(importedThread, importSessionWorkspace);
         setSelectedThread(importedThread.id);
         setTerminalFocusRequestId((current) => current + 1);
         await refreshThreadsForWorkspace(importSessionWorkspace.id);
@@ -4189,6 +4439,7 @@ export default function App() {
     [
       applyThreadUpdate,
       importSessionWorkspace,
+      primeRemoteThreadStartupOnSelection,
       pushToast,
       refreshThreadsForWorkspace,
       setSelectedThread,
@@ -4318,6 +4569,18 @@ export default function App() {
         }
         return changed ? next : current;
       });
+      setHasInteractedByThread((current) => {
+        let changed = false;
+        const next = { ...current };
+        for (const threadId of threadIds) {
+          if (!(threadId in next)) {
+            continue;
+          }
+          delete next[threadId];
+          changed = true;
+        }
+        return changed ? next : current;
+      });
 
       if (threadIds.includes(selectedThreadIdRef.current ?? '')) {
         setSelectedThread(undefined);
@@ -4333,6 +4596,7 @@ export default function App() {
       refreshWorkspaces,
       clearThreadWorkingStopTimer,
       setSelectedThread,
+      setHasInteractedByThread,
       stopShellSessionForWorkspace,
       stopThreadWorking,
       stopSessionsForWorkspace,
@@ -4477,6 +4741,9 @@ export default function App() {
                   lastUserInputSequenceByThreadRef.current[selectedThread.id] =
                     latestOutputSequenceByThreadRef.current[selectedThread.id] ?? 0;
                   sessionFailCountByThreadRef.current[selectedThread.id] = 0;
+                  setHasInteractedByThread((current) =>
+                    current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
+                  );
                   clearThreadUnread(selectedThread.id);
                 }
 
@@ -4504,6 +4771,7 @@ export default function App() {
                       );
                     }
                   }
+                  const shouldClearSkills = activeSkills.length > 0;
 
                   const attachmentPromptText = attachmentDraft.length > 0
                     ? buildAttachmentPrompt(attachmentDraft)
@@ -4525,6 +4793,9 @@ export default function App() {
                           : `${data}${hiddenPromptBlocks.join('')}`;
 
                     if (isSelectedThreadStarting || !selectedSessionId) {
+                      if (shouldClearSkills) {
+                        pendingSkillClearByThreadRef.current[selectedThread.id] = true;
+                      }
                       pendingInputByThreadRef.current[selectedThread.id] =
                         `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
                       void ensureSessionForThread(selectedThread);
@@ -4535,11 +4806,18 @@ export default function App() {
                       clearThreadWorkingStopTimer(selectedThread.id);
                       startThreadWorking(selectedThread.id);
                       scheduleThreadWorkingStop(selectedThread.id, THREAD_WORKING_STUCK_TIMEOUT_MS);
-                      void api.terminalWrite(sessionId, outboundData);
+                      void api.terminalWrite(sessionId, outboundData).then((wrote) => {
+                        if (wrote && shouldClearSkills) {
+                          void clearThreadSkillsAfterSend(selectedThread.id);
+                        }
+                      });
                       return;
                     }
 
                     // Session vanished between the start of onData and now.
+                    if (shouldClearSkills) {
+                      pendingSkillClearByThreadRef.current[selectedThread.id] = true;
+                    }
                     pendingInputByThreadRef.current[selectedThread.id] =
                       `${pendingInputByThreadRef.current[selectedThread.id] ?? ''}${outboundData}`;
                     void ensureSessionForThread(selectedThread);
@@ -4608,6 +4886,7 @@ export default function App() {
           onRemoveAttachmentPath={removeSelectedThreadAttachmentPath}
           onClearAttachmentPaths={clearSelectedThreadAttachmentDraft}
           onToggleFullAccess={toggleFullAccess}
+          fullAccessToggleBlockedReason={fullAccessToggleBlockedReason}
           onLoadBranchSwitcher={onLoadBranchSwitcher}
           onCheckoutBranch={onCheckoutBranch}
         />
@@ -4616,14 +4895,13 @@ export default function App() {
           workspace={selectedWorkspace}
           sessionId={shellTerminalSessionId}
           content={shellTerminalContent}
+          height={shellDrawerHeight}
           starting={shellTerminalStarting}
           focusRequestId={shellTerminalFocusRequestId}
           repairRequestId={shellTerminalRepairRequestId}
-          onClose={() => {
-            invalidatePendingShellSessionStart(shellTerminalWorkspaceIdRef.current);
-            setShellDrawerOpen(false);
-            setFocusedTerminalKind((current) => (current === 'shell' ? null : current));
-          }}
+          onClose={closeWorkspaceShellDrawer}
+          onStartResize={beginShellDrawerResize}
+          onOpenInTerminal={popOutWorkspaceShellToTerminal}
           onData={(data) => {
             if (!shellTerminalSessionId) {
               return;

@@ -192,6 +192,7 @@ const mocks = vi.hoisted(() => {
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
+    onTerminalReady: vi.fn(async () => () => undefined),
     onTerminalExit: vi.fn(async () => () => undefined),
     onThreadUpdated: vi.fn(async () => () => undefined)
   };
@@ -202,6 +203,7 @@ vi.mock('../../src/lib/api', () => ({
   onRunStream: mocks.onRunStream,
   onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
+  onTerminalReady: mocks.onTerminalReady,
   onTerminalExit: mocks.onTerminalExit,
   onThreadUpdated: mocks.onThreadUpdated
 }));
@@ -222,12 +224,16 @@ vi.mock('../../src/components/WorkspaceShellDrawer', () => ({
     sessionId?: string | null;
     starting?: boolean;
     onClose: () => void;
+    onOpenInTerminal?: () => void;
   }) =>
     props.open ? (
       <section data-testid="workspace-shell-drawer">
         <span>{props.workspace?.name ?? 'No workspace'}</span>
         <span>{props.sessionId ?? 'pending'}</span>
         <span>{String(Boolean(props.starting))}</span>
+        <button type="button" onClick={props.onOpenInTerminal}>
+          open-external-shell
+        </button>
         <button type="button" onClick={props.onClose}>
           close-shell
         </button>
@@ -479,5 +485,31 @@ describe('Workspace shell lifecycle', () => {
     });
 
     expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('shell-session-ws1-restarted');
+  });
+
+  it('opens the workspace shell in Terminal.app and closes the drawer', async () => {
+    const user = userEvent.setup();
+    mocks.api.workspaceShellStartSession.mockResolvedValueOnce({
+      sessionId: 'shell-session-ws1'
+    });
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Alpha thread/i });
+    await user.click(screen.getByRole('button', { name: 'Terminal' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('Workspace One');
+      expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('shell-session-ws1');
+    });
+
+    await user.click(screen.getByRole('button', { name: 'open-external-shell' }));
+
+    await waitFor(() => {
+      expect(mocks.api.openInTerminal).toHaveBeenCalledWith('/tmp/workspace-one');
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId('workspace-shell-drawer')).not.toBeInTheDocument();
+    });
   });
 });

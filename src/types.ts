@@ -35,6 +35,10 @@ export interface ThreadMetadata {
   lastNewSessionAt?: string | null;
 }
 
+export interface CreateThreadOptions {
+  fullAccess?: boolean;
+}
+
 export interface TranscriptEntry {
   id: string;
   role: 'user' | 'assistant' | 'system';
@@ -131,6 +135,11 @@ export interface TerminalDataEvent {
   threadId?: string | null;
   data: string;
   sequence?: number;
+}
+
+export interface TerminalReadyEvent {
+  sessionId: string;
+  threadId?: string | null;
 }
 
 export interface TerminalExitEvent {

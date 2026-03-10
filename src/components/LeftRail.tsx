@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { api } from '../lib/api';
-import type { ThreadMetadata, Workspace } from '../types';
+import type { CreateThreadOptions, ThreadMetadata, Workspace } from '../types';
 
 interface LeftRailProps {
   sidebarWidth: number;
@@ -15,7 +15,7 @@ interface LeftRailProps {
   getThreadDisplayTimestampMs: (thread: ThreadMetadata) => number;
   onOpenWorkspacePicker: () => void;
   onOpenSettings: () => void;
-  onNewThreadInWorkspace: (workspaceId: string) => Promise<void>;
+  onNewThreadInWorkspace: (workspaceId: string, options?: CreateThreadOptions) => Promise<void>;
   onThreadSearchChange: (value: string) => void;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onRenameThread: (workspaceId: string, threadId: string, title: string) => Promise<void>;
@@ -43,9 +43,16 @@ interface WorkspaceContextMenuState {
   y: number;
 }
 
+interface NewThreadMenuState {
+  workspaceId: string;
+  x: number;
+  y: number;
+}
+
 const CONTEXT_MENU_WIDTH = 220;
 const THREAD_CONTEXT_MENU_HEIGHT = 152;
 const WORKSPACE_CONTEXT_MENU_HEIGHT = 250;
+const NEW_THREAD_CONTEXT_MENU_HEIGHT = 88;
 const CONTEXT_MENU_MARGIN = 8;
 const WIKI_URL = 'https://linkedin.atlassian.net/wiki/spaces/ENGS/pages/1388347470/Claude+Desk';
 
@@ -88,6 +95,14 @@ function PlusIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m7 10 5 5 5-5" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
     </svg>
   );
 }
@@ -427,9 +442,11 @@ function LeftRailComponent({
   const [editingOriginal, setEditingOriginal] = React.useState('');
   const [contextMenu, setContextMenu] = React.useState<ThreadContextMenuState | null>(null);
   const [workspaceContextMenu, setWorkspaceContextMenu] = React.useState<WorkspaceContextMenuState | null>(null);
+  const [newThreadMenu, setNewThreadMenu] = React.useState<NewThreadMenuState | null>(null);
   const [expandedWorkspaceIds, setExpandedWorkspaceIds] = React.useState<Record<string, boolean>>({});
   const contextMenuRef = React.useRef<HTMLDivElement | null>(null);
   const workspaceContextMenuRef = React.useRef<HTMLDivElement | null>(null);
+  const newThreadMenuRef = React.useRef<HTMLDivElement | null>(null);
   const renderCountRef = React.useRef(0);
   renderCountRef.current += 1;
 
@@ -441,24 +458,27 @@ function LeftRailComponent({
   }, []);
 
   React.useEffect(() => {
-    if (!contextMenu && !workspaceContextMenu) {
+    if (!contextMenu && !workspaceContextMenu && !newThreadMenu) {
       return;
     }
 
     const closeMenu = (event: Event) => {
       if (
         contextMenuRef.current?.contains(event.target as Node) ||
-        workspaceContextMenuRef.current?.contains(event.target as Node)
+        workspaceContextMenuRef.current?.contains(event.target as Node) ||
+        newThreadMenuRef.current?.contains(event.target as Node)
       ) {
         return;
       }
       setContextMenu(null);
       setWorkspaceContextMenu(null);
+      setNewThreadMenu(null);
     };
     const onEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setContextMenu(null);
         setWorkspaceContextMenu(null);
+        setNewThreadMenu(null);
       }
     };
 
@@ -471,7 +491,7 @@ function LeftRailComponent({
       window.removeEventListener('scroll', closeMenu, true);
       window.removeEventListener('keydown', onEscape);
     };
-  }, [contextMenu, workspaceContextMenu]);
+  }, [contextMenu, newThreadMenu, workspaceContextMenu]);
 
   React.useEffect(() => {
     setExpandedWorkspaceIds((current) => {
@@ -538,6 +558,18 @@ function LeftRailComponent({
     void api.openExternalUrl(WIKI_URL).catch(() => {
       window.open(WIKI_URL, '_blank', 'noopener,noreferrer');
     });
+  }, []);
+
+  const openNewThreadMenu = React.useCallback((workspaceId: string, x: number, y: number) => {
+    const position = clampMenuCoordinate(
+      x,
+      y,
+      CONTEXT_MENU_WIDTH,
+      NEW_THREAD_CONTEXT_MENU_HEIGHT
+    );
+    setContextMenu(null);
+    setWorkspaceContextMenu(null);
+    setNewThreadMenu({ workspaceId, ...position });
   }, []);
 
   return (
@@ -751,21 +783,42 @@ function LeftRailComponent({
 
                   {!isExpanded ? null : (
                     <div className="workspace-group-children">
-                      <button
-                        type="button"
-                        className="workspace-new-thread-row"
-                        data-testid={`workspace-new-thread-${workspace.id}`}
-                        disabled={isCreatingThread}
-                        aria-busy={isCreatingThread}
-                        onClick={async () => {
-                          await onNewThreadInWorkspace(workspace.id);
-                        }}
-                      >
-                        <span className="workspace-new-thread-icon" aria-hidden="true">
-                          <PlusIcon />
-                        </span>
-                        <span>New thread</span>
-                      </button>
+                      <div className="workspace-new-thread-row-group">
+                        <button
+                          type="button"
+                          className="workspace-new-thread-row workspace-new-thread-main"
+                          data-testid={`workspace-new-thread-${workspace.id}`}
+                          disabled={isCreatingThread}
+                          aria-busy={isCreatingThread}
+                          onClick={async () => {
+                            setNewThreadMenu(null);
+                            await onNewThreadInWorkspace(workspace.id);
+                          }}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            openNewThreadMenu(workspace.id, event.clientX, event.clientY);
+                          }}
+                        >
+                          <span className="workspace-new-thread-icon" aria-hidden="true">
+                            <PlusIcon />
+                          </span>
+                          <span>New thread</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="workspace-new-thread-options-button"
+                          data-testid={`workspace-new-thread-options-${workspace.id}`}
+                          aria-label="New thread options"
+                          title="New thread options"
+                          disabled={isCreatingThread}
+                          onClick={(event) => {
+                            const rect = event.currentTarget.getBoundingClientRect();
+                            openNewThreadMenu(workspace.id, rect.right - CONTEXT_MENU_WIDTH, rect.bottom + 8);
+                          }}
+                        >
+                          <ChevronDownIcon />
+                        </button>
+                      </div>
                       {visibleThreads.length > 0 ? (
                         <ul className="workspace-thread-list">
                           {visibleThreads.map((thread) => {
@@ -930,6 +983,35 @@ function LeftRailComponent({
             }}
           >
             Remove project
+          </button>
+        </div>
+      ) : null}
+
+      {newThreadMenu ? (
+        <div
+          className="thread-context-menu"
+          ref={newThreadMenuRef}
+          style={{ left: newThreadMenu.x, top: newThreadMenu.y }}
+        >
+          <button
+            type="button"
+            onClick={async () => {
+              const workspaceId = newThreadMenu.workspaceId;
+              setNewThreadMenu(null);
+              await onNewThreadInWorkspace(workspaceId);
+            }}
+          >
+            Normal thread
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              const workspaceId = newThreadMenu.workspaceId;
+              setNewThreadMenu(null);
+              await onNewThreadInWorkspace(workspaceId, { fullAccess: true });
+            }}
+          >
+            Full access thread
           </button>
         </div>
       ) : null}

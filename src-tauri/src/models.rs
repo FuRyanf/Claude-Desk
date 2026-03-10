@@ -238,6 +238,13 @@ pub struct TerminalDataEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TerminalReadyEvent {
+    pub session_id: String,
+    pub thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TerminalExitEvent {
     pub session_id: String,
     pub code: Option<i32>,
