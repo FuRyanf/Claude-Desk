@@ -833,6 +833,8 @@ export default function App() {
   const [shellTerminalStarting, setShellTerminalStarting] = useState(false);
   const [shellTerminalFocusRequestId, setShellTerminalFocusRequestId] = useState(0);
   const [shellTerminalRepairRequestId, setShellTerminalRepairRequestId] = useState(0);
+  const [terminalSearchToggleRequestId, setTerminalSearchToggleRequestId] = useState(0);
+  const [shellTerminalSearchToggleRequestId, setShellTerminalSearchToggleRequestId] = useState(0);
 
   const [settings, setSettings] = useState<Settings>(() =>
     normalizeSettings({
@@ -4085,6 +4087,17 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && key === 'f' && focusedTerminalKind) {
+        event.preventDefault();
+        if (focusedTerminalKind === 'shell') {
+          setShellTerminalSearchToggleRequestId((current) => current + 1);
+        } else {
+          setTerminalSearchToggleRequestId((current) => current + 1);
+        }
+        return;
+      }
+
       if (shouldIgnoreGlobalTerminalShortcutTarget(event.target)) {
         return;
       }
@@ -4095,7 +4108,6 @@ export default function App() {
           : focusedTerminalKind === 'claude'
             ? selectedSessionId
             : null;
-      const key = event.key.toLowerCase();
 
       if (focusedSessionId && event.ctrlKey && !event.metaKey && !event.altKey && key === 'c') {
         event.preventDefault();
@@ -4709,6 +4721,7 @@ export default function App() {
               }
               focusRequestId={terminalFocusRequestId}
               repairRequestId={terminalRepairRequestId}
+              searchToggleRequestId={terminalSearchToggleRequestId}
               onData={(data) => {
                 if (!selectedThread) {
                   return;
@@ -4899,6 +4912,7 @@ export default function App() {
           starting={shellTerminalStarting}
           focusRequestId={shellTerminalFocusRequestId}
           repairRequestId={shellTerminalRepairRequestId}
+          searchToggleRequestId={shellTerminalSearchToggleRequestId}
           onClose={closeWorkspaceShellDrawer}
           onStartResize={beginShellDrawerResize}
           onOpenInTerminal={popOutWorkspaceShellToTerminal}

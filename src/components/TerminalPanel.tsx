@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type FocusEvent as ReactFocusEvent } from 'react';
 
 import 'xterm/css/xterm.css';
 import { FitAddon } from 'xterm-addon-fit';
+import { SearchAddon, type ISearchOptions } from 'xterm-addon-search';
 import { WebLinksAddon } from 'xterm-addon-web-links';
 import { Terminal } from 'xterm';
 import { api } from '../lib/api';
@@ -29,6 +30,15 @@ const MULTILINE_ENTER_SEQUENCE = '\x1b\r';
 const MULTILINE_ENTER_DUPLICATE_SUPPRESSION_MS = 64;
 const DECTCEM_HIDE = '\x1b[?25l';
 const DECTCEM_SHOW = '\x1b[?25h';
+const TERMINAL_SEARCH_HIGHLIGHT_LIMIT = 500;
+const TERMINAL_SEARCH_DECORATIONS: NonNullable<ISearchOptions['decorations']> = {
+  matchBackground: '#27415d',
+  matchBorder: '#5e83b5',
+  matchOverviewRuler: '#4f79ac',
+  activeMatchBackground: '#8fb7ff',
+  activeMatchBorder: '#d6e6ff',
+  activeMatchColorOverviewRuler: '#8fb7ff'
+};
 
 interface PendingRepairState {
   preserveViewport: boolean;
@@ -47,6 +57,7 @@ interface TerminalPanelProps {
   overlayMessage?: string;
   focusRequestId?: number;
   repairRequestId?: number;
+  searchToggleRequestId?: number;
   onData?: (data: string) => void;
   onResize?: (cols: number, rows: number) => void;
   onFocusChange?: (focused: boolean) => void;
@@ -64,6 +75,7 @@ export function TerminalPanel({
   overlayMessage,
   focusRequestId = 0,
   repairRequestId = 0,
+  searchToggleRequestId = 0,
   onData,
   onResize,
   onFocusChange
@@ -74,9 +86,18 @@ export function TerminalPanel({
       !(globalThis as { __CLAUDE_DESK_ENABLE_XTERM_TESTS__?: boolean }).__CLAUDE_DESK_ENABLE_XTERM_TESTS__
   );
   const [followOutputPaused, setFollowOutputPaused] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResultCount, setSearchResultCount] = useState(0);
+  const [searchResultIndex, setSearchResultIndex] = useState(-1);
   const [terminalInstanceVersion, setTerminalInstanceVersion] = useState(0);
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
+  const searchAddonRef = useRef<SearchAddon | null>(null);
+  const searchDecorationsEnabledRef = useRef(true);
+  const searchOpenRef = useRef(searchOpen);
+  const searchQueryRef = useRef(searchQuery);
   const contentRef = useRef(content);
   const contentByteCountRef = useRef(contentByteCount ?? content.length);
   const contentGenerationRef = useRef(contentGeneration ?? 0);
@@ -104,6 +125,7 @@ export function TerminalPanel({
   const refreshFrameRef = useRef<number | null>(null);
   const previousFocusRequestRef = useRef(focusRequestId);
   const previousRepairRequestRef = useRef(repairRequestId);
+  const previousSearchToggleRequestRef = useRef(searchToggleRequestId);
   const lastQueueWarningAtRef = useRef(0);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const fitWithReflowRef = useRef<(() => void) | null>(null);
@@ -128,6 +150,68 @@ export function TerminalPanel({
   const syncFollowOutputPaused = useCallback((nextPaused: boolean) => {
     setFollowOutputPaused((current) => (current === nextPaused ? current : nextPaused));
   }, []);
+
+  const clearSearchResults = useCallback(() => {
+    searchAddonRef.current?.clearActiveDecoration?.();
+    searchAddonRef.current?.clearDecorations?.();
+    setSearchResultCount(0);
+    setSearchResultIndex(-1);
+  }, []);
+
+  const runTerminalSearch = useCallback(
+    (query: string, direction: 'next' | 'previous', incremental = false) => {
+      if (!query) {
+        clearSearchResults();
+        return false;
+      }
+
+      const searchAddon = searchAddonRef.current;
+      if (!searchAddon) {
+        return false;
+      }
+
+      const runWithOptions = (options: ISearchOptions) =>
+        direction === 'previous' ? searchAddon.findPrevious(query, options) : searchAddon.findNext(query, options);
+
+      try {
+        return runWithOptions(
+          searchDecorationsEnabledRef.current
+            ? {
+                incremental,
+                decorations: TERMINAL_SEARCH_DECORATIONS
+              }
+            : { incremental }
+        );
+      } catch (error) {
+        if (!searchDecorationsEnabledRef.current) {
+          clearSearchResults();
+          return false;
+        }
+
+        searchDecorationsEnabledRef.current = false;
+        console.error('[terminal-search] disabling decorations after addon failure', error);
+        setSearchResultCount(0);
+        setSearchResultIndex(-1);
+
+        try {
+          return runWithOptions({ incremental });
+        } catch (retryError) {
+          console.error('[terminal-search] search failed', retryError);
+          clearSearchResults();
+          return false;
+        }
+      }
+    },
+    [clearSearchResults]
+  );
+
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    clearSearchResults();
+    window.requestAnimationFrame(() => {
+      terminalRef.current?.focus();
+    });
+  }, [clearSearchResults]);
 
   const scrollToBottomSoon = useCallback((term: Terminal) => {
     if (!shouldAutoFollow(followStateRef.current)) {
@@ -430,6 +514,7 @@ export function TerminalPanel({
       const term = new Terminal({
         cursorBlink: false,
         convertEol: false,
+        allowProposedApi: true,
         scrollback: 10_000,
         fontFamily: '"SF Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace',
         fontSize: 14,
@@ -462,8 +547,11 @@ export function TerminalPanel({
         disableStdin: readOnly || !inputEnabled
       });
       const fitAddon = new FitAddon();
+      const searchAddon = new SearchAddon({ highlightLimit: TERMINAL_SEARCH_HIGHLIGHT_LIMIT });
       fitAddonRef.current = fitAddon;
+      searchAddonRef.current = searchAddon;
       term.loadAddon(fitAddon);
+      term.loadAddon(searchAddon);
       term.loadAddon(new WebLinksAddon(openExternalLink));
       term.open(host);
       if (!cursorVisibleRef.current) {
@@ -616,6 +704,14 @@ export function TerminalPanel({
 
         pendingRepairStateRef.current = null;
         scheduleTerminalRefresh(term);
+        if (searchOpenRef.current && searchQueryRef.current) {
+          window.requestAnimationFrame(() => {
+            if (terminalRef.current !== term) {
+              return;
+            }
+            runTerminalSearch(searchQueryRef.current, 'next', true);
+          });
+        }
       };
 
       // Synchronous best-effort fit (renderer may not have dims yet — that's OK).
@@ -742,10 +838,10 @@ export function TerminalPanel({
         viewport.addEventListener('pointerleave', clearViewportScrollIntent);
       }
 
-      const onFocusIn = () => onFocusChangeRef.current?.(true);
-      const onFocusOut = () => onFocusChangeRef.current?.(false);
-      host.addEventListener('focusin', onFocusIn);
-      host.addEventListener('focusout', onFocusOut);
+      const searchResultsDisposable = searchAddon.onDidChangeResults(({ resultCount, resultIndex }) => {
+        setSearchResultCount(resultCount);
+        setSearchResultIndex(resultCount > 0 ? resultIndex : -1);
+      });
 
       const observer = new ResizeObserver(() => {
         if (resizeFrameRef.current !== null) {
@@ -763,8 +859,7 @@ export function TerminalPanel({
         onDataDisposable.dispose();
         onScrollDisposable.dispose();
         host.removeEventListener('wheel', onWheel);
-        host.removeEventListener('focusin', onFocusIn);
-        host.removeEventListener('focusout', onFocusOut);
+        searchResultsDisposable.dispose();
         if (viewport) {
           viewport.removeEventListener('pointerdown', onViewportPointerDown);
           viewport.removeEventListener('pointerup', clearViewportScrollIntent);
@@ -775,6 +870,7 @@ export function TerminalPanel({
         flushOutgoingInput();
         fitAddonRef.current = null;
         fitAddon.dispose();
+        searchAddon.dispose();
         writeQueueRef.current.setSink(null);
         writeQueueRef.current.clear();
         bulkWritingRef.current = false;
@@ -804,6 +900,7 @@ export function TerminalPanel({
           window.cancelAnimationFrame(scrollRafRef.current);
           scrollRafRef.current = null;
         }
+        searchAddonRef.current = null;
       };
     } catch {
       setFallback(true);
@@ -821,12 +918,48 @@ export function TerminalPanel({
     scrollToBottomSoon,
     scheduleOutgoingInputFlush,
     syncFollowOutputPaused,
-    terminalInstanceVersion
+    terminalInstanceVersion,
+    runTerminalSearch
   ]);
 
   useEffect(() => {
     writeQueueRef.current.setMaxBatchBytes(followOutputPaused ? OUTPUT_BATCH_BYTES_INTERACTIVE : OUTPUT_BATCH_BYTES);
   }, [followOutputPaused]);
+
+  useEffect(() => {
+    searchOpenRef.current = searchOpen;
+    searchQueryRef.current = searchQuery;
+  }, [searchOpen, searchQuery]);
+
+  useEffect(() => {
+    if (!searchOpen) {
+      return;
+    }
+    const handle = window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+    return () => {
+      window.cancelAnimationFrame(handle);
+    };
+  }, [searchOpen]);
+
+  useEffect(() => {
+    if (!searchOpen) {
+      clearSearchResults();
+      return;
+    }
+    if (fallback) {
+      setSearchResultCount(searchQuery ? 1 : 0);
+      setSearchResultIndex(searchQuery ? 0 : -1);
+      return;
+    }
+    if (!searchQuery) {
+      clearSearchResults();
+      return;
+    }
+    runTerminalSearch(searchQuery, 'next', true);
+  }, [clearSearchResults, fallback, runTerminalSearch, searchOpen, searchQuery]);
 
   useEffect(() => {
     readOnlyRef.current = readOnly;
@@ -888,6 +1021,23 @@ export function TerminalPanel({
     renderedGenerationRef.current = contentGeneration ?? 0;
     scheduleTerminalRefresh(term);
   }, [clearPendingWrites, clearScheduledStreamRepair, resetTerminalContent, scheduleTerminalRefresh, sessionId, syncFollowOutputPaused]);
+
+  useEffect(() => {
+    if (previousSearchToggleRequestRef.current === searchToggleRequestId) {
+      return;
+    }
+    previousSearchToggleRequestRef.current = searchToggleRequestId;
+    setSearchOpen((current) => {
+      const next = !current;
+      if (!next) {
+        clearSearchResults();
+        window.requestAnimationFrame(() => {
+          terminalRef.current?.focus();
+        });
+      }
+      return next;
+    });
+  }, [clearSearchResults, searchToggleRequestId]);
 
   useEffect(() => {
     const term = terminalRef.current;
@@ -1021,9 +1171,68 @@ export function TerminalPanel({
     scheduleTerminalRefresh(term);
   }, [scheduleTerminalRefresh, scrollToBottomSoon, syncFollowOutputPaused]);
 
+  const handlePanelFocusCapture = useCallback(() => {
+    onFocusChangeRef.current?.(true);
+  }, []);
+
+  const handlePanelBlurCapture = useCallback((event: ReactFocusEvent<HTMLElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+      return;
+    }
+    onFocusChangeRef.current?.(false);
+  }, []);
+
+  const searchResultLabel =
+    searchResultCount > 0
+      ? `${Math.max(1, searchResultIndex + 1)} / ${searchResultCount}`
+      : searchQuery
+        ? '0 results'
+        : 'Find';
+
   if (fallback) {
     return (
-      <section className="terminal-panel">
+      <section
+        className={searchOpen ? 'terminal-panel terminal-panel-search-open' : 'terminal-panel'}
+        onFocusCapture={handlePanelFocusCapture}
+        onBlurCapture={handlePanelBlurCapture}
+      >
+        {searchOpen ? (
+          <div className="terminal-search" data-testid="terminal-search">
+            <div className="terminal-search-input-wrap">
+              <input
+                ref={searchInputRef}
+                type="search"
+                className="terminal-search-input"
+                data-testid="terminal-search-input"
+                aria-label="Search terminal"
+                placeholder="Search terminal"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    closeSearch();
+                  }
+                }}
+              />
+            </div>
+            <span className="terminal-search-count" data-testid="terminal-search-count">
+              Renderer fallback
+            </span>
+            <button
+              type="button"
+              className="terminal-search-button"
+              data-testid="terminal-search-close"
+              aria-label="Close search"
+              onClick={closeSearch}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m6 6 12 12M18 6 6 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+              </svg>
+            </button>
+          </div>
+        ) : null}
         <pre className="terminal-fallback">{content}</pre>
         {overlayMessage ? <div className="terminal-overlay">{overlayMessage}</div> : null}
       </section>
@@ -1031,8 +1240,84 @@ export function TerminalPanel({
   }
 
   return (
-    <section className="terminal-panel">
+    <section
+      className={searchOpen ? 'terminal-panel terminal-panel-search-open' : 'terminal-panel'}
+      onFocusCapture={handlePanelFocusCapture}
+      onBlurCapture={handlePanelBlurCapture}
+    >
       <div ref={hostRef} className="terminal-host" />
+      {searchOpen ? (
+        <div className="terminal-search" data-testid="terminal-search">
+          <div className="terminal-search-input-wrap">
+            <input
+              ref={searchInputRef}
+              type="search"
+              className="terminal-search-input"
+              data-testid="terminal-search-input"
+              aria-label="Search terminal"
+              placeholder="Search terminal"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              onBlur={() => {
+                searchAddonRef.current?.clearActiveDecoration?.();
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  closeSearch();
+                  return;
+                }
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  runTerminalSearch(searchQuery, event.shiftKey ? 'previous' : 'next');
+                }
+              }}
+            />
+          </div>
+          <span className="terminal-search-count" data-testid="terminal-search-count">
+            {searchResultLabel}
+          </span>
+          <button
+            type="button"
+            className="terminal-search-button"
+            data-testid="terminal-search-prev"
+            aria-label="Previous match"
+            disabled={!searchQuery}
+            onClick={() => {
+              runTerminalSearch(searchQuery, 'previous');
+            }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m15 7-5 5 5 5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="terminal-search-button"
+            data-testid="terminal-search-next"
+            aria-label="Next match"
+            disabled={!searchQuery}
+            onClick={() => {
+              runTerminalSearch(searchQuery, 'next');
+            }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m9 7 5 5-5 5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="terminal-search-button"
+            data-testid="terminal-search-close"
+            aria-label="Close search"
+            onClick={closeSearch}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6 6 12 12M18 6 6 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+      ) : null}
       {followOutputPaused ? (
         <div className="terminal-controls">
           <button type="button" className="terminal-follow-button" onClick={jumpToLatest}>

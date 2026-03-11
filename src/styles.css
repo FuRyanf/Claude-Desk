@@ -2371,6 +2371,114 @@ body.shell-drawer-resizing {
   pointer-events: none;
 }
 
+.terminal-search {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  border: 1px solid rgba(112, 137, 184, 0.72);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(11, 21, 39, 0.97), rgba(8, 16, 31, 0.95)),
+    rgba(8, 16, 31, 0.96);
+  box-shadow:
+    0 18px 36px rgba(4, 9, 17, 0.44),
+    inset 0 1px 0 rgba(209, 221, 245, 0.08);
+  padding: 8px 10px;
+}
+
+.terminal-search-input-wrap {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
+.terminal-search-input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid rgba(88, 108, 144, 0.78);
+  border-radius: 10px;
+  background: rgba(6, 12, 24, 0.92);
+  color: #edf4ff;
+  font: inherit;
+  line-height: 1.2;
+  padding: 8px 11px;
+  outline: none;
+  transition: border-color var(--motion-fast), box-shadow var(--motion-fast), background-color var(--motion-fast);
+}
+
+.terminal-search-input::placeholder {
+  color: rgba(205, 216, 235, 0.5);
+}
+
+.terminal-search-input:hover {
+  border-color: rgba(117, 142, 189, 0.9);
+}
+
+.terminal-search-input:focus {
+  border-color: rgba(147, 174, 231, 0.98);
+  box-shadow: 0 0 0 3px rgba(96, 130, 214, 0.24);
+  background: rgba(5, 11, 22, 0.98);
+}
+
+.terminal-search-count {
+  flex-shrink: 0;
+  min-width: 64px;
+  color: rgba(213, 224, 246, 0.86);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.terminal-search-button {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border: 1px solid rgba(92, 113, 150, 0.78);
+  border-radius: 9px;
+  background: rgba(10, 18, 35, 0.9);
+  color: #d9e4f6;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast),
+    background-color var(--motion-fast),
+    color var(--motion-fast),
+    transform var(--motion-fast);
+}
+
+.terminal-search-button:hover:not(:disabled) {
+  border-color: rgba(131, 156, 205, 0.96);
+  background: rgba(16, 27, 49, 0.98);
+  color: #f3f7ff;
+  transform: translateY(-1px);
+}
+
+.terminal-search-button:focus-visible {
+  outline: 2px solid rgba(118, 142, 255, 0.56);
+  outline-offset: 1px;
+}
+
+.terminal-search-button:disabled {
+  opacity: 0.44;
+  cursor: default;
+  transform: none;
+}
+
+.terminal-search-button svg {
+  width: 14px;
+  height: 14px;
+}
+
 .terminal-controls {
   position: absolute;
   right: 14px;
