@@ -103,12 +103,13 @@ const MAX_HIDDEN_INJECTED_PROMPTS_PER_THREAD = 80;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
 const REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON =
-  'Send a message first to establish the session, then toggle Full access. To start with Full access, use New thread options and choose Full access thread.';
+  'Send a message first to establish the session, then toggle Full access. To start with Full access, use New thread options and choose Full access thread, or enable full access by default in Settings.';
 
 function normalizeSettings(settings?: Settings | null): Settings {
   return {
     claudeCliPath: settings?.claudeCliPath ?? null,
-    appearanceMode: normalizeAppearanceMode(settings?.appearanceMode)
+    appearanceMode: normalizeAppearanceMode(settings?.appearanceMode),
+    defaultNewThreadFullAccess: settings?.defaultNewThreadFullAccess === true
   };
 }
 
@@ -839,7 +840,8 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>(() =>
     normalizeSettings({
       claudeCliPath: null,
-      appearanceMode: readStoredAppearanceMode()
+      appearanceMode: readStoredAppearanceMode(),
+      defaultNewThreadFullAccess: false
     })
   );
   const [detectedCliPath, setDetectedCliPath] = useState<string | null>(null);
@@ -3104,6 +3106,13 @@ export default function App() {
         return;
       }
 
+      const resolvedOptions =
+        typeof options?.fullAccess === 'boolean'
+          ? options
+          : settings.defaultNewThreadFullAccess
+            ? { fullAccess: true }
+            : undefined;
+
       setWorkspaceCreatingThread(workspaceId, true);
 
       try {
@@ -3127,7 +3136,7 @@ export default function App() {
         if (selectedWorkspaceIdRef.current !== workspaceId) {
           setSelectedWorkspace(workspaceId);
         }
-        const thread = await createThread(workspaceId, options);
+        const thread = await createThread(workspaceId, resolvedOptions);
         markThreadUserInput(workspaceId, thread.id);
         delete deletedThreadIdsRef.current[thread.id];
         primeRemoteThreadStartupOnSelection(thread, workspace ?? null);
@@ -3145,6 +3154,7 @@ export default function App() {
       pushToast,
       refreshGitInfo,
       refreshThreadsForWorkspace,
+      settings.defaultNewThreadFullAccess,
       setWorkspaceCreatingThread,
       setSelectedThread,
       setSelectedWorkspace,
@@ -3517,7 +3527,7 @@ export default function App() {
         await refreshWorkspaces();
         const savedSettings = normalizeSettings(await api.getSettings());
         setSettings(savedSettings);
-        persistAppearanceMode(savedSettings.appearanceMode ?? 'dark');
+        persistAppearanceMode(savedSettings.appearanceMode ?? 'system');
         const detected = await api.detectClaudeCliPath();
         setDetectedCliPath(detected);
         if (!detected && !savedSettings.claudeCliPath) {
@@ -4136,11 +4146,17 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [focusedTerminalKind, selectedSessionId, shellTerminalSessionId]);
 
-  const saveSettings = useCallback(async (nextSettings: { cliPath: string; appearanceMode: AppearanceMode }) => {
+  const saveSettings = useCallback(
+    async (nextSettings: {
+      cliPath: string;
+      appearanceMode: AppearanceMode;
+      defaultNewThreadFullAccess: boolean;
+    }) => {
     const saved = normalizeSettings(
       await api.saveSettings({
         claudeCliPath: nextSettings.cliPath || null,
-        appearanceMode: nextSettings.appearanceMode
+        appearanceMode: nextSettings.appearanceMode,
+        defaultNewThreadFullAccess: nextSettings.defaultNewThreadFullAccess
       })
     );
     setSettings(saved);
@@ -4150,7 +4166,9 @@ export default function App() {
     if (detected || nextSettings.cliPath) {
       setBlockingError(null);
     }
-  }, []);
+    },
+    []
+  );
 
   const writeTextToClipboard = useCallback(async (value: string) => {
     try {
@@ -4244,6 +4262,11 @@ export default function App() {
     }
 
     const workspace = workspaces.find((item) => item.id === selectedThread.workspaceId) ?? null;
+    const activeSessionId =
+      activeRunsByThreadRef.current[selectedThread.id]?.sessionId ?? runStore.sessionForThread(selectedThread.id) ?? null;
+    const activeSessionMode = activeSessionId
+      ? sessionMetaBySessionIdRef.current[activeSessionId]?.mode ?? null
+      : null;
     const hasInteractedThisSession =
       (lastUserInputAtMsByThreadRef.current[selectedThread.id] ?? 0) >
       (lastSessionStartAtMsByThreadRef.current[selectedThread.id] ?? 0);
@@ -4259,13 +4282,22 @@ export default function App() {
       pushToast(REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON, 'info');
       return;
     }
-
     const nextValue = !selectedThread.fullAccess;
     const draftInput = getThreadDraftInput(selectedThread.id);
     setFullAccessUpdating(true);
     try {
-      const updatedThread = await setThreadFullAccess(selectedThread.workspaceId, selectedThread.id, nextValue);
-      if (workspace && isRemoteWorkspaceKind(workspace.kind)) {
+      let updatedThread = await setThreadFullAccess(selectedThread.workspaceId, selectedThread.id, nextValue);
+      if (
+        activeSessionMode === 'new' &&
+        !hasInteractedThisSession &&
+        isUuidLike(updatedThread.claudeSessionId?.trim() ?? '')
+      ) {
+        updatedThread = await api.clearThreadClaudeSession(updatedThread.workspaceId, updatedThread.id);
+        applyThreadUpdate(updatedThread);
+      }
+      const canRestartRdevInPlace =
+        workspace?.kind === 'rdev' && isUuidLike(updatedThread.claudeSessionId?.trim() ?? '');
+      if (canRestartRdevInPlace) {
         const switchedInPlace = await restartRdevClaudeInPlace(updatedThread);
         if (switchedInPlace) {
           const sessionId =
@@ -4296,15 +4328,19 @@ export default function App() {
     }
   }, [
     activeRunsByThreadRef,
+    applyThreadUpdate,
     ensureSessionForThread,
     fullAccessUpdating,
     getThreadDraftInput,
+    lastSessionStartAtMsByThreadRef,
+    lastUserInputAtMsByThreadRef,
     startingByThread,
     primeRemoteThreadStartupOnSelection,
     pushToast,
     replayThreadDraftInput,
     restartRdevClaudeInPlace,
     runStore,
+    sessionMetaBySessionIdRef,
     selectedThread,
     setSelectedThread,
     setSelectedWorkspace,
@@ -4638,6 +4674,7 @@ export default function App() {
         selectedWorkspaceId={selectedWorkspaceId}
         selectedThreadId={selectedThreadId}
         threadSearch={threadSearch}
+        defaultNewThreadFullAccess={settings.defaultNewThreadFullAccess === true}
         creatingThreadByWorkspace={creatingThreadByWorkspace}
         onOpenWorkspacePicker={openWorkspacePicker}
         onOpenSettings={openSettings}
@@ -4937,6 +4974,7 @@ export default function App() {
         open={settingsOpen}
         initialCliPath={settings.claudeCliPath ?? ''}
         initialAppearanceMode={normalizeAppearanceMode(settings.appearanceMode)}
+        initialDefaultNewThreadFullAccess={settings.defaultNewThreadFullAccess === true}
         detectedCliPath={detectedCliPath}
         copyEnvDiagnosticsDisabled={!selectedWorkspace || selectedWorkspace.kind !== 'local'}
         onClose={() => setSettingsOpen(false)}

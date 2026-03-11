@@ -95,8 +95,8 @@ pub struct TranscriptEntry {
 pub enum AppearanceMode {
     Light,
     #[default]
-    Dark,
     System,
+    Dark,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,13 +106,16 @@ pub struct Settings {
     pub claude_cli_path: Option<String>,
     #[serde(default)]
     pub appearance_mode: AppearanceMode,
+    #[serde(default)]
+    pub default_new_thread_full_access: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             claude_cli_path: None,
-            appearance_mode: AppearanceMode::Dark,
+            appearance_mode: AppearanceMode::System,
+            default_new_thread_full_access: false,
         }
     }
 }
@@ -280,4 +283,25 @@ pub struct RunMetadata {
     pub duration_ms: i64,
     pub exit_code: Option<i32>,
     pub command: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppearanceMode, Settings};
+
+    #[test]
+    fn settings_default_to_system_appearance_and_standard_access() {
+        let settings = Settings::default();
+
+        assert_eq!(settings.appearance_mode, AppearanceMode::System);
+        assert!(!settings.default_new_thread_full_access);
+    }
+
+    #[test]
+    fn missing_settings_fields_deserialize_to_system_defaults() {
+        let settings: Settings = serde_json::from_str("{}").expect("settings should deserialize");
+
+        assert_eq!(settings.appearance_mode, AppearanceMode::System);
+        assert!(!settings.default_new_thread_full_access);
+    }
 }

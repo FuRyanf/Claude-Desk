@@ -76,6 +76,7 @@ export interface GitPullForNewThreadResult {
 export interface Settings {
   claudeCliPath?: string | null;
   appearanceMode?: AppearanceMode | null;
+  defaultNewThreadFullAccess?: boolean;
 }
 
 export interface AppUpdateInfo {

@@ -449,11 +449,12 @@ async fn workspace_shell_start_session(
 
 #[tauri::command]
 fn terminal_write(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     session_id: String,
     data: String,
 ) -> Result<bool, String> {
-    runner::terminal_write(state.runner.clone(), session_id, data)
+    runner::terminal_write(app, state.runner.clone(), session_id, data)
         .map_err(|error| error.to_string())
 }
 

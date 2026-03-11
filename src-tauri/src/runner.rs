@@ -544,24 +544,7 @@ fn recover_session_id_from_logs(workspace_id: &str, thread_id: &str) -> Option<S
     extract_claude_resume_session_id(&strip_ansi_sequences(&snapshot))
 }
 
-fn emit_terminal_ready(
-    app: &AppHandle,
-    workspace_id: &str,
-    thread_id: &str,
-    session_id: &str,
-    launch_session_id: &str,
-    confirm_generated_session_id: bool,
-) {
-    if confirm_generated_session_id {
-        if let Ok(Some(updated_thread)) = storage::set_thread_claude_session_id_if_missing(
-            workspace_id,
-            thread_id,
-            launch_session_id,
-        ) {
-            let _ = app.emit(THREAD_UPDATED_EVENT, updated_thread);
-        }
-    }
-
+fn emit_terminal_ready(app: &AppHandle, thread_id: &str, session_id: &str) {
     let _ = app.emit(
         TERMINAL_READY_EVENT,
         TerminalReadyEvent {
@@ -569,6 +552,14 @@ fn emit_terminal_ready(
             thread_id: Some(thread_id.to_string()),
         },
     );
+}
+
+fn normalize_terminal_input_chunk(chunk: &str) -> String {
+    chunk.replace("\u{1b}\r", "\n")
+}
+
+fn input_chunk_submits_prompt(chunk: &str) -> bool {
+    normalize_terminal_input_chunk(chunk).contains('\r')
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -602,6 +593,7 @@ struct TerminalSession {
     thread_id: Option<String>,
     session_mode: Option<TerminalSessionMode>,
     resume_session_id: Option<String>,
+    pending_confirmation_session_id: Mutex<Option<String>>,
     process_id: Option<u32>,
     started_at: chrono::DateTime<Utc>,
     command: Vec<String>,
@@ -1221,6 +1213,11 @@ pub async fn terminal_start_session(
         thread_id: Some(thread_id.clone()),
         session_mode: Some(session_mode),
         resume_session_id: resume_session_id.clone(),
+        pending_confirmation_session_id: Mutex::new(if generated_session_id {
+            Some(launch_session_id.clone())
+        } else {
+            None
+        }),
         process_id,
         started_at,
         command: command_manifest.clone(),
@@ -1233,7 +1230,6 @@ pub async fn terminal_start_session(
     state.terminal_sessions.insert(session.clone())?;
 
     let data_session_id = session_id.clone();
-    let data_workspace_id = workspace_id.clone();
     let data_thread_id = thread_id.clone();
     let data_output_log = output_log.clone();
     let data_app = app.clone();
@@ -1247,8 +1243,6 @@ pub async fn terminal_start_session(
     let mut launch_dispatch_probe = String::new();
     let mut launch_output_probe = String::new();
     let mut ready_emitted = false;
-    let launch_session_id_for_confirmation = launch_session_id.clone();
-    let should_confirm_generated_session_id = generated_session_id;
     std::thread::spawn(move || {
         let mut buffer = [0u8; 32_768];
         let mut utf8_carry = Vec::<u8>::new();
@@ -1319,14 +1313,7 @@ pub async fn terminal_start_session(
                     )
                 {
                     ready_emitted = true;
-                    emit_terminal_ready(
-                        &data_app,
-                        &data_workspace_id,
-                        &data_thread_id,
-                        &data_session_id,
-                        &launch_session_id_for_confirmation,
-                        should_confirm_generated_session_id,
-                    );
+                    emit_terminal_ready(&data_app, &data_thread_id, &data_session_id);
                 }
                 chunk_sequence = chunk_sequence.saturating_add(1);
                 let _ = data_app.emit(
@@ -1352,14 +1339,7 @@ pub async fn terminal_start_session(
                     &launch_command_for_readiness,
                 )
             {
-                emit_terminal_ready(
-                    &data_app,
-                    &data_workspace_id,
-                    &data_thread_id,
-                    &data_session_id,
-                    &launch_session_id_for_confirmation,
-                    should_confirm_generated_session_id,
-                );
+                emit_terminal_ready(&data_app, &data_thread_id, &data_session_id);
             }
             chunk_sequence = chunk_sequence.saturating_add(1);
             let _ = data_app.emit(
@@ -1582,6 +1562,7 @@ pub async fn workspace_shell_start_session(
         thread_id: None,
         session_mode: None,
         resume_session_id: None,
+        pending_confirmation_session_id: Mutex::new(None),
         process_id,
         started_at,
         command: command_manifest.clone(),
@@ -1722,7 +1703,12 @@ pub async fn workspace_shell_start_session(
     Ok(WorkspaceShellStartResponse { session_id })
 }
 
-pub fn terminal_write(state: Arc<RunnerState>, session_id: String, data: String) -> Result<bool> {
+pub fn terminal_write(
+    app: AppHandle,
+    state: Arc<RunnerState>,
+    session_id: String,
+    data: String,
+) -> Result<bool> {
     let Some(session) = state.terminal_sessions.get(&session_id)? else {
         return Ok(false);
     };
@@ -1733,6 +1719,33 @@ pub fn terminal_write(state: Arc<RunnerState>, session_id: String, data: String)
         .map_err(|_| anyhow!("Terminal writer lock poisoned"))?;
     writer.write_all(data.as_bytes())?;
     writer.flush()?;
+
+    if session.kind == TerminalSessionKind::ClaudeThread && input_chunk_submits_prompt(&data) {
+        let pending_session_id = session
+            .pending_confirmation_session_id
+            .lock()
+            .map_err(|_| anyhow!("Terminal session lock poisoned"))?
+            .clone();
+        if let (Some(thread_id), Some(launch_session_id)) =
+            (session.thread_id.as_deref(), pending_session_id)
+        {
+            if let Ok(updated_thread) = storage::set_thread_claude_session_id_if_missing(
+                &session.workspace_id,
+                thread_id,
+                &launch_session_id,
+            ) {
+                if let Ok(mut pending_confirmation_session_id) =
+                    session.pending_confirmation_session_id.lock()
+                {
+                    *pending_confirmation_session_id = None;
+                }
+                if let Some(thread) = updated_thread {
+                    let _ = app.emit(THREAD_UPDATED_EVENT, thread);
+                }
+            }
+        }
+    }
+
     Ok(true)
 }
 
@@ -1808,7 +1821,13 @@ pub fn terminal_send_signal(
         }
     }
 
-    terminal_write(state, session_id, "\u{3}".to_string())
+    let mut writer = session
+        .writer
+        .lock()
+        .map_err(|_| anyhow!("Terminal writer lock poisoned"))?;
+    writer.write_all("\u{3}".as_bytes())?;
+    writer.flush()?;
+    Ok(true)
 }
 
 pub fn copy_terminal_env_diagnostics(workspace_path: String) -> Result<String> {
@@ -2320,6 +2339,17 @@ mod tests {
             "Claude Code v2.1.72\r\n",
             launch_command,
         ));
+    }
+
+    #[test]
+    fn input_chunk_submits_prompt_detects_regular_enter() {
+        assert!(input_chunk_submits_prompt("ship it\r"));
+    }
+
+    #[test]
+    fn input_chunk_submits_prompt_ignores_multiline_enter_escape() {
+        assert!(!input_chunk_submits_prompt("\u{1b}\r"));
+        assert!(!input_chunk_submits_prompt("draft\u{1b}\r"));
     }
 
     #[test]

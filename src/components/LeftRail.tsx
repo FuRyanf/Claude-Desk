@@ -9,6 +9,7 @@ interface LeftRailProps {
   selectedWorkspaceId?: string;
   selectedThreadId?: string;
   threadSearch: string;
+  defaultNewThreadFullAccess?: boolean;
   creatingThreadByWorkspace?: Record<string, boolean>;
   isThreadWorking?: (threadId: string) => boolean;
   hasUnreadThreadOutput?: (threadId: string) => boolean;
@@ -416,6 +417,7 @@ function LeftRailComponent({
   selectedWorkspaceId,
   selectedThreadId,
   threadSearch,
+  defaultNewThreadFullAccess = false,
   creatingThreadByWorkspace = {},
   isThreadWorking,
   hasUnreadThreadOutput,
@@ -786,13 +788,17 @@ function LeftRailComponent({
                       <div className="workspace-new-thread-row-group">
                         <button
                           type="button"
-                          className="workspace-new-thread-row workspace-new-thread-main"
+                          className={
+                            defaultNewThreadFullAccess
+                              ? 'workspace-new-thread-row workspace-new-thread-main full-access-default'
+                              : 'workspace-new-thread-row workspace-new-thread-main'
+                          }
                           data-testid={`workspace-new-thread-${workspace.id}`}
                           disabled={isCreatingThread}
                           aria-busy={isCreatingThread}
                           onClick={async () => {
                             setNewThreadMenu(null);
-                            await onNewThreadInWorkspace(workspace.id);
+                            await onNewThreadInWorkspace(workspace.id, { fullAccess: defaultNewThreadFullAccess });
                           }}
                           onContextMenu={(event) => {
                             event.preventDefault();
@@ -802,11 +808,15 @@ function LeftRailComponent({
                           <span className="workspace-new-thread-icon" aria-hidden="true">
                             <PlusIcon />
                           </span>
-                          <span>New thread</span>
+                          <span>{defaultNewThreadFullAccess ? 'New full access thread' : 'New thread'}</span>
                         </button>
                         <button
                           type="button"
-                          className="workspace-new-thread-options-button"
+                          className={
+                            defaultNewThreadFullAccess
+                              ? 'workspace-new-thread-options-button full-access-default'
+                              : 'workspace-new-thread-options-button'
+                          }
                           data-testid={`workspace-new-thread-options-${workspace.id}`}
                           aria-label="New thread options"
                           title="New thread options"
@@ -998,7 +1008,7 @@ function LeftRailComponent({
             onClick={async () => {
               const workspaceId = newThreadMenu.workspaceId;
               setNewThreadMenu(null);
-              await onNewThreadInWorkspace(workspaceId);
+              await onNewThreadInWorkspace(workspaceId, { fullAccess: false });
             }}
           >
             Normal thread

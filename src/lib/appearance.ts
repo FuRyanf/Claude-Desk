@@ -1,7 +1,7 @@
 import type { AppearanceMode } from '../types';
 
 export const APPEARANCE_MODE_STORAGE_KEY = 'claude-desk:appearance-mode';
-export const DEFAULT_APPEARANCE_MODE: AppearanceMode = 'dark';
+export const DEFAULT_APPEARANCE_MODE: AppearanceMode = 'system';
 
 export function normalizeAppearanceMode(value: unknown): AppearanceMode {
   if (value === 'light' || value === 'system' || value === 'dark') {

@@ -6,18 +6,23 @@ interface SettingsModalProps {
   open: boolean;
   initialCliPath: string;
   initialAppearanceMode: AppearanceMode;
+  initialDefaultNewThreadFullAccess: boolean;
   detectedCliPath?: string | null;
   copyEnvDiagnosticsDisabled?: boolean;
   onClose: () => void;
-  onSave: (settings: { cliPath: string; appearanceMode: AppearanceMode }) => void;
+  onSave: (settings: {
+    cliPath: string;
+    appearanceMode: AppearanceMode;
+    defaultNewThreadFullAccess: boolean;
+  }) => void;
   onCopyEnvDiagnostics?: () => void | Promise<void>;
 }
 
 const APPEARANCE_OPTIONS: Array<{ value: AppearanceMode; label: string; description: string }> = [
   {
-    value: 'dark',
-    label: 'Dark',
-    description: 'Default. Calm, low-glare shell surfaces built for long terminal sessions.'
+    value: 'system',
+    label: 'System',
+    description: 'Default. Follow the current macOS appearance automatically.'
   },
   {
     value: 'light',
@@ -25,9 +30,9 @@ const APPEARANCE_OPTIONS: Array<{ value: AppearanceMode; label: string; descript
     description: 'Brighter chrome while keeping terminal contrast readable.'
   },
   {
-    value: 'system',
-    label: 'System',
-    description: 'Follow the current macOS appearance automatically.'
+    value: 'dark',
+    label: 'Dark',
+    description: 'Calm, low-glare shell surfaces built for long terminal sessions.'
   }
 ];
 
@@ -35,6 +40,7 @@ export function SettingsModal({
   open,
   initialCliPath,
   initialAppearanceMode,
+  initialDefaultNewThreadFullAccess,
   detectedCliPath,
   copyEnvDiagnosticsDisabled = false,
   onClose,
@@ -43,6 +49,7 @@ export function SettingsModal({
 }: SettingsModalProps) {
   const [cliPath, setCliPath] = useState(initialCliPath);
   const [appearanceMode, setAppearanceMode] = useState<AppearanceMode>(initialAppearanceMode);
+  const [defaultNewThreadFullAccess, setDefaultNewThreadFullAccess] = useState(initialDefaultNewThreadFullAccess);
 
   useEffect(() => {
     if (!open) {
@@ -50,7 +57,8 @@ export function SettingsModal({
     }
     setCliPath(initialCliPath);
     setAppearanceMode(initialAppearanceMode);
-  }, [initialAppearanceMode, initialCliPath, open]);
+    setDefaultNewThreadFullAccess(initialDefaultNewThreadFullAccess);
+  }, [initialAppearanceMode, initialCliPath, initialDefaultNewThreadFullAccess, open]);
 
   if (!open) {
     return null;
@@ -70,7 +78,7 @@ export function SettingsModal({
           <section className="settings-section">
             <div className="settings-section-copy">
               <h3>Display</h3>
-              <p>Choose how Claude Desk appears. Dark mode is the default shell.</p>
+              <p>Choose how Claude Desk appears. System appearance is the default.</p>
             </div>
 
             <div className="appearance-toggle-group" role="radiogroup" aria-label="Appearance mode">
@@ -118,6 +126,31 @@ export function SettingsModal({
                 ) : null}
               </div>
             </div>
+
+            <div className="settings-toggle-row">
+              <div className="settings-toggle-copy">
+                <span id="settings-default-full-access-title" className="settings-toggle-title">
+                  Start new threads with Full access
+                </span>
+                <span id="settings-default-full-access-description" className="settings-toggle-description">
+                  When enabled, the main new-thread action creates a full-access thread by default.
+                </span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-labelledby="settings-default-full-access-title"
+                aria-describedby="settings-default-full-access-description"
+                aria-checked={defaultNewThreadFullAccess}
+                className={defaultNewThreadFullAccess ? 'settings-switch active' : 'settings-switch'}
+                onClick={() => setDefaultNewThreadFullAccess((current) => !current)}
+              >
+                <span className="settings-switch-track">
+                  <span className="settings-switch-thumb" />
+                </span>
+                <span className="settings-switch-label">{defaultNewThreadFullAccess ? 'On' : 'Off'}</span>
+              </button>
+            </div>
           </section>
         </div>
 
@@ -140,7 +173,8 @@ export function SettingsModal({
               onClick={() =>
                 onSave({
                   cliPath: cliPath.trim(),
-                  appearanceMode
+                  appearanceMode,
+                  defaultNewThreadFullAccess
                 })
               }
             >
