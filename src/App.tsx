@@ -33,6 +33,11 @@ import {
   resolveAppearanceTheme
 } from './lib/appearance';
 import {
+  sendTaskCompletionAlert,
+  sendTaskCompletionAlertsEnabledConfirmation,
+  sendTaskCompletionAlertsTestNotification
+} from './lib/taskCompletionAlerts';
+import {
   createRunLifecycleState,
   isStreamingStuck,
   markRunExited,
@@ -78,6 +83,7 @@ const SELECTED_WORKSPACE_KEY = 'claude-desk:selected-workspace';
 const SIDEBAR_WIDTH_KEY = 'claude-desk:sidebar-width';
 const SHELL_DRAWER_HEIGHT_KEY = 'claude-desk:shell-drawer-height';
 const THREAD_LAST_READ_AT_KEY = 'claude-desk:last-read-at';
+const TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY = 'claude-desk:task-completion-alerts-bootstrap-v1';
 const SIDEBAR_WIDTH_DEFAULT = 320;
 const SIDEBAR_WIDTH_MIN = 260;
 const SIDEBAR_WIDTH_MAX = 460;
@@ -109,7 +115,8 @@ function normalizeSettings(settings?: Settings | null): Settings {
   return {
     claudeCliPath: settings?.claudeCliPath ?? null,
     appearanceMode: normalizeAppearanceMode(settings?.appearanceMode),
-    defaultNewThreadFullAccess: settings?.defaultNewThreadFullAccess === true
+    defaultNewThreadFullAccess: settings?.defaultNewThreadFullAccess === true,
+    taskCompletionAlerts: settings?.taskCompletionAlerts === true
   };
 }
 
@@ -841,7 +848,8 @@ export default function App() {
     normalizeSettings({
       claudeCliPath: null,
       appearanceMode: readStoredAppearanceMode(),
-      defaultNewThreadFullAccess: false
+      defaultNewThreadFullAccess: false,
+      taskCompletionAlerts: false
     })
   );
   const [detectedCliPath, setDetectedCliPath] = useState<string | null>(null);
@@ -919,8 +927,11 @@ export default function App() {
   const terminalDataListenerReadyRef = useRef(false);
   const terminalDataListenerReadyResolverRef = useRef<(() => void) | null>(null);
   const terminalDataListenerReadyPromiseRef = useRef<Promise<void> | null>(null);
+  const unreadOutputByThreadRef = useRef<Record<string, boolean>>({});
+  const unreadAlertStatusByThreadRef = useRef<Record<string, Extract<RunStatus, 'Succeeded' | 'Failed'>>>({});
   const latestOutputSequenceByThreadRef = useRef<Record<string, number>>({});
   const seenOutputSequenceByThreadRef = useRef<Record<string, number>>({});
+  const taskCompletionAlertBootstrapAttemptedRef = useRef(false);
   const lastReadAtMsByThreadRef = useRef<Record<string, number>>(loadThreadTimestampMap(THREAD_LAST_READ_AT_KEY));
   const threadReadStateDirtyRef = useRef(false);
   const lastMeaningfulOutputAtMsByThreadRef = useRef<Record<string, number>>({});
@@ -954,6 +965,8 @@ export default function App() {
       terminalDataListenerReadyResolverRef.current = resolve;
     });
   }
+
+  unreadOutputByThreadRef.current = unreadOutputByThread;
 
   const selectedWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId),
@@ -1142,7 +1155,9 @@ export default function App() {
       lastSessionStartAtMsByThreadRef.current[threadId] = Date.now();
       delete lastUserInputAtMsByThreadRef.current[threadId];
       delete lastUserInputSequenceByThreadRef.current[threadId];
+      delete unreadAlertStatusByThreadRef.current[threadId];
       delete lastMeaningfulOutputByThreadRef.current[threadId];
+      delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
       delete outputControlCarryByThreadRef.current[threadId];
       delete liveDataSeenBySessionRef.current[sessionId];
       runLifecycleByThreadRef.current[threadId] = createRunLifecycleState();
@@ -1590,7 +1605,27 @@ export default function App() {
     // Terminal UIs often repaint identical content using cursor movement; don't
     // treat duplicate redraw chunks as fresh unread output.
     const looksLikeRedrawChunk = chunk.includes('\r') || chunk.includes('\u001b') || chunk.includes('\u009b');
-    if (looksLikeRedrawChunk && lastMeaningfulOutputByThreadRef.current[threadId] === normalized) {
+    const lastMeaningfulOutput = lastMeaningfulOutputByThreadRef.current[threadId] ?? '';
+    if (looksLikeRedrawChunk && lastMeaningfulOutput === normalized) {
+      return false;
+    }
+
+    // PTY/session reconnects can occasionally replay the last visible Claude
+    // chunk as plain text. Once the user has already read through the current
+    // output sequence, don't let an exact replay of that same latest chunk
+    // resurrect unread state.
+    const lastMeaningfulOutputAtMs = lastMeaningfulOutputAtMsByThreadRef.current[threadId] ?? 0;
+    const latestOutputSeq = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
+    const seenOutputSeq = seenOutputSequenceByThreadRef.current[threadId] ?? 0;
+    const lastUserInputSeq = lastUserInputSequenceByThreadRef.current[threadId] ?? 0;
+    const lastReadAtMs = lastReadAtMsByThreadRef.current[threadId] ?? 0;
+    const isReplayOfAlreadyReadOutput =
+      lastMeaningfulOutputAtMs > 0 &&
+      lastMeaningfulOutput === normalized &&
+      lastReadAtMs >= lastMeaningfulOutputAtMs &&
+      seenOutputSeq >= latestOutputSeq &&
+      lastUserInputSeq < latestOutputSeq;
+    if (isReplayOfAlreadyReadOutput) {
       return false;
     }
 
@@ -1614,6 +1649,12 @@ export default function App() {
     lastReadAtMsByThreadRef.current[threadId] = Date.now();
     threadReadStateDirtyRef.current = true;
     markThreadOutputSeen(threadId);
+    delete unreadAlertStatusByThreadRef.current[threadId];
+    if (unreadOutputByThreadRef.current[threadId]) {
+      const nextUnread = { ...unreadOutputByThreadRef.current };
+      delete nextUnread[threadId];
+      unreadOutputByThreadRef.current = nextUnread;
+    }
     setUnreadOutputByThread((current) => removeThreadFlag(current, threadId));
     if (persistNow) {
       flushThreadReadState();
@@ -1642,20 +1683,41 @@ export default function App() {
     );
   }, [hasUserSentMessageInCurrentSession]);
 
-  const markThreadUnread = useCallback((threadId: string) => {
-    setUnreadOutputByThread((current) => {
-      if (!hasUnseenMeaningfulOutputSinceRead(threadId)) {
-        return current;
-      }
-      if (current[threadId]) {
-        return current;
-      }
-      return {
-        ...current,
+  const markThreadUnread = useCallback((threadId: string, status: Extract<RunStatus, 'Succeeded' | 'Failed'> = 'Succeeded') => {
+    if (!hasUnseenMeaningfulOutputSinceRead(threadId)) {
+      return;
+    }
+
+    const alreadyUnread = unreadOutputByThreadRef.current[threadId] === true;
+    if (!alreadyUnread) {
+      const nextUnread = {
+        ...unreadOutputByThreadRef.current,
         [threadId]: true
       };
+      unreadOutputByThreadRef.current = nextUnread;
+      setUnreadOutputByThread(nextUnread);
+    }
+
+    const priorAlertStatus = unreadAlertStatusByThreadRef.current[threadId];
+    unreadAlertStatusByThreadRef.current[threadId] = status;
+
+    if (!settings.taskCompletionAlerts) {
+      return;
+    }
+    if (alreadyUnread && !(status === 'Failed' && priorAlertStatus !== 'Failed')) {
+      return;
+    }
+
+    const thread =
+      Object.values(threadsByWorkspaceRef.current)
+        .flat()
+        .find((candidate) => candidate.id === threadId) ?? null;
+
+    void sendTaskCompletionAlert({
+      threadTitle: thread?.title ?? 'Current thread',
+      status
     });
-  }, [hasUnseenMeaningfulOutputSinceRead]);
+  }, [hasUnseenMeaningfulOutputSinceRead, settings.taskCompletionAlerts]);
 
   const scheduleThreadWorkingStop = useCallback(
     (threadId: string, delayMs = THREAD_WORKING_IDLE_TIMEOUT_MS) => {
@@ -3269,6 +3331,7 @@ export default function App() {
       delete lastSessionStartAtMsByThreadRef.current[threadId];
       delete lastUserInputAtMsByThreadRef.current[threadId];
       delete lastUserInputSequenceByThreadRef.current[threadId];
+      delete unreadAlertStatusByThreadRef.current[threadId];
       delete sessionFailCountByThreadRef.current[threadId];
       delete runLifecycleByThreadRef.current[threadId];
       setHasInteractedByThread((current) => removeThreadFlag(current, threadId));
@@ -3567,6 +3630,31 @@ export default function App() {
       media.removeEventListener?.('change', handleChange);
     };
   }, [settings.appearanceMode]);
+
+  useEffect(() => {
+    if (!settings.taskCompletionAlerts) {
+      taskCompletionAlertBootstrapAttemptedRef.current = false;
+      return;
+    }
+    if (taskCompletionAlertBootstrapAttemptedRef.current) {
+      return;
+    }
+    if (window.localStorage.getItem(TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY) === '1') {
+      return;
+    }
+
+    taskCompletionAlertBootstrapAttemptedRef.current = true;
+    void sendTaskCompletionAlertsEnabledConfirmation().then((sent) => {
+      if (sent) {
+        window.localStorage.setItem(TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY, '1');
+        return;
+      }
+      pushToast(
+        'Claude Desk could not queue a desktop notification. Check macOS notification settings after the first alert.',
+        'info'
+      );
+    });
+  }, [pushToast, settings.taskCompletionAlerts]);
 
   useEffect(() => {
     if (!selectedWorkspaceId) {
@@ -3922,11 +4010,14 @@ export default function App() {
           (sessionFailCountByThreadRef.current[endedThreadId] ?? 0) + 1;
       }
       if (
-        exitStatus === 'Succeeded' &&
+        (exitStatus === 'Succeeded' || exitStatus === 'Failed') &&
         selectedThreadIdRef.current !== endedThreadId &&
-        hasUnseenMeaningfulOutputSinceRead(endedThreadId)
+        (
+          hasUnseenMeaningfulOutputSinceRead(endedThreadId) ||
+          unreadOutputByThreadRef.current[endedThreadId]
+        )
       ) {
-        markThreadUnread(endedThreadId);
+        markThreadUnread(endedThreadId, exitStatus);
       }
 
       const workspaceId =
@@ -4151,24 +4242,64 @@ export default function App() {
       cliPath: string;
       appearanceMode: AppearanceMode;
       defaultNewThreadFullAccess: boolean;
+      taskCompletionAlerts: boolean;
     }) => {
-    const saved = normalizeSettings(
-      await api.saveSettings({
-        claudeCliPath: nextSettings.cliPath || null,
-        appearanceMode: nextSettings.appearanceMode,
-        defaultNewThreadFullAccess: nextSettings.defaultNewThreadFullAccess
-      })
-    );
-    setSettings(saved);
-    const detected = await api.detectClaudeCliPath();
-    setDetectedCliPath(detected);
-    setSettingsOpen(false);
-    if (detected || nextSettings.cliPath) {
-      setBlockingError(null);
-    }
+      const taskCompletionAlerts = nextSettings.taskCompletionAlerts;
+      const alertsJustEnabled = !settings.taskCompletionAlerts && taskCompletionAlerts;
+      if (alertsJustEnabled) {
+        taskCompletionAlertBootstrapAttemptedRef.current = true;
+      }
+
+      const saved = normalizeSettings(
+        await api.saveSettings({
+          claudeCliPath: nextSettings.cliPath || null,
+          appearanceMode: nextSettings.appearanceMode,
+          defaultNewThreadFullAccess: nextSettings.defaultNewThreadFullAccess,
+          taskCompletionAlerts
+        })
+      );
+      setSettings(saved);
+      const detected = await api.detectClaudeCliPath();
+      setDetectedCliPath(detected);
+      setSettingsOpen(false);
+      if (detected || nextSettings.cliPath) {
+        setBlockingError(null);
+      }
+      if (alertsJustEnabled && taskCompletionAlerts) {
+        const sent = await sendTaskCompletionAlertsEnabledConfirmation();
+        if (sent) {
+          window.localStorage.setItem(TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY, '1');
+        } else {
+          pushToast(
+            'Claude Desk could not queue a desktop notification. Check macOS notification settings after the first alert.',
+            'info'
+          );
+        }
+      }
     },
-    []
+    [pushToast, settings.taskCompletionAlerts]
   );
+
+  const sendTestAlert = useCallback(async () => {
+    if (!settings.taskCompletionAlerts) {
+      pushToast('Turn on Task completion alerts first.', 'info');
+      return;
+    }
+
+    const sent = await sendTaskCompletionAlertsTestNotification();
+    if (sent) {
+      pushToast(
+        'Queued a test alert. If you do not see a banner, check macOS notification style and sound settings.',
+        'info'
+      );
+      return;
+    }
+
+    pushToast(
+      'Claude Desk could not queue a desktop notification. Check macOS notification settings after the first alert.',
+      'info'
+    );
+  }, [pushToast, settings.taskCompletionAlerts]);
 
   const writeTextToClipboard = useCallback(async (value: string) => {
     try {
@@ -4566,6 +4697,7 @@ export default function App() {
         delete lastSessionStartAtMsByThreadRef.current[threadId];
         delete lastUserInputAtMsByThreadRef.current[threadId];
         delete lastUserInputSequenceByThreadRef.current[threadId];
+        delete unreadAlertStatusByThreadRef.current[threadId];
         delete sessionFailCountByThreadRef.current[threadId];
         delete runLifecycleByThreadRef.current[threadId];
       }
@@ -4975,11 +5107,13 @@ export default function App() {
         initialCliPath={settings.claudeCliPath ?? ''}
         initialAppearanceMode={normalizeAppearanceMode(settings.appearanceMode)}
         initialDefaultNewThreadFullAccess={settings.defaultNewThreadFullAccess === true}
+        initialTaskCompletionAlerts={settings.taskCompletionAlerts === true}
         detectedCliPath={detectedCliPath}
         copyEnvDiagnosticsDisabled={!selectedWorkspace || selectedWorkspace.kind !== 'local'}
         onClose={() => setSettingsOpen(false)}
         onSave={(nextSettings) => void saveSettings(nextSettings)}
         onCopyEnvDiagnostics={() => void copyEnvDiagnostics()}
+        onSendTestAlert={() => void sendTestAlert()}
       />
 
       <AddWorkspaceModal

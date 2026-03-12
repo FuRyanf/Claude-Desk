@@ -77,6 +77,7 @@ export interface Settings {
   claudeCliPath?: string | null;
   appearanceMode?: AppearanceMode | null;
   defaultNewThreadFullAccess?: boolean;
+  taskCompletionAlerts?: boolean;
 }
 
 export interface AppUpdateInfo {

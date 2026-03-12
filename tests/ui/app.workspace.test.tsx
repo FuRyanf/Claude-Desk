@@ -176,6 +176,11 @@ const mocks = vi.hoisted(() => {
   };
   const openDialog = vi.fn(async () => null);
   const confirmDialog = vi.fn(async () => true);
+  const helperMocks = {
+    sendTaskCompletionAlert: vi.fn(async () => true),
+    sendTaskCompletionAlertsEnabledConfirmation: vi.fn(async () => true),
+    sendTaskCompletionAlertsTestNotification: vi.fn(async () => true)
+  };
 
   const reset = () => {
     Object.values(api).forEach((fn) => {
@@ -185,12 +190,16 @@ const mocks = vi.hoisted(() => {
     });
     openDialog.mockClear();
     confirmDialog.mockClear();
+    Object.values(helperMocks).forEach((fn) => {
+      fn.mockClear();
+    });
     workspaceState = [];
   };
 
   return {
     api,
     reset,
+    ...helperMocks,
     seedWorkspaces: (next: Array<typeof workspaceOne>) => {
       workspaceState = next.map((workspace) => ({ ...workspace }));
     },
@@ -224,6 +233,12 @@ vi.mock('../../src/lib/api', () => ({
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: mocks.openDialog,
   confirm: mocks.confirmDialog
+}));
+
+vi.mock('../../src/lib/taskCompletionAlerts', () => ({
+  sendTaskCompletionAlert: mocks.sendTaskCompletionAlert,
+  sendTaskCompletionAlertsEnabledConfirmation: mocks.sendTaskCompletionAlertsEnabledConfirmation,
+  sendTaskCompletionAlertsTestNotification: mocks.sendTaskCompletionAlertsTestNotification
 }));
 
 import App from '../../src/App';
@@ -426,6 +441,52 @@ describe('Workspace add flow', () => {
     await waitFor(() => {
       expect(mocks.api.copyTerminalEnvDiagnostics).toHaveBeenCalledWith('/tmp/workspace-added');
       expect(mocks.api.writeTextToClipboard).toHaveBeenCalledWith('diagnostics');
+    });
+  });
+
+  it('closes settings on Escape', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
+    const input = await screen.findByLabelText('Manual path');
+    await user.clear(input);
+    await user.type(input, '/tmp/workspace-added');
+    await user.click(screen.getByRole('button', { name: 'Add project' }));
+
+    await user.click(await screen.findByRole('button', { name: 'Settings' }));
+
+    await screen.findByRole('button', { name: 'Copy terminal env diagnostics' });
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Copy terminal env diagnostics' })).not.toBeInTheDocument();
+    });
+  });
+
+  it('sends a test alert from Settings when task completion alerts are enabled', async () => {
+    const user = userEvent.setup();
+    mocks.api.getSettings.mockResolvedValueOnce({
+      claudeCliPath: '/usr/local/bin/claude',
+      taskCompletionAlerts: true
+    });
+
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
+    const input = await screen.findByLabelText('Manual path');
+    await user.clear(input);
+    await user.type(input, '/tmp/workspace-added');
+    await user.click(screen.getByRole('button', { name: 'Add project' }));
+
+    await user.click(await screen.findByRole('button', { name: 'Settings' }));
+    const testAlertButton = await screen.findByRole('button', { name: 'Send test alert' });
+    expect(testAlertButton).toBeEnabled();
+
+    await user.click(testAlertButton);
+
+    await waitFor(() => {
+      expect(mocks.sendTaskCompletionAlertsTestNotification).toHaveBeenCalledTimes(1);
     });
   });
 

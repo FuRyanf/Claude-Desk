@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod git_tools;
+mod macos_notifications;
 mod models;
 mod runner;
 mod skills;
@@ -558,6 +559,11 @@ fn open_external_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn send_desktop_notification(title: String, body: String) -> Result<bool, String> {
+    macos_notifications::send_notification(&title, &body).await
+}
+
+#[tauri::command]
 fn open_terminal_command(command: String) -> Result<(), String> {
     let escaped = command
         .replace('\\', "\\\\")
@@ -624,6 +630,26 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|_| {
+            if let Err(error) = macos_notifications::initialize() {
+                eprintln!("[notifications] initialization failed: {error}");
+            }
+            if std::env::var_os("CLAUDE_DESK_SEND_STARTUP_TEST_ALERT").is_some() {
+                let result_path = std::env::var("CLAUDE_DESK_STARTUP_TEST_ALERT_RESULT_FILE")
+                    .unwrap_or_else(|_| "/tmp/claude-desk-startup-alert-result.txt".to_string());
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let result = macos_notifications::send_notification(
+                        "Claude Desk startup test alert",
+                        "If you can see and hear this, the native alert bridge is working.",
+                    )
+                    .await;
+                    let _ = std::fs::write(&result_path, format!("{result:?}\n"));
+                    eprintln!("[notifications] startup test alert result: {result:?}");
+                });
+            }
+            Ok(())
+        })
         .manage(AppState {
             runner: Arc::new(runner::RunnerState::default()),
         })
@@ -683,6 +709,7 @@ fn main() {
             open_in_finder,
             open_in_terminal,
             open_external_url,
+            send_desktop_notification,
             open_terminal_command,
             copy_terminal_env_diagnostics,
             validate_importable_claude_session,

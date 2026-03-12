@@ -331,6 +331,7 @@ version = "0.1.28"
 dependencies = [
  "anyhow",
  "arboard",
+ "cc",
  "chrono",
  "dirs 5.0.1",
  "image",

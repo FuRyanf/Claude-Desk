@@ -108,6 +108,8 @@ pub struct Settings {
     pub appearance_mode: AppearanceMode,
     #[serde(default)]
     pub default_new_thread_full_access: bool,
+    #[serde(default)]
+    pub task_completion_alerts: bool,
 }
 
 impl Default for Settings {
@@ -116,6 +118,7 @@ impl Default for Settings {
             claude_cli_path: None,
             appearance_mode: AppearanceMode::System,
             default_new_thread_full_access: false,
+            task_completion_alerts: false,
         }
     }
 }

@@ -2,6 +2,10 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const coreMocks = vi.hoisted(() => ({
+  invoke: vi.fn(async () => true)
+}));
+
 const mocks = vi.hoisted(() => {
   const workspace = {
     id: 'ws-1',
@@ -299,11 +303,15 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   confirm: mocks.confirmDialog
 }));
 
+vi.mock('@tauri-apps/api/core', () => coreMocks);
+
 import App from '../../src/App';
 
 describe('Thread lifecycle integration', () => {
   beforeEach(() => {
     mocks.reset();
+    coreMocks.invoke.mockClear();
+    coreMocks.invoke.mockResolvedValue(true);
   });
 
   it('auto-starts the selected thread session when opening an existing workspace', async () => {
@@ -315,6 +323,22 @@ describe('Thread lifecycle integration', () => {
       expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
         expect.objectContaining({ threadId: 'thread-1' })
       );
+    });
+  });
+
+  it('sends the alerts-enabled confirmation when settings load with task completion alerts on', async () => {
+    mocks.api.getSettings.mockResolvedValueOnce({
+      claudeCliPath: '/usr/local/bin/claude',
+      taskCompletionAlerts: true
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(coreMocks.invoke).toHaveBeenCalledWith('send_desktop_notification', {
+        title: 'Claude Desk alerts enabled',
+        body: 'You will now get a notification when Claude finishes a task.'
+      });
     });
   });
 

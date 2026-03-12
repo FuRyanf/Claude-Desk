@@ -40,6 +40,8 @@ const mocks = vi.hoisted(() => {
   let terminalDataHandler: ((
     event: { sessionId: string; threadId?: string; data: string; sequence?: number }
   ) => void) | null = null;
+  let terminalExitHandler: ((event: { sessionId: string; code?: number | null; signal?: string | null }) => void) | null =
+    null;
   let threadUpdatedHandler: ((thread: typeof baseThread) => void) | null = null;
 
   const terminalStartSessionImpl = async (params: { threadId: string }) => {
@@ -189,7 +191,12 @@ const mocks = vi.hoisted(() => {
     threadState = [{ ...baseThread }];
     sessionCounter = 0;
     terminalDataHandler = null;
+    terminalExitHandler = null;
     threadUpdatedHandler = null;
+    helperMocks.sendTaskCompletionAlert.mockClear();
+    helperMocks.sendTaskCompletionAlertsEnabledConfirmation.mockClear();
+    helperMocks.sendTaskCompletionAlertsTestNotification.mockClear();
+    helperMocks.sendTaskCompletionAlertsEnabledConfirmation.mockResolvedValue(true);
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -201,9 +208,16 @@ const mocks = vi.hoisted(() => {
     api.terminalReadOutput.mockImplementation(terminalReadOutputImpl);
   };
 
+  const helperMocks = {
+    sendTaskCompletionAlert: vi.fn(async () => true),
+    sendTaskCompletionAlertsEnabledConfirmation: vi.fn(async () => true),
+    sendTaskCompletionAlertsTestNotification: vi.fn(async () => true)
+  };
+
   return {
     api,
     reset,
+    ...helperMocks,
     setWorkspaceKind: (kind: 'local' | 'rdev' | 'ssh') => {
       workspace = { ...workspace, kind };
     },
@@ -225,7 +239,19 @@ const mocks = vi.hoisted(() => {
       }
     ),
     onTerminalReady: vi.fn(async () => () => undefined),
-    onTerminalExit: vi.fn(async () => () => undefined),
+    emitTerminalExit: (event: { sessionId: string; code?: number | null; signal?: string | null }) => {
+      terminalExitHandler?.(event);
+    },
+    onTerminalExit: vi.fn(
+      async (handler: (event: { sessionId: string; code?: number | null; signal?: string | null }) => void) => {
+        terminalExitHandler = handler;
+        return () => {
+          if (terminalExitHandler === handler) {
+            terminalExitHandler = null;
+          }
+        };
+      }
+    ),
     emitThreadUpdated: (thread: typeof baseThread) => {
       threadState = threadState.map((item) => (item.id === thread.id ? { ...item, ...thread } : item));
       threadUpdatedHandler?.(thread);
@@ -254,6 +280,12 @@ vi.mock('../../src/lib/api', () => ({
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: mocks.openDialog,
   confirm: mocks.confirmDialog
+}));
+
+vi.mock('../../src/lib/taskCompletionAlerts', () => ({
+  sendTaskCompletionAlert: mocks.sendTaskCompletionAlert,
+  sendTaskCompletionAlertsEnabledConfirmation: mocks.sendTaskCompletionAlertsEnabledConfirmation,
+  sendTaskCompletionAlertsTestNotification: mocks.sendTaskCompletionAlertsTestNotification
 }));
 
 vi.mock('../../src/components/TerminalPanel', () => ({
@@ -397,7 +429,8 @@ describe('Terminal launch flags', () => {
       expect(mocks.api.saveSettings).toHaveBeenCalledWith({
         claudeCliPath: '/usr/local/bin/claude',
         appearanceMode: 'system',
-        defaultNewThreadFullAccess: true
+        defaultNewThreadFullAccess: true,
+        taskCompletionAlerts: false
       });
     });
 
@@ -409,6 +442,66 @@ describe('Terminal launch flags', () => {
     await waitFor(() => {
       expect(mocks.api.createThread).toHaveBeenCalledWith('ws-1', 'claude-code', true);
     });
+  });
+
+  it('saves opt-in task completion alerts after permission is granted', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+
+    const alertsSwitch = await screen.findByRole('switch', {
+      name: /Task completion alerts/i
+    });
+    expect(alertsSwitch).toHaveAttribute('aria-checked', 'false');
+
+    await user.click(alertsSwitch);
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mocks.api.saveSettings).toHaveBeenCalledWith({
+        claudeCliPath: '/usr/local/bin/claude',
+        appearanceMode: 'system',
+        defaultNewThreadFullAccess: false,
+        taskCompletionAlerts: true
+      });
+      expect(mocks.sendTaskCompletionAlertsEnabledConfirmation).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('does not fire a task completion alert when the active thread finishes without becoming unread', async () => {
+    const user = userEvent.setup();
+
+    mocks.api.getSettings.mockResolvedValueOnce({
+      claudeCliPath: '/usr/local/bin/claude',
+      taskCompletionAlerts: true
+    });
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Full Access Thread/i });
+    await waitFor(() => {
+      expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: 'thread-1' })
+      );
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Submit prompt' }));
+
+    await waitFor(() => {
+      expect(mocks.api.terminalWrite).toHaveBeenCalledWith('session-1', 'ship it\r');
+    });
+
+    act(() => {
+      mocks.emitTerminalExit({ sessionId: 'session-1', code: 0, signal: null });
+    });
+
+    await new Promise<void>((resolve) => {
+      window.setTimeout(() => resolve(), 80);
+    });
+    expect(mocks.sendTaskCompletionAlert).not.toHaveBeenCalled();
   });
 
   it('lets local new threads toggle full access immediately', async () => {

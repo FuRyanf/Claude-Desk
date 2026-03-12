@@ -7,6 +7,7 @@ interface SettingsModalProps {
   initialCliPath: string;
   initialAppearanceMode: AppearanceMode;
   initialDefaultNewThreadFullAccess: boolean;
+  initialTaskCompletionAlerts: boolean;
   detectedCliPath?: string | null;
   copyEnvDiagnosticsDisabled?: boolean;
   onClose: () => void;
@@ -14,8 +15,11 @@ interface SettingsModalProps {
     cliPath: string;
     appearanceMode: AppearanceMode;
     defaultNewThreadFullAccess: boolean;
+    taskCompletionAlerts: boolean;
   }) => void;
   onCopyEnvDiagnostics?: () => void | Promise<void>;
+  onSendTestAlert?: () => void | Promise<void>;
+  testAlertDisabled?: boolean;
 }
 
 const APPEARANCE_OPTIONS: Array<{ value: AppearanceMode; label: string; description: string }> = [
@@ -41,15 +45,19 @@ export function SettingsModal({
   initialCliPath,
   initialAppearanceMode,
   initialDefaultNewThreadFullAccess,
+  initialTaskCompletionAlerts,
   detectedCliPath,
   copyEnvDiagnosticsDisabled = false,
   onClose,
   onSave,
-  onCopyEnvDiagnostics
+  onCopyEnvDiagnostics,
+  onSendTestAlert,
+  testAlertDisabled = false
 }: SettingsModalProps) {
   const [cliPath, setCliPath] = useState(initialCliPath);
   const [appearanceMode, setAppearanceMode] = useState<AppearanceMode>(initialAppearanceMode);
   const [defaultNewThreadFullAccess, setDefaultNewThreadFullAccess] = useState(initialDefaultNewThreadFullAccess);
+  const [taskCompletionAlerts, setTaskCompletionAlerts] = useState(initialTaskCompletionAlerts);
 
   useEffect(() => {
     if (!open) {
@@ -58,7 +66,27 @@ export function SettingsModal({
     setCliPath(initialCliPath);
     setAppearanceMode(initialAppearanceMode);
     setDefaultNewThreadFullAccess(initialDefaultNewThreadFullAccess);
-  }, [initialAppearanceMode, initialCliPath, initialDefaultNewThreadFullAccess, open]);
+    setTaskCompletionAlerts(initialTaskCompletionAlerts);
+  }, [initialAppearanceMode, initialCliPath, initialDefaultNewThreadFullAccess, initialTaskCompletionAlerts, open]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const handleWindowKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) {
+        return;
+      }
+      event.preventDefault();
+      onClose();
+    };
+
+    window.addEventListener('keydown', handleWindowKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleWindowKeyDown);
+    };
+  }, [onClose, open]);
 
   if (!open) {
     return null;
@@ -152,6 +180,38 @@ export function SettingsModal({
               </button>
             </div>
           </section>
+
+          <section className="settings-section">
+            <div className="settings-section-copy">
+              <h3>Alerts</h3>
+              <p>Opt in to completion alerts for long-running tasks.</p>
+            </div>
+
+            <div className="settings-toggle-row">
+              <div className="settings-toggle-copy">
+                <span id="settings-task-completion-alerts-title" className="settings-toggle-title">
+                  Task completion alerts
+                </span>
+                <span id="settings-task-completion-alerts-description" className="settings-toggle-description">
+                  Show a desktop notification and play a sound when Claude finishes a task.
+                </span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-labelledby="settings-task-completion-alerts-title"
+                aria-describedby="settings-task-completion-alerts-description"
+                aria-checked={taskCompletionAlerts}
+                className={taskCompletionAlerts ? 'settings-switch active' : 'settings-switch'}
+                onClick={() => setTaskCompletionAlerts((current) => !current)}
+              >
+                <span className="settings-switch-track">
+                  <span className="settings-switch-thumb" />
+                </span>
+                <span className="settings-switch-label">{taskCompletionAlerts ? 'On' : 'Off'}</span>
+              </button>
+            </div>
+          </section>
         </div>
 
         <footer className="modal-actions settings-modal-actions">
@@ -162,6 +222,14 @@ export function SettingsModal({
             disabled={copyEnvDiagnosticsDisabled}
           >
             Copy terminal env diagnostics
+          </button>
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={() => void onSendTestAlert?.()}
+            disabled={!initialTaskCompletionAlerts || !taskCompletionAlerts || testAlertDisabled}
+          >
+            Send test alert
           </button>
           <div className="settings-modal-actions-right">
             <button type="button" className="ghost-button" onClick={onClose}>
@@ -174,7 +242,8 @@ export function SettingsModal({
                 onSave({
                   cliPath: cliPath.trim(),
                   appearanceMode,
-                  defaultNewThreadFullAccess
+                  defaultNewThreadFullAccess,
+                  taskCompletionAlerts
                 })
               }
             >

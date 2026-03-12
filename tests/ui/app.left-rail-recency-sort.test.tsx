@@ -149,11 +149,21 @@ const mocks = vi.hoisted(() => {
     writeTextToClipboard: vi.fn(async () => undefined)
   };
 
+  const helperMocks = {
+    sendTaskCompletionAlert: vi.fn(async () => true),
+    sendTaskCompletionAlertsEnabledConfirmation: vi.fn(async () => true),
+    sendTaskCompletionAlertsTestNotification: vi.fn(async () => true)
+  };
+
   const reset = () => {
     threadState = baseThreads.map((thread) => ({ ...thread }));
     terminalDataHandler = null;
     terminalExitHandler = null;
     window.localStorage.clear();
+    helperMocks.sendTaskCompletionAlert.mockClear();
+    helperMocks.sendTaskCompletionAlertsEnabledConfirmation.mockClear();
+    helperMocks.sendTaskCompletionAlertsTestNotification.mockClear();
+    helperMocks.sendTaskCompletionAlertsEnabledConfirmation.mockResolvedValue(true);
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -164,6 +174,7 @@ const mocks = vi.hoisted(() => {
   return {
     api,
     reset,
+    ...helperMocks,
     prependThread: (thread: (typeof baseThreads)[number]) => {
       threadState = [thread, ...threadState];
     },
@@ -213,6 +224,12 @@ vi.mock('../../src/lib/api', () => ({
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: mocks.openDialog,
   confirm: mocks.confirmDialog
+}));
+
+vi.mock('../../src/lib/taskCompletionAlerts', () => ({
+  sendTaskCompletionAlert: mocks.sendTaskCompletionAlert,
+  sendTaskCompletionAlertsEnabledConfirmation: mocks.sendTaskCompletionAlertsEnabledConfirmation,
+  sendTaskCompletionAlertsTestNotification: mocks.sendTaskCompletionAlertsTestNotification
 }));
 
 vi.mock('../../src/components/TerminalPanel', () => ({
@@ -655,6 +672,140 @@ describe('Left rail recency and sorting semantics', () => {
     expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
   });
 
+  it('does not re-mark unread from replayed plain-text output after unread is cleared', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fires an alert when a background thread first turns unread', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      window.localStorage.setItem('claude-desk:task-completion-alerts-bootstrap-v1', '1');
+      mocks.api.getSettings.mockResolvedValueOnce({
+        claudeCliPath: '/usr/local/bin/claude',
+        taskCompletionAlerts: true
+      });
+
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+
+      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledWith({
+        threadTitle: 'Newer thread',
+        status: 'Succeeded'
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('marks a second identical reply as unread after a new prompt is submitted', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      window.localStorage.setItem('claude-desk:task-completion-alerts-bootstrap-v1', '1');
+      mocks.api.getSettings.mockResolvedValueOnce({
+        claudeCliPath: '/usr/local/bin/claude',
+        taskCompletionAlerts: true
+      });
+
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'Done.\n' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+
+      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'Done.\n' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+
+      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not re-mark unread on terminal exit after unread has already been cleared', async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -692,6 +843,91 @@ describe('Left rail recency and sorting semantics', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
     });
+  });
+
+  it('fires a failed alert when a background run exits before the idle unread timer fires', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      window.localStorage.setItem('claude-desk:task-completion-alerts-bootstrap-v1', '1');
+      mocks.api.getSettings.mockResolvedValueOnce({
+        claudeCliPath: '/usr/local/bin/claude',
+        taskCompletionAlerts: true
+      });
+
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+        mocks.emitTerminalExit({ sessionId: 'session-thread-newer', code: 1, signal: null });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      });
+      expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledWith({
+        threadTitle: 'Newer thread',
+        status: 'Failed'
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('upgrades an existing background success alert to failed if the run exits non-zero later', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      window.localStorage.setItem('claude-desk:task-completion-alerts-bootstrap-v1', '1');
+      mocks.api.getSettings.mockResolvedValueOnce({
+        claudeCliPath: '/usr/local/bin/claude',
+        taskCompletionAlerts: true
+      });
+
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+
+      expect(mocks.sendTaskCompletionAlert).toHaveBeenNthCalledWith(1, {
+        threadTitle: 'Newer thread',
+        status: 'Succeeded'
+      });
+
+      act(() => {
+        mocks.emitTerminalExit({ sessionId: 'session-thread-newer', code: 1, signal: null });
+      });
+
+      await waitFor(() => {
+        expect(mocks.sendTaskCompletionAlert).toHaveBeenNthCalledWith(2, {
+          threadTitle: 'Newer thread',
+          status: 'Failed'
+        });
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not re-mark unread from shell prompt noise after the thread was already read', async () => {
