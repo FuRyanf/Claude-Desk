@@ -1,10 +1,21 @@
 # Claude Desk
 
-Claude Desk is a native macOS Tauri app that wraps the local Claude Code CLI in an embedded terminal UI.
+Claude Desk is a native macOS desktop app that wraps the local Claude Code CLI in a purpose-built control plane.
 
-The app does not call Anthropic APIs directly. It launches your local `claude` binary in an interactive PTY and renders output in-app.
+The app does not call Anthropic APIs directly. It launches your local `claude` binary in a real PTY, renders terminal output in-app, and keeps thread/session state on your machine.
+
+Most UI actions map directly to local CLI or git behavior. The main exception is explicit convenience context that you opt into: selected skills and queued attachments are prepended locally before your next submitted prompt.
 
 ![Claude Desk UI](assets/claude-desk-ui.png)
+
+## Highlights
+
+- Workspace + thread management across local, `ssh`, and `rdev` workspaces.
+- One-click thread start/resume with per-thread `Full access`, agent, and skills settings.
+- Session import for existing Claude conversations, including bulk import from local Claude storage.
+- Built-in file/image attachments, unread dots, task-completion notifications, and Dock badge counts.
+- Git-aware branch switching plus optional `git checkout master && git pull` before new threads.
+- Redesigned in-app settings for Claude path detection, diagnostics, and defaults.
 
 ## Security Model
 
@@ -32,11 +43,44 @@ Claude Desk solves this by keeping Claude CLI local while adding a desktop contr
 
 - Workspace + thread management in one left rail.
 - Local and remote workspaces in one UI (direct `ssh ...` or `rdev ssh ...`, both with thread-scoped session resume).
-- One-click start/resume for thread-scoped Claude sessions.
+- One-click normal or `Full access` thread start/resume for thread-scoped Claude sessions.
+- Import existing Claude sessions individually or in bulk.
 - Embedded PTY terminal behavior (ANSI, keyboard, streaming) with local log persistence.
 - Attachment workflow for prompts: click `+` or drag files/images into the bottom bar, then send with your next Enter submit.
-- Built-in project helpers (open folder/terminal, git branch/status context).
-- Optional per-thread controls like `Full access`, plus thread-level settings such as agent/skills.
+- Built-in project helpers (open folder/terminal, git branch/status context, optional pull-on-master startup).
+- Optional per-thread controls like `Full access`, agent selection, and skills.
+- Background completion signals via unread dots, desktop notifications, and Dock badge counts.
+
+## Core Concepts
+
+### Workspace
+
+A workspace is the execution root for Claude and related shell operations.
+
+Supported workspace types:
+
+- `local`
+- `ssh`
+- `rdev`
+
+Remote workspaces store connection details in Claude Desk, but Claude still runs in the shell environment you connect to.
+
+### Thread
+
+A thread is a named Claude conversation inside a workspace.
+
+Each thread stores thread-scoped metadata such as:
+
+- Claude session id
+- `Full access` state
+- enabled skills
+- last activity timestamps
+
+Deleting a thread removes Claude Desk metadata and logs. It does not delete the underlying Claude conversation if you still know the session id.
+
+### Run
+
+A run is a concrete terminal/process instance under a thread. Runs write logs under the thread's `runs/` directory and are separate from persisted thread metadata.
 
 ## Quick Start (No Dev Setup)
 
@@ -63,6 +107,37 @@ Prebuilt release note:
 
 - Releases publish a macOS DMG and app ZIP via GitHub Actions.
 - If you hit machine-specific compatibility issues, build from source locally (`yarn tauri build`) for your environment.
+
+## Product Features
+
+### Import Existing Sessions
+
+Claude Desk supports two import flows:
+
+- Manual import by Claude session id from a workspace context menu.
+- Bulk import from local Claude history under `~/.claude/projects`.
+
+Bulk import can automatically add missing local projects first, skip already-imported sessions, and import multiple sessions in one pass.
+
+### Alerts, Dock Badge, and Updates
+
+Claude Desk can surface background thread completion through:
+
+- unread dots in the left rail
+- macOS task completion alerts
+- Dock badge counts for unread threads
+
+When a newer release is available, Claude Desk can also install updates in place from inside the app.
+
+### Settings
+
+The Settings UI covers the main app-level controls:
+
+- appearance mode: System, Light, or Dark
+- task completion alerts and a test alert action
+- Claude CLI path override and detected-path fallback
+- default new-thread `Full access` behavior
+- terminal environment diagnostics copy action
 
 ## Development Requirements (Source Build Only)
 
@@ -139,6 +214,8 @@ Important files/directories:
 - `threads/<workspaceId>/<threadId>/runs/<runId>/output.log`
 - `threads/<workspaceId>/<threadId>/runs/<runId>/metadata.json`
 
+Backing up this directory preserves Claude Desk metadata, thread state, and local run logs.
+
 ## Security Notes (Detailed)
 
 Current controls:
@@ -148,6 +225,7 @@ Current controls:
 - `Full access` is only enabled when explicitly set on a thread; default thread creation keeps it off.
 - Diagnostics output applies redaction heuristics for common secret-like environment variable names before writing diagnostics artifacts.
 - Git helpers run with non-interactive prompts disabled and include command timeouts.
+- Skills and queued attachments are only prepended when you explicitly select or stage them.
 
 Known limitations:
 
