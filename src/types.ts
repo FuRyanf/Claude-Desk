@@ -80,6 +80,25 @@ export interface Settings {
   taskCompletionAlerts?: boolean;
 }
 
+export interface ImportableClaudeSession {
+  sessionId: string;
+  summary?: string | null;
+  firstPrompt?: string | null;
+  messageCount: number;
+  createdAt?: string | null;
+  modifiedAt?: string | null;
+  gitBranch?: string | null;
+}
+
+export interface ImportableClaudeProject {
+  path: string;
+  name: string;
+  pathExists: boolean;
+  workspaceId?: string | null;
+  workspaceName?: string | null;
+  sessions: ImportableClaudeSession[];
+}
+
 export interface AppUpdateInfo {
   currentVersion: string;
   latestVersion?: string | null;

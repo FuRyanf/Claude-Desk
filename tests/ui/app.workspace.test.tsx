@@ -172,6 +172,7 @@ const mocks = vi.hoisted(() => {
     openTerminalCommand: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
     validateImportableClaudeSession: vi.fn(async () => true),
+    discoverImportableClaudeSessions: vi.fn(async () => []),
     writeTextToClipboard: vi.fn(async () => undefined)
   };
   const openDialog = vi.fn(async () => null);
@@ -596,5 +597,137 @@ describe('Workspace add flow', () => {
     expect(mocks.api.terminalStartSession).not.toHaveBeenCalledWith(
       expect.objectContaining({ threadId: 'thread-import' })
     );
+  });
+
+  it('bulk imports selected Claude sessions from Add Project and adds missing projects first', async () => {
+    const user = userEvent.setup();
+    mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne]);
+    mocks.api.discoverImportableClaudeSessions.mockResolvedValueOnce([
+      {
+        path: '/tmp/workspace-added',
+        name: 'workspace-added',
+        pathExists: true,
+        workspaceId: 'ws-added',
+        workspaceName: 'workspace-added',
+        sessions: [
+          {
+            sessionId: '11111111-1111-1111-1111-111111111111',
+            summary: 'Existing project session',
+            firstPrompt: 'resume existing work',
+            messageCount: 6,
+            createdAt: '2026-03-10T10:00:00.000Z',
+            modifiedAt: '2026-03-10T11:00:00.000Z',
+            gitBranch: 'feature/existing'
+          }
+        ]
+      },
+      {
+        path: '/tmp/workspace-second',
+        name: 'workspace-second',
+        pathExists: true,
+        workspaceId: null,
+        workspaceName: null,
+        sessions: [
+          {
+            sessionId: '22222222-2222-2222-2222-222222222222',
+            summary: 'New project session',
+            firstPrompt: 'resume new work',
+            messageCount: 3,
+            createdAt: '2026-03-11T10:00:00.000Z',
+            modifiedAt: '2026-03-11T12:00:00.000Z',
+            gitBranch: 'feature/new'
+          }
+        ]
+      }
+    ]);
+
+    mocks.api.addWorkspace.mockImplementationOnce(async (path: string) => {
+      expect(path).toBe('/tmp/workspace-second');
+      mocks.seedWorkspaces([mocks.sampleWorkspaces.workspaceOne, mocks.sampleWorkspaces.workspaceTwo]);
+      return mocks.sampleWorkspaces.workspaceTwo;
+    });
+
+    const importedExistingThread = {
+      id: 'thread-bulk-existing',
+      workspaceId: 'ws-added',
+      agentId: 'claude-code',
+      fullAccess: false,
+      enabledSkills: [] as string[],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      title: 'New thread',
+      isArchived: false,
+      lastRunStatus: 'Idle' as const,
+      lastRunStartedAt: null,
+      lastRunEndedAt: null,
+      claudeSessionId: '11111111-1111-1111-1111-111111111111',
+      lastResumeAt: null,
+      lastNewSessionAt: null
+    };
+    const importedNewProjectThread = {
+      ...importedExistingThread,
+      id: 'thread-bulk-new',
+      workspaceId: 'ws-second',
+      claudeSessionId: '22222222-2222-2222-2222-222222222222'
+    };
+
+    mocks.api.createThread
+      .mockResolvedValueOnce({
+        ...importedExistingThread,
+        id: 'thread-bulk-existing',
+        claudeSessionId: null
+      })
+      .mockResolvedValueOnce({
+        ...importedNewProjectThread,
+        id: 'thread-bulk-new',
+        claudeSessionId: null
+      });
+    mocks.api.setThreadClaudeSessionId
+      .mockResolvedValueOnce(importedExistingThread)
+      .mockResolvedValueOnce(importedNewProjectThread);
+
+    render(<App />);
+
+    await user.click(await screen.findByRole('button', { name: 'Add new project' }));
+    await user.click(await screen.findByRole('button', { name: 'Import Claude sessions' }));
+
+    await screen.findByRole('dialog', { name: 'Bulk Import Claude Sessions' });
+    await user.click(screen.getByRole('checkbox', { name: /Existing project session/i }));
+    await user.click(screen.getByRole('checkbox', { name: /New project session/i }));
+    await user.click(screen.getByRole('button', { name: 'Import selected (2)' }));
+
+    await waitFor(() => {
+      expect(mocks.api.validateImportableClaudeSession).toHaveBeenCalledWith(
+        '/tmp/workspace-added',
+        '11111111-1111-1111-1111-111111111111'
+      );
+      expect(mocks.api.validateImportableClaudeSession).toHaveBeenCalledWith(
+        '/tmp/workspace-second',
+        '22222222-2222-2222-2222-222222222222'
+      );
+      expect(mocks.api.addWorkspace).toHaveBeenCalledWith('/tmp/workspace-second');
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-added', 'claude-code');
+      expect(mocks.api.createThread).toHaveBeenCalledWith('ws-second', 'claude-code');
+      expect(mocks.api.setThreadClaudeSessionId).toHaveBeenCalledWith(
+        'ws-added',
+        'thread-bulk-existing',
+        '11111111-1111-1111-1111-111111111111'
+      );
+      expect(mocks.api.setThreadClaudeSessionId).toHaveBeenCalledWith(
+        'ws-second',
+        'thread-bulk-new',
+        '22222222-2222-2222-2222-222222222222'
+      );
+    });
+
+    expect(mocks.api.terminalStartSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: 'thread-bulk-existing' })
+    );
+    expect(mocks.api.terminalStartSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: 'thread-bulk-new' })
+    );
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'Bulk Import Claude Sessions' })).not.toBeInTheDocument();
+    });
   });
 });

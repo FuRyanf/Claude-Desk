@@ -14,9 +14,9 @@ use tauri::{Manager, State};
 
 use crate::models::{
     AppUpdateInfo, ContextPreview, GitBranchEntry, GitDiffSummary, GitInfo,
-    GitPullForNewThreadResult, GitWorkspaceStatus, RunClaudeRequest, RunClaudeResponse, Settings,
-    SkillInfo, TerminalStartResponse, ThreadMetadata, TranscriptEntry, Workspace,
-    WorkspaceShellStartResponse,
+    GitPullForNewThreadResult, GitWorkspaceStatus, ImportableClaudeProject, RunClaudeRequest,
+    RunClaudeResponse, Settings, SkillInfo, TerminalStartResponse, ThreadMetadata, TranscriptEntry,
+    Workspace, WorkspaceShellStartResponse,
 };
 
 struct AppState {
@@ -603,6 +603,11 @@ fn validate_importable_claude_session(
 }
 
 #[tauri::command]
+fn discover_importable_claude_sessions() -> Result<Vec<ImportableClaudeProject>, String> {
+    runner::discover_importable_claude_sessions().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn write_text_to_clipboard(text: String) -> Result<(), String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
     clipboard.set_text(text).map_err(|error| error.to_string())
@@ -713,6 +718,7 @@ fn main() {
             open_terminal_command,
             copy_terminal_env_diagnostics,
             validate_importable_claude_session,
+            discover_importable_claude_sessions,
             write_text_to_clipboard,
             write_image_to_clipboard
         ])

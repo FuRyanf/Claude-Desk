@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader as StdBufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,8 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use serde::Deserialize;
+use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -19,10 +21,10 @@ use uuid::Uuid;
 
 use crate::git_tools;
 use crate::models::{
-    ContextFilePreview, ContextPreview, RunClaudeRequest, RunClaudeResponse, RunExitEvent,
-    RunMetadata, Settings, StreamEvent, TerminalDataEvent, TerminalExitEvent,
-    TerminalReadyEvent, TerminalStartResponse, ThreadRunStatus, TranscriptEntry, WorkspaceKind,
-    WorkspaceShellStartResponse,
+    ContextFilePreview, ContextPreview, ImportableClaudeProject, ImportableClaudeSession,
+    RunClaudeRequest, RunClaudeResponse, RunExitEvent, RunMetadata, Settings, StreamEvent,
+    TerminalDataEvent, TerminalExitEvent, TerminalReadyEvent, TerminalStartResponse,
+    ThreadRunStatus, TranscriptEntry, WorkspaceKind, WorkspaceShellStartResponse,
 };
 use crate::skills;
 use crate::storage;
@@ -128,6 +130,11 @@ fn sanitize_claude_project_dir_name(value: &str) -> String {
 }
 
 fn claude_projects_root() -> Result<PathBuf> {
+    if let Ok(override_root) = env::var("CLAUDE_DESK_CLAUDE_PROJECTS_ROOT") {
+        if !override_root.trim().is_empty() {
+            return Ok(PathBuf::from(override_root));
+        }
+    }
     let home_dir = dirs::home_dir().ok_or_else(|| anyhow!("Unable to resolve home directory"))?;
     Ok(home_dir.join(".claude").join("projects"))
 }
@@ -140,18 +147,421 @@ fn claude_project_dir_for_workspace(workspace_path: &str) -> PathBuf {
     PathBuf::from(sanitize_claude_project_dir_name(&normalized_workspace_path))
 }
 
-fn find_any_claude_session_project_dir(
-    projects_root: &Path,
-    claude_session_id: &str,
-) -> Result<Option<PathBuf>> {
-    let expected_file_name = format!("{claude_session_id}.jsonl");
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeSessionsIndex {
+    #[serde(default)]
+    original_path: Option<String>,
+    #[serde(default)]
+    entries: Vec<ClaudeSessionsIndexEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeSessionsIndexEntry {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    first_prompt: Option<String>,
+    #[serde(default)]
+    message_count: Option<u64>,
+    #[serde(default)]
+    created: Option<DateTime<Utc>>,
+    #[serde(default)]
+    modified: Option<DateTime<Utc>>,
+    #[serde(default)]
+    git_branch: Option<String>,
+    #[serde(default)]
+    project_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeJsonlMessage {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    content: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeJsonlEntry {
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    git_branch: Option<String>,
+    #[serde(default)]
+    r#type: Option<String>,
+    #[serde(default)]
+    message: Option<ClaudeJsonlMessage>,
+    #[serde(default)]
+    timestamp: Option<DateTime<Utc>>,
+}
+
+fn canonicalize_path_or_original(path: &str) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| PathBuf::from(path))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn trim_to_option(value: Option<String>) -> Option<String> {
+    value.and_then(|item| {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn session_sort_timestamp(session: &ImportableClaudeSession) -> i64 {
+    session
+        .modified_at
+        .or(session.created_at)
+        .map(|timestamp| timestamp.timestamp_millis())
+        .unwrap_or(0)
+}
+
+fn sort_importable_sessions(sessions: &mut [ImportableClaudeSession]) {
+    sessions.sort_by(|left, right| {
+        session_sort_timestamp(right)
+            .cmp(&session_sort_timestamp(left))
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+}
+
+fn project_sort_timestamp(project: &ImportableClaudeProject) -> i64 {
+    project
+        .sessions
+        .iter()
+        .map(session_sort_timestamp)
+        .max()
+        .unwrap_or(0)
+}
+
+fn claude_project_name(project_path: &str) -> String {
+    Path::new(project_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| project_path.to_string())
+}
+
+fn load_local_workspace_lookup() -> Result<HashMap<String, (String, String)>> {
+    let mut lookup = HashMap::new();
+    for workspace in storage::load_workspaces()? {
+        if workspace.kind != WorkspaceKind::Local {
+            continue;
+        }
+        lookup.insert(
+            canonicalize_path_or_original(&workspace.path),
+            (workspace.id, workspace.name),
+        );
+    }
+    Ok(lookup)
+}
+
+fn build_importable_project(
+    project_path: String,
+    mut sessions: Vec<ImportableClaudeSession>,
+    workspace_lookup: &HashMap<String, (String, String)>,
+) -> Option<ImportableClaudeProject> {
+    if sessions.is_empty() {
+        return None;
+    }
+
+    let normalized_path = canonicalize_path_or_original(&project_path);
+    sort_importable_sessions(&mut sessions);
+    let workspace_match = workspace_lookup.get(&normalized_path);
+
+    Some(ImportableClaudeProject {
+        name: claude_project_name(&normalized_path),
+        path_exists: Path::new(&normalized_path).is_dir(),
+        path: normalized_path,
+        workspace_id: workspace_match.map(|(workspace_id, _)| workspace_id.clone()),
+        workspace_name: workspace_match.map(|(_, workspace_name)| workspace_name.clone()),
+        sessions,
+    })
+}
+
+fn discover_sessions_from_index(
+    project_dir: &Path,
+    workspace_lookup: &HashMap<String, (String, String)>,
+) -> Result<Option<ImportableClaudeProject>> {
+    let index_path = project_dir.join("sessions-index.json");
+    if !index_path.is_file() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(index_path)?;
+    let index: ClaudeSessionsIndex = serde_json::from_str(&raw)?;
+
+    let project_path = trim_to_option(index.original_path.clone()).or_else(|| {
+        index
+            .entries
+            .iter()
+            .find_map(|entry| trim_to_option(entry.project_path.clone()))
+    });
+    let Some(project_path) = project_path else {
+        return Ok(None);
+    };
+
+    let mut by_session_id = HashMap::new();
+    for entry in index.entries {
+        let Some(session_id) = trim_to_option(entry.session_id) else {
+            continue;
+        };
+        by_session_id.insert(
+            session_id.clone(),
+            ImportableClaudeSession {
+                session_id,
+                summary: trim_to_option(entry.summary),
+                first_prompt: trim_to_option(entry.first_prompt),
+                message_count: entry.message_count.unwrap_or(0),
+                created_at: entry.created,
+                modified_at: entry.modified,
+                git_branch: trim_to_option(entry.git_branch),
+            },
+        );
+    }
+
+    Ok(build_importable_project(
+        project_path,
+        by_session_id.into_values().collect(),
+        workspace_lookup,
+    ))
+}
+
+fn json_value_to_prompt_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Value::Array(items) => items.iter().find_map(|item| {
+            item.get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToString::to_string)
+        }),
+        _ => None,
+    }
+}
+
+fn discover_sessions_from_jsonl(
+    project_dir: &Path,
+    workspace_lookup: &HashMap<String, (String, String)>,
+) -> Result<Option<ImportableClaudeProject>> {
+    let mut project_path = None;
+    let mut sessions_by_id: HashMap<String, ImportableClaudeSession> = HashMap::new();
+
+    for entry in fs::read_dir(project_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_file()
+            || path.extension().and_then(|ext| ext.to_str()) != Some("jsonl")
+        {
+            continue;
+        }
+
+        let session_id = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .filter(|stem| !stem.trim().is_empty());
+        let Some(mut session_id) = session_id else {
+            continue;
+        };
+
+        let metadata = entry.metadata()?;
+        let mut created_at = metadata.created().ok().map(DateTime::<Utc>::from);
+        let modified_at = metadata.modified().ok().map(DateTime::<Utc>::from);
+        if created_at.is_none() {
+            created_at = modified_at;
+        }
+
+        let file = File::open(&path)?;
+        let reader = StdBufReader::new(file);
+        let mut first_prompt = None;
+        let mut git_branch = None;
+        let mut observed_project_path = None;
+        let mut message_count = 0_u64;
+        let mut latest_timestamp = modified_at;
+
+        for line in reader.lines() {
+            let line = line?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let Ok(parsed) = serde_json::from_str::<ClaudeJsonlEntry>(trimmed) else {
+                continue;
+            };
+            if observed_project_path.is_none() {
+                observed_project_path = trim_to_option(parsed.cwd.clone());
+            }
+            if git_branch.is_none() {
+                git_branch = trim_to_option(parsed.git_branch.clone());
+            }
+            if let Some(parsed_session_id) = trim_to_option(parsed.session_id.clone()) {
+                session_id = parsed_session_id;
+            }
+            if let Some(timestamp) = parsed.timestamp {
+                latest_timestamp = Some(
+                    latest_timestamp
+                        .map(|current| current.max(timestamp))
+                        .unwrap_or(timestamp),
+                );
+                if created_at.is_none() {
+                    created_at = Some(timestamp);
+                }
+            }
+            if parsed.r#type.as_deref() == Some("user")
+                && parsed
+                    .message
+                    .as_ref()
+                    .and_then(|message| message.role.as_deref())
+                    == Some("user")
+            {
+                message_count += 1;
+                if first_prompt.is_none() {
+                    first_prompt = parsed
+                        .message
+                        .as_ref()
+                        .and_then(|message| message.content.as_ref())
+                        .and_then(json_value_to_prompt_text);
+                }
+            }
+        }
+
+        if project_path.is_none() {
+            project_path = observed_project_path;
+        }
+
+        let session =
+            sessions_by_id
+                .entry(session_id.clone())
+                .or_insert_with(|| ImportableClaudeSession {
+                    session_id: session_id.clone(),
+                    summary: None,
+                    first_prompt: None,
+                    message_count: 0,
+                    created_at,
+                    modified_at: latest_timestamp,
+                    git_branch: git_branch.clone(),
+                });
+
+        if session.first_prompt.is_none() {
+            session.first_prompt = first_prompt;
+        }
+        session.message_count = session.message_count.max(message_count);
+        if session.created_at.is_none() {
+            session.created_at = created_at;
+        }
+        session.modified_at = match (session.modified_at, latest_timestamp) {
+            (Some(current), Some(next)) => Some(current.max(next)),
+            (current, None) => current,
+            (None, next) => next,
+        };
+        if session.git_branch.is_none() {
+            session.git_branch = git_branch;
+        }
+    }
+
+    let Some(project_path) = project_path else {
+        return Ok(None);
+    };
+
+    Ok(build_importable_project(
+        project_path,
+        sessions_by_id.into_values().collect(),
+        workspace_lookup,
+    ))
+}
+
+pub fn discover_importable_claude_sessions() -> Result<Vec<ImportableClaudeProject>> {
+    let projects_root = claude_projects_root()?;
+    if !projects_root.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let workspace_lookup = load_local_workspace_lookup()?;
+    let mut projects = Vec::new();
+
     for entry in fs::read_dir(projects_root)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        let candidate = entry.path().join(&expected_file_name);
-        if candidate.is_file() {
+
+        let project_dir = entry.path();
+        let discovered = match discover_sessions_from_index(&project_dir, &workspace_lookup)? {
+            Some(project) => Some(project),
+            None => discover_sessions_from_jsonl(&project_dir, &workspace_lookup)?,
+        };
+        if let Some(project) = discovered {
+            projects.push(project);
+        }
+    }
+
+    projects.sort_by(|left, right| {
+        project_sort_timestamp(right)
+            .cmp(&project_sort_timestamp(left))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    Ok(projects)
+}
+
+fn project_dir_contains_claude_session(
+    project_dir: &Path,
+    claude_session_id: &str,
+) -> Result<bool> {
+    if project_dir
+        .join(format!("{claude_session_id}.jsonl"))
+        .is_file()
+    {
+        return Ok(true);
+    }
+
+    let index_path = project_dir.join("sessions-index.json");
+    if !index_path.is_file() {
+        return Ok(false);
+    }
+
+    let raw = fs::read_to_string(index_path)?;
+    let index: ClaudeSessionsIndex = serde_json::from_str(&raw)?;
+    Ok(index
+        .entries
+        .into_iter()
+        .filter_map(|entry| trim_to_option(entry.session_id))
+        .any(|session_id| session_id == claude_session_id))
+}
+
+fn find_any_claude_session_project_dir(
+    projects_root: &Path,
+    claude_session_id: &str,
+) -> Result<Option<PathBuf>> {
+    for entry in fs::read_dir(projects_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let candidate = entry.path();
+        if project_dir_contains_claude_session(&candidate, claude_session_id)? {
             return Ok(Some(entry.path()));
         }
     }
@@ -385,7 +795,9 @@ fn looks_like_launch_command_echo_line(line: &str, launch_command: &str) -> bool
         return false;
     }
 
-    if normalized_command.contains(&normalized_line) || normalized_line.contains(&normalized_command) {
+    if normalized_command.contains(&normalized_line)
+        || normalized_line.contains(&normalized_command)
+    {
         return true;
     }
 
@@ -1886,8 +2298,7 @@ pub fn validate_importable_claude_session(
 
     let expected_project_dir =
         projects_root.join(claude_project_dir_for_workspace(&workspace_path));
-    let expected_session_path = expected_project_dir.join(format!("{claude_session_id}.jsonl"));
-    if expected_session_path.is_file() {
+    if project_dir_contains_claude_session(&expected_project_dir, &claude_session_id)? {
         return Ok(());
     }
 
@@ -2289,6 +2700,12 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+
+    fn test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn ignores_launch_command_echo_when_detecting_ready_output() {
@@ -2416,6 +2833,191 @@ mod tests {
             sanitize_claude_project_dir_name("/Users/rfu/Claude Desk"),
             "-Users-rfu-Claude-Desk"
         );
+    }
+
+    #[test]
+    fn discover_importable_claude_sessions_reads_sessions_index() {
+        let _guard = test_lock().lock().expect("lock poisoned");
+
+        let temp_root =
+            std::env::temp_dir().join(format!("claude-desk-import-discovery-{}", Uuid::new_v4()));
+        let app_support_root = temp_root.join("app-support");
+        let projects_root = temp_root.join("projects");
+        let workspace_path = temp_root.join("workspace-one");
+        fs::create_dir_all(&workspace_path).expect("should create workspace fixture");
+        fs::create_dir_all(&projects_root).expect("should create projects root");
+
+        std::env::set_var("CLAUDE_DESK_APP_SUPPORT_ROOT", &app_support_root);
+        std::env::set_var("CLAUDE_DESK_CLAUDE_PROJECTS_ROOT", &projects_root);
+
+        let workspace = storage::add_workspace(workspace_path.to_string_lossy().as_ref())
+            .expect("workspace should be stored");
+        let project_dir = projects_root.join(claude_project_dir_for_workspace(
+            workspace_path.to_string_lossy().as_ref(),
+        ));
+        fs::create_dir_all(&project_dir).expect("should create claude project dir");
+        fs::write(
+            project_dir.join("sessions-index.json"),
+            format!(
+                r#"{{
+  "version": 1,
+  "originalPath": "{}",
+  "entries": [
+    {{
+      "sessionId": "session-older",
+      "summary": "Older summary",
+      "firstPrompt": "older prompt",
+      "messageCount": 4,
+      "created": "2026-03-10T10:00:00Z",
+      "modified": "2026-03-10T11:00:00Z",
+      "gitBranch": "feature/older",
+      "projectPath": "{}"
+    }},
+    {{
+      "sessionId": "session-newer",
+      "summary": "Newer summary",
+      "firstPrompt": "newer prompt",
+      "messageCount": 7,
+      "created": "2026-03-11T10:00:00Z",
+      "modified": "2026-03-11T12:00:00Z",
+      "gitBranch": "feature/newer",
+      "projectPath": "{}"
+    }}
+  ]
+}}"#,
+                workspace_path.to_string_lossy(),
+                workspace_path.to_string_lossy(),
+                workspace_path.to_string_lossy()
+            ),
+        )
+        .expect("should write sessions index");
+
+        let discovered = discover_importable_claude_sessions().expect("discovery should succeed");
+        assert_eq!(discovered.len(), 1);
+        let project = &discovered[0];
+        assert_eq!(project.path, workspace.path);
+        assert_eq!(project.workspace_id.as_deref(), Some(workspace.id.as_str()));
+        assert_eq!(
+            project.workspace_name.as_deref(),
+            Some(workspace.name.as_str())
+        );
+        assert_eq!(
+            project
+                .sessions
+                .iter()
+                .map(|session| session.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["session-newer", "session-older"]
+        );
+
+        std::env::remove_var("CLAUDE_DESK_APP_SUPPORT_ROOT");
+        std::env::remove_var("CLAUDE_DESK_CLAUDE_PROJECTS_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn discover_importable_claude_sessions_falls_back_to_jsonl() {
+        let _guard = test_lock().lock().expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "claude-desk-import-discovery-jsonl-{}",
+            Uuid::new_v4()
+        ));
+        let projects_root = temp_root.join("projects");
+        let workspace_path = temp_root.join("workspace-two");
+        fs::create_dir_all(&workspace_path).expect("should create workspace fixture");
+        fs::create_dir_all(&projects_root).expect("should create projects root");
+
+        std::env::set_var("CLAUDE_DESK_CLAUDE_PROJECTS_ROOT", &projects_root);
+
+        let project_dir = projects_root.join("fallback-project");
+        fs::create_dir_all(&project_dir).expect("should create claude project dir");
+        fs::write(
+            project_dir.join("11111111-1111-1111-1111-111111111111.jsonl"),
+            format!(
+                concat!(
+                    "{{\"cwd\":\"{}\",\"sessionId\":\"11111111-1111-1111-1111-111111111111\",\"gitBranch\":\"feature/jsonl\",\"type\":\"progress\",\"timestamp\":\"2026-03-11T12:00:00Z\"}}\n",
+                    "{{\"cwd\":\"{}\",\"sessionId\":\"11111111-1111-1111-1111-111111111111\",\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"review this diff\"}},\"timestamp\":\"2026-03-11T12:05:00Z\"}}\n"
+                ),
+                workspace_path.to_string_lossy(),
+                workspace_path.to_string_lossy()
+            ),
+        )
+        .expect("should write jsonl session");
+
+        let discovered = discover_importable_claude_sessions().expect("discovery should succeed");
+        assert_eq!(discovered.len(), 1);
+        let project = &discovered[0];
+        assert_eq!(
+            project.path,
+            canonicalize_path_or_original(workspace_path.to_string_lossy().as_ref())
+        );
+        assert!(project.workspace_id.is_none());
+        assert_eq!(project.sessions.len(), 1);
+        assert_eq!(
+            project.sessions[0].session_id,
+            "11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(
+            project.sessions[0].first_prompt.as_deref(),
+            Some("review this diff")
+        );
+        assert_eq!(
+            project.sessions[0].git_branch.as_deref(),
+            Some("feature/jsonl")
+        );
+
+        std::env::remove_var("CLAUDE_DESK_CLAUDE_PROJECTS_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
+    }
+
+    #[test]
+    fn validate_importable_claude_session_accepts_sessions_index_entries() {
+        let _guard = test_lock().lock().expect("lock poisoned");
+
+        let temp_root = std::env::temp_dir().join(format!(
+            "claude-desk-validate-importable-session-index-{}",
+            Uuid::new_v4()
+        ));
+        let projects_root = temp_root.join("projects");
+        let workspace_path = temp_root.join("workspace-index-only");
+        fs::create_dir_all(&workspace_path).expect("should create workspace fixture");
+        fs::create_dir_all(&projects_root).expect("should create projects root");
+
+        std::env::set_var("CLAUDE_DESK_CLAUDE_PROJECTS_ROOT", &projects_root);
+
+        let project_dir = projects_root.join(claude_project_dir_for_workspace(
+            workspace_path.to_string_lossy().as_ref(),
+        ));
+        fs::create_dir_all(&project_dir).expect("should create claude project dir");
+        fs::write(
+            project_dir.join("sessions-index.json"),
+            format!(
+                r#"{{
+  "version": 1,
+  "originalPath": "{}",
+  "entries": [
+    {{
+      "sessionId": "index-only-session",
+      "summary": "Index only session",
+      "projectPath": "{}"
+    }}
+  ]
+}}"#,
+                workspace_path.to_string_lossy(),
+                workspace_path.to_string_lossy()
+            ),
+        )
+        .expect("should write sessions index");
+
+        validate_importable_claude_session(
+            workspace_path.to_string_lossy().to_string(),
+            "index-only-session".to_string(),
+        )
+        .expect("validation should accept indexed session");
+
+        std::env::remove_var("CLAUDE_DESK_CLAUDE_PROJECTS_ROOT");
+        let _ = fs::remove_dir_all(temp_root);
     }
 
     #[test]

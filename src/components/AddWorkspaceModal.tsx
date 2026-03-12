@@ -17,6 +17,7 @@ interface AddWorkspaceModalProps {
   onConfirmRdev: (rdevSshCommand: string, displayName: string) => void;
   onConfirmSsh: (sshCommand: string, displayName: string, remotePath: string) => void;
   onPickDirectory: () => void;
+  onOpenBulkImport?: () => void;
 }
 
 export function AddWorkspaceModal({
@@ -33,7 +34,8 @@ export function AddWorkspaceModal({
   onConfirmLocal,
   onConfirmRdev,
   onConfirmSsh,
-  onPickDirectory
+  onPickDirectory,
+  onOpenBulkImport
 }: AddWorkspaceModalProps) {
   const [mode, setMode] = useState<AddWorkspaceMode>(initialMode);
   const [path, setPath] = useState(initialPath);
@@ -110,7 +112,18 @@ export function AddWorkspaceModal({
               <button type="button" className="ghost-button" onClick={onPickDirectory} disabled={saving}>
                 Choose Folder
               </button>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => onOpenBulkImport?.()}
+                disabled={saving}
+              >
+                Import Claude sessions
+              </button>
             </div>
+            <p className="muted">
+              Discover sessions from <code>~/.claude/projects</code> and add missing local projects automatically.
+            </p>
 
             <label htmlFor="workspace-path">Manual path</label>
             <input

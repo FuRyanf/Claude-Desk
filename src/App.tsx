@@ -14,6 +14,7 @@ import { confirm, open } from '@tauri-apps/plugin-dialog';
 
 import './styles.css';
 import { AddWorkspaceModal } from './components/AddWorkspaceModal';
+import { BulkImportClaudeSessionsModal } from './components/BulkImportClaudeSessionsModal';
 import { ImportSessionModal } from './components/ImportSessionModal';
 import { BottomBar } from './components/BottomBar';
 import { HeaderBar } from './components/HeaderBar';
@@ -68,6 +69,7 @@ import type {
   GitBranchEntry,
   GitInfo,
   GitWorkspaceStatus,
+  ImportableClaudeProject,
   RunStatus,
   Settings,
   SkillInfo,
@@ -871,6 +873,14 @@ export default function App() {
   const [importSessionWorkspace, setImportSessionWorkspace] = useState<Workspace | null>(null);
   const [importSessionError, setImportSessionError] = useState<string | null>(null);
   const [importingSession, setImportingSession] = useState(false);
+  const [bulkImportOpen, setBulkImportOpen] = useState(false);
+  const [bulkImportLoading, setBulkImportLoading] = useState(false);
+  const [bulkImporting, setBulkImporting] = useState(false);
+  const [bulkImportError, setBulkImportError] = useState<string | null>(null);
+  const [discoveredImportableClaudeProjects, setDiscoveredImportableClaudeProjects] = useState<
+    ImportableClaudeProject[]
+  >([]);
+  const [selectedBulkImportSessionIds, setSelectedBulkImportSessionIds] = useState<string[]>([]);
 
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [appUpdateInfo, setAppUpdateInfo] = useState<AppUpdateInfo | null>(null);
@@ -974,6 +984,26 @@ export default function App() {
   );
 
   const allThreads = useMemo(() => Object.values(threadsByWorkspace).flat(), [threadsByWorkspace]);
+  const importedClaudeSessionIds = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          allThreads
+            .map((thread) => thread.claudeSessionId?.trim() ?? '')
+            .filter((sessionId) => sessionId.length > 0)
+        )
+      ),
+    [allThreads]
+  );
+  const discoveredImportableClaudeSessionsById = useMemo(() => {
+    const lookup = new Map<string, { project: ImportableClaudeProject }>();
+    for (const project of discoveredImportableClaudeProjects) {
+      for (const session of project.sessions) {
+        lookup.set(session.sessionId, { project });
+      }
+    }
+    return lookup;
+  }, [discoveredImportableClaudeProjects]);
 
   const selectedThread = useMemo(() => {
     if (!selectedThreadId) {
@@ -2973,26 +3003,38 @@ export default function App() {
     clearAttachmentDraftForThread(selectedThread.id);
   }, [clearAttachmentDraftForThread, selectedThread]);
 
-  const addWorkspaceByPath = useCallback(
-    async (path: string) => {
+  const ensureLocalWorkspaceByPath = useCallback(
+    async (path: string, options?: { select?: boolean }) => {
       const normalized = path.trim();
       if (!normalized) {
         throw new Error('Please enter a workspace path.');
       }
 
-      const workspace = await api.addWorkspace(normalized);
+      const existingWorkspace = workspaces.find(
+        (workspace) => workspace.kind === 'local' && workspace.path === normalized
+      );
+      const workspace = existingWorkspace ?? (await api.addWorkspace(normalized));
       setWorkspaces((current) => {
         if (current.some((item) => item.id === workspace.id)) {
           return current;
         }
         return [...current, workspace];
       });
-      setSelectedWorkspace(workspace.id);
-      setSelectedThread(undefined);
+      if (options?.select !== false) {
+        setSelectedWorkspace(workspace.id);
+        setSelectedThread(undefined);
+      }
       await refreshThreadsForWorkspace(workspace.id);
       return workspace;
     },
-    [refreshThreadsForWorkspace, setSelectedThread, setSelectedWorkspace]
+    [refreshThreadsForWorkspace, setSelectedThread, setSelectedWorkspace, workspaces]
+  );
+
+  const addWorkspaceByPath = useCallback(
+    async (path: string) => {
+      return ensureLocalWorkspaceByPath(path, { select: true });
+    },
+    [ensureLocalWorkspaceByPath]
   );
 
   const addRdevWorkspaceByCommand = useCallback(
@@ -4626,6 +4668,164 @@ export default function App() {
     ]
   );
 
+  const refreshImportableClaudeSessionsDiscovery = useCallback(async () => {
+    setBulkImportLoading(true);
+    setBulkImportError(null);
+    try {
+      const discovered = await api.discoverImportableClaudeSessions();
+      setDiscoveredImportableClaudeProjects(discovered);
+      const availableSessionIds = new Set(
+        discovered.flatMap((project) => project.sessions.map((session) => session.sessionId))
+      );
+      setSelectedBulkImportSessionIds((current) => current.filter((sessionId) => availableSessionIds.has(sessionId)));
+    } catch (error) {
+      setBulkImportError(String(error));
+    } finally {
+      setBulkImportLoading(false);
+    }
+  }, []);
+
+  const openBulkImportModal = useCallback(() => {
+    setSettingsOpen(false);
+    setAddWorkspaceOpen(false);
+    setAddWorkspaceError(null);
+    setAddWorkspaceSshCommand('');
+    setAddWorkspaceSshRemotePath('');
+    setBulkImportOpen(true);
+    setBulkImportError(null);
+    setSelectedBulkImportSessionIds([]);
+    void refreshImportableClaudeSessionsDiscovery();
+  }, [refreshImportableClaudeSessionsDiscovery]);
+
+  const closeBulkImportModal = useCallback(() => {
+    if (bulkImporting) {
+      return;
+    }
+    setBulkImportOpen(false);
+    setBulkImportError(null);
+    setSelectedBulkImportSessionIds([]);
+  }, [bulkImporting]);
+
+  const toggleBulkImportSessionSelection = useCallback((sessionId: string, selected: boolean) => {
+    setSelectedBulkImportSessionIds((current) => {
+      if (selected) {
+        return current.includes(sessionId) ? current : [...current, sessionId];
+      }
+      return current.filter((candidate) => candidate !== sessionId);
+    });
+  }, []);
+
+  const toggleBulkImportProjectSelection = useCallback(
+    (project: ImportableClaudeProject, selected: boolean) => {
+      const importedSessionIdSet = new Set(importedClaudeSessionIds);
+      const projectSessionIds = project.sessions
+        .filter((session) => project.pathExists && !importedSessionIdSet.has(session.sessionId))
+        .map((session) => session.sessionId);
+
+      setSelectedBulkImportSessionIds((current) => {
+        const next = new Set(current);
+        if (selected) {
+          projectSessionIds.forEach((sessionId) => next.add(sessionId));
+        } else {
+          projectSessionIds.forEach((sessionId) => next.delete(sessionId));
+        }
+        return Array.from(next);
+      });
+    },
+    [importedClaudeSessionIds]
+  );
+
+  const confirmBulkImportClaudeSessions = useCallback(async () => {
+    if (bulkImporting) {
+      return;
+    }
+
+    const importedSessionIdSet = new Set(importedClaudeSessionIds);
+    const sessionIdsToImport = selectedBulkImportSessionIds.filter((sessionId) => {
+      const discovered = discoveredImportableClaudeSessionsById.get(sessionId);
+      return Boolean(discovered?.project.pathExists) && !importedSessionIdSet.has(sessionId);
+    });
+
+    if (sessionIdsToImport.length === 0) {
+      setBulkImportError('Select at least one Claude session that has not already been imported.');
+      return;
+    }
+
+    setBulkImporting(true);
+    setBulkImportError(null);
+
+    try {
+      const workspaceByProjectPath = new Map<string, Workspace>();
+      const impactedWorkspaceIds = new Set<string>();
+      const importedThreads: Array<{ workspace: Workspace; thread: ThreadMetadata }> = [];
+
+      for (const sessionId of sessionIdsToImport) {
+        const discovered = discoveredImportableClaudeSessionsById.get(sessionId);
+        if (!discovered) {
+          continue;
+        }
+
+        const { project } = discovered;
+        let workspace =
+          workspaceByProjectPath.get(project.path) ??
+          workspaces.find(
+            (candidate) =>
+              candidate.id === project.workspaceId ||
+              (candidate.kind === 'local' && candidate.path === project.path)
+          );
+
+        if (!workspace) {
+          workspace = await ensureLocalWorkspaceByPath(project.path, { select: false });
+        }
+        workspaceByProjectPath.set(project.path, workspace);
+
+        await api.validateImportableClaudeSession(workspace.path, sessionId);
+        const thread = await api.createThread(workspace.id, 'claude-code');
+        const importedThread = await api.setThreadClaudeSessionId(workspace.id, thread.id, sessionId);
+        applyThreadUpdate(importedThread);
+        delete deletedThreadIdsRef.current[importedThread.id];
+        impactedWorkspaceIds.add(workspace.id);
+        importedThreads.push({ workspace, thread: importedThread });
+      }
+
+      await Promise.all(Array.from(impactedWorkspaceIds, (workspaceId) => refreshThreadsForWorkspace(workspaceId)));
+
+      if (importedThreads.length === 1) {
+        const [{ workspace, thread }] = importedThreads;
+        if (selectedWorkspaceIdRef.current !== workspace.id) {
+          setSelectedWorkspace(workspace.id);
+        }
+        setSelectedThread(thread.id);
+        setTerminalFocusRequestId((current) => current + 1);
+      }
+
+      setBulkImportOpen(false);
+      setSelectedBulkImportSessionIds([]);
+      pushToast(
+        importedThreads.length === 1
+          ? 'Imported 1 Claude session.'
+          : `Imported ${importedThreads.length} Claude sessions.`,
+        'info'
+      );
+    } catch (error) {
+      setBulkImportError(String(error));
+    } finally {
+      setBulkImporting(false);
+    }
+  }, [
+    applyThreadUpdate,
+    bulkImporting,
+    discoveredImportableClaudeSessionsById,
+    ensureLocalWorkspaceByPath,
+    importedClaudeSessionIds,
+    pushToast,
+    refreshThreadsForWorkspace,
+    selectedBulkImportSessionIds,
+    setSelectedThread,
+    setSelectedWorkspace,
+    workspaces
+  ]);
+
   const installLatestUpdate = useCallback(async () => {
     if (installingUpdate) {
       return;
@@ -5138,6 +5338,7 @@ export default function App() {
         onConfirmSsh={(command, displayName, remotePath) =>
           void confirmSshWorkspace(command, displayName, remotePath)
         }
+        onOpenBulkImport={openBulkImportModal}
       />
 
       <ImportSessionModal
@@ -5150,6 +5351,21 @@ export default function App() {
           setImportSessionError(null);
         }}
         onConfirm={(claudeSessionId) => void confirmImportSession(claudeSessionId)}
+      />
+
+      <BulkImportClaudeSessionsModal
+        open={bulkImportOpen}
+        loading={bulkImportLoading}
+        importing={bulkImporting}
+        projects={discoveredImportableClaudeProjects}
+        selectedSessionIds={selectedBulkImportSessionIds}
+        alreadyImportedSessionIds={importedClaudeSessionIds}
+        error={bulkImportError}
+        onClose={closeBulkImportModal}
+        onRefresh={() => void refreshImportableClaudeSessionsDiscovery()}
+        onToggleSession={toggleBulkImportSessionSelection}
+        onToggleProject={toggleBulkImportProjectSelection}
+        onImport={() => void confirmBulkImportClaudeSessions()}
       />
 
       {resumeFailureModal ? (

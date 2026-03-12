@@ -125,6 +125,38 @@ impl Default for Settings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ImportableClaudeSession {
+    pub session_id: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub first_prompt: Option<String>,
+    #[serde(default)]
+    pub message_count: u64,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub modified_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportableClaudeProject {
+    pub path: String,
+    pub name: String,
+    #[serde(default)]
+    pub path_exists: bool,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub workspace_name: Option<String>,
+    pub sessions: Vec<ImportableClaudeSession>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppUpdateInfo {
     pub current_version: String,
     pub latest_version: Option<String>,
