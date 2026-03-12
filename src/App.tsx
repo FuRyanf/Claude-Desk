@@ -26,6 +26,7 @@ import { ToastRegion, type ToastItem } from './components/ToastRegion';
 import { WorkspaceShellDrawer } from './components/WorkspaceShellDrawer';
 import { api, onTerminalData, onTerminalExit, onTerminalReady, onThreadUpdated } from './lib/api';
 import { clampTerminalLog as clampTerminalLogText } from './lib/terminalLogClamp';
+import { resolveAppendedTerminalLogChunk } from './lib/terminalLogChunkUpdate';
 import {
   applyAppearanceMode,
   normalizeAppearanceMode,
@@ -1553,18 +1554,22 @@ export default function App() {
           continue;
         }
         const previous = next[threadId] ?? '';
-        const combined = `${previous}${chunk}`;
-        const clamped = presentThreadTerminalText(threadId, combined);
-        if (clamped !== combined) {
+        const { nextText, requiresSnapshot: nextRequiresSnapshot } = resolveAppendedTerminalLogChunk({
+          previousText: previous,
+          chunk,
+          maxChars: TERMINAL_LOG_BUFFER_CHARS,
+          present: (combined) => presentThreadTerminalText(threadId, combined)
+        });
+        if (nextRequiresSnapshot) {
           requiresSnapshot = true;
         }
-        if (clamped === previous) {
+        if (nextText === previous) {
           continue;
         }
         if (next === current) {
           next = { ...current };
         }
-        next[threadId] = clamped;
+        next[threadId] = nextText;
       }
       return next;
     }, requiresSnapshot ? undefined : { mode: 'append', appendBytesByThread });

@@ -18,6 +18,12 @@ fn thread_metadata_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn validate_storage_segment<'a>(value: &'a str, label: &str) -> Result<&'a str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -757,16 +763,10 @@ pub fn write_json_file<T: serde::Serialize>(path: &Path, value: &T) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn add_workspace_persists_across_loads() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!("claude-desk-test-{}", Uuid::new_v4()));
         let workspace_path = temp_root.join("workspace");
@@ -790,7 +790,7 @@ mod tests {
 
     #[test]
     fn add_rdev_workspace_persists_command_and_kind() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
             "claude-desk-rdev-workspace-test-{}",
@@ -824,7 +824,7 @@ mod tests {
 
     #[test]
     fn add_ssh_workspace_persists_command_and_kind() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root =
             std::env::temp_dir().join(format!("claude-desk-ssh-workspace-test-{}", Uuid::new_v4()));
@@ -855,7 +855,7 @@ mod tests {
 
     #[test]
     fn set_workspace_remote_path_trims_and_clears() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
             "claude-desk-ssh-remote-path-test-{}",
@@ -881,7 +881,7 @@ mod tests {
 
     #[test]
     fn remove_workspace_prunes_registry_and_thread_storage() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
             "claude-desk-remove-workspace-test-{}",
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn full_access_persists_per_thread() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root =
             std::env::temp_dir().join(format!("claude-desk-thread-test-{}", Uuid::new_v4()));
@@ -949,7 +949,7 @@ mod tests {
 
     #[test]
     fn create_thread_can_start_with_full_access_enabled() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
             "claude-desk-create-thread-full-access-test-{}",
@@ -977,7 +977,7 @@ mod tests {
 
     #[test]
     fn claude_session_id_persists_per_thread() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root =
             std::env::temp_dir().join(format!("claude-desk-session-test-{}", Uuid::new_v4()));
@@ -1031,7 +1031,7 @@ mod tests {
 
     #[test]
     fn set_thread_claude_session_id_overwrites_and_trims() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root =
             std::env::temp_dir().join(format!("claude-desk-force-session-test-{}", Uuid::new_v4()));
@@ -1077,7 +1077,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_thread_path_segments() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
             "claude-desk-invalid-thread-id-test-{}",
@@ -1103,7 +1103,7 @@ mod tests {
 
     #[test]
     fn set_thread_claude_session_id_is_atomic_across_threads() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = test_env_lock().lock().expect("lock poisoned");
 
         let temp_root =
             std::env::temp_dir().join(format!("claude-desk-session-race-test-{}", Uuid::new_v4()));

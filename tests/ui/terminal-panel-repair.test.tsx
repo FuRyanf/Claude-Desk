@@ -27,6 +27,8 @@ const mocks = vi.hoisted(() => {
     rows: number;
     screenLines: string[];
     wrappedRows: Set<number>;
+    isUserScrolling: boolean;
+    onScrollListeners: Set<(viewportY: number) => void>;
     buffer: {
       active: {
         baseY: number;
@@ -39,12 +41,25 @@ const mocks = vi.hoisted(() => {
     };
   }> = [];
 
+  const emitScroll = (term: (typeof terminals)[number]) => {
+    for (const listener of term.onScrollListeners) {
+      listener(term.buffer.active.viewportY);
+    }
+  };
+
   const syncBufferState = (term: (typeof terminals)[number]) => {
     const lineCount = Math.max(1, term.screenLines.length);
+    const previousBaseY = term.buffer.active.baseY;
+    const previousViewportY = term.buffer.active.viewportY;
     term.buffer.active.length = lineCount;
     term.buffer.active.baseY = Math.max(0, lineCount - term.rows);
     term.buffer.active.cursorY = Math.max(0, Math.min(term.rows - 1, lineCount - 1 - term.buffer.active.baseY));
-    term.buffer.active.viewportY = term.buffer.active.baseY;
+    if (term.isUserScrolling || previousViewportY < previousBaseY) {
+      term.buffer.active.viewportY = Math.min(previousViewportY, term.buffer.active.baseY);
+    } else {
+      term.buffer.active.viewportY = term.buffer.active.baseY;
+    }
+    term.isUserScrolling = term.buffer.active.viewportY < term.buffer.active.baseY;
   };
 
   const writePrintableChunk = (term: (typeof terminals)[number], chunk: string) => {
@@ -101,13 +116,42 @@ const mocks = vi.hoisted(() => {
       open: vi.fn((host: HTMLElement) => {
         const viewport = document.createElement('div');
         viewport.className = 'xterm-viewport';
+        viewport.addEventListener('wheel', (event) => {
+          if (viewport.dataset.skipXtermWheel === 'true') {
+            return;
+          }
+          const direction = event.deltaY < 0 ? -1 : event.deltaY > 0 ? 1 : 0;
+          if (direction === 0) {
+            return;
+          }
+          const nextViewportY = Math.max(
+            0,
+            Math.min(term.buffer.active.baseY, term.buffer.active.viewportY + direction)
+          );
+          if (nextViewportY === term.buffer.active.viewportY) {
+            return;
+          }
+          term.buffer.active.viewportY = nextViewportY;
+          term.isUserScrolling = nextViewportY < term.buffer.active.baseY;
+          emitScroll(term);
+        });
         host.appendChild(viewport);
       }),
       loadAddon: vi.fn(),
       attachCustomKeyEventHandler: vi.fn(),
       onData: vi.fn(() => ({ dispose: vi.fn() })),
-      onScroll: vi.fn(() => ({ dispose: vi.fn() })),
+      onScrollListeners: new Set<(viewportY: number) => void>(),
+      onScroll: vi.fn((listener: (viewportY: number) => void) => {
+        term.onScrollListeners.add(listener);
+        return {
+          dispose: vi.fn(() => {
+            term.onScrollListeners.delete(listener);
+          })
+        };
+      }),
       write: vi.fn((chunk: string, callback?: () => void) => {
+        const previousBaseY = term.buffer.active.baseY;
+        const previousViewportY = term.buffer.active.viewportY;
         const cursorMove = /^\u001b\[(\d+);(\d+)H$/.exec(chunk);
         if (cursorMove) {
           term.buffer.active.cursorY = Math.max(0, Number(cursorMove[1]) - 1);
@@ -116,6 +160,9 @@ const mocks = vi.hoisted(() => {
           return;
         }
         writePrintableChunk(term, chunk);
+        if (term.buffer.active.baseY !== previousBaseY || term.buffer.active.viewportY !== previousViewportY) {
+          emitScroll(term);
+        }
         callback?.();
       }),
       refresh: vi.fn(),
@@ -123,18 +170,35 @@ const mocks = vi.hoisted(() => {
         term.screenLines = [''];
         term.wrappedRows.clear();
         term.buffer.active.cursorX = 0;
+        term.isUserScrolling = false;
         syncBufferState(term);
+        emitScroll(term);
       }),
       resize: vi.fn((cols: number, rows: number) => {
+        const previousViewportY = term.buffer.active.viewportY;
         term.cols = cols;
         term.rows = rows;
         syncBufferState(term);
+        if (term.buffer.active.viewportY !== previousViewportY) {
+          emitScroll(term);
+        }
       }),
       scrollToBottom: vi.fn(() => {
+        if (term.buffer.active.viewportY === term.buffer.active.baseY) {
+          return;
+        }
         term.buffer.active.viewportY = term.buffer.active.baseY;
+        term.isUserScrolling = false;
+        emitScroll(term);
       }),
       scrollToLine: vi.fn((line: number) => {
-        term.buffer.active.viewportY = line;
+        const nextViewportY = Math.max(0, Math.min(line, term.buffer.active.baseY));
+        if (nextViewportY === term.buffer.active.viewportY) {
+          return;
+        }
+        term.buffer.active.viewportY = nextViewportY;
+        term.isUserScrolling = nextViewportY < term.buffer.active.baseY;
+        emitScroll(term);
       }),
       focus: vi.fn(),
       dispose: vi.fn(),
@@ -143,6 +207,7 @@ const mocks = vi.hoisted(() => {
       rows: 24,
       screenLines: [''],
       wrappedRows: new Set<number>(),
+      isUserScrolling: false,
       buffer: {
         active: {
           baseY: 0,
@@ -470,6 +535,7 @@ describe('TerminalPanel manual repair', () => {
       fireEvent.wheel(host as HTMLElement, { deltaY: -32 });
       firstTerm.buffer.active.baseY = 20;
       firstTerm.buffer.active.viewportY = 12;
+      firstTerm.scrollToBottom.mockClear();
 
       mocks.fit.mockImplementationOnce(() => {
         firstTerm.buffer.active.baseY = 28;
@@ -484,10 +550,707 @@ describe('TerminalPanel manual repair', () => {
       await waitFor(() => {
         expect(firstTerm.scrollToLine).toHaveBeenCalledWith(20);
       });
+      expect(firstTerm.scrollToBottom).not.toHaveBeenCalled();
     } finally {
       window.requestAnimationFrame = originalRaf;
       window.cancelAnimationFrame = originalCancelRaf;
     }
+  });
+
+  it('pauses follow from a wheel event before a streamed append lands', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 20;
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    viewport!.dataset.skipXtermWheel = 'true';
+    viewport!.addEventListener('wheel', (event) => {
+      event.stopPropagation();
+    });
+
+    term.scrollToBottom.mockClear();
+    fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+
+    const nextContent = `${initialContent}\nnext streamed line`;
+    rerender(
+      <TerminalPanel
+        sessionId="session-1"
+        content={nextContent}
+        contentByteCount={nextContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('pauses follow when the viewport scrolls off-bottom without a wheel event', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${initialContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 20;
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    Object.defineProperty(viewport, 'clientHeight', {
+      configurable: true,
+      value: 200
+    });
+    Object.defineProperty(viewport, 'scrollHeight', {
+      configurable: true,
+      value: 1200
+    });
+    Object.defineProperty(viewport, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 700
+    });
+
+    term.scrollToBottom.mockClear();
+    fireEvent.scroll(viewport as HTMLElement);
+
+    await waitFor(() => {
+      expect(container.querySelector('.terminal-follow-button')).not.toBeNull();
+    });
+
+    rerender(
+      <TerminalPanel
+        sessionId="session-1"
+        content={nextContent}
+        contentByteCount={nextContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('does not pause follow for a viewport scroll event that remains at bottom', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${initialContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 20;
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    Object.defineProperty(viewport, 'clientHeight', {
+      configurable: true,
+      value: 200
+    });
+    Object.defineProperty(viewport, 'scrollHeight', {
+      configurable: true,
+      value: 1200
+    });
+    Object.defineProperty(viewport, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 1000
+    });
+
+    term.scrollToBottom.mockClear();
+    fireEvent.scroll(viewport as HTMLElement);
+
+    rerender(
+      <TerminalPanel
+        sessionId="session-1"
+        content={nextContent}
+        contentByteCount={nextContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+    });
+    expect(term.scrollToBottom).toHaveBeenCalled();
+  });
+
+  it('does not pause follow for a transient off-bottom xterm callback while the user is still at bottom', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${initialContent}\nnext streamed line`;
+    const { rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 20;
+    for (const listener of term.onScrollListeners) {
+      term.buffer.active.baseY = 21;
+      term.buffer.active.viewportY = 20;
+      listener(20);
+    }
+
+    rerender(
+      <TerminalPanel
+        sessionId="session-1"
+        content={nextContent}
+        contentByteCount={nextContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+    });
+    expect(term.scrollToBottom).toHaveBeenCalled();
+  });
+
+  it('preserves the viewport through a reset-classified live update while paused', async () => {
+    const initialContent = Array.from({ length: 44 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = Array.from({ length: 44 }, (_, index) => `line ${index + 2}`).join('\n');
+    const appendedContent = `${nextContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+    });
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+
+    term.reset.mockClear();
+    term.scrollToBottom.mockClear();
+    term.scrollToLine.mockClear();
+    term.write.mockClear();
+
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          content={nextContent}
+          contentByteCount={nextContent.length}
+          contentGeneration={1}
+          readOnly={false}
+          inputEnabled
+        />
+      );
+    });
+
+    await waitFor(() => {
+      expect(term.reset).toHaveBeenCalledTimes(1);
+      expect(term.scrollToLine).toHaveBeenCalledWith(12);
+    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+    term.write.mockClear();
+
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          content={appendedContent}
+          contentByteCount={appendedContent.length}
+          contentGeneration={1}
+          readOnly={false}
+          inputEnabled
+        />
+      );
+    });
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('does not auto-resume follow from reset-induced scroll events during a paused bulk replay', async () => {
+    const initialContent = Array.from({ length: 44 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = Array.from({ length: 44 }, (_, index) => `line ${index + 2}`).join('\n');
+    const appendedContent = `${nextContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+    });
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+
+    term.reset.mockClear();
+    term.scrollToBottom.mockClear();
+    term.scrollToLine.mockClear();
+
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          content={nextContent}
+          contentByteCount={nextContent.length}
+          contentGeneration={1}
+          readOnly={false}
+          inputEnabled
+        />
+      );
+    });
+
+    await waitFor(() => {
+      expect(term.reset).toHaveBeenCalledTimes(1);
+      expect(term.scrollToLine).toHaveBeenCalledWith(12);
+    });
+
+    term.scrollToBottom.mockClear();
+
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          content={appendedContent}
+          contentByteCount={appendedContent.length}
+          contentGeneration={1}
+          readOnly={false}
+          inputEnabled
+        />
+      );
+    });
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('does not auto-follow after a paused reset replay that finishes after the scroll cooldown', async () => {
+    const initialContent = Array.from({ length: 44 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = Array.from({ length: 44 }, (_, index) => `line ${index + 2}`).join('\n');
+    const appendedContent = `${nextContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    const originalWrite = term.write.getMockImplementation();
+    let delayedReplay = true;
+    term.write.mockImplementation((chunk: string, callback?: () => void) => {
+      if (delayedReplay && chunk === nextContent) {
+        delayedReplay = false;
+        originalWrite?.(chunk, () => {
+          window.setTimeout(() => {
+            callback?.();
+          }, 170);
+        });
+        return;
+      }
+      originalWrite?.(chunk, callback);
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+    });
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+
+    term.reset.mockClear();
+    term.scrollToBottom.mockClear();
+
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          content={nextContent}
+          contentByteCount={nextContent.length}
+          contentGeneration={1}
+          readOnly={false}
+          inputEnabled
+        />
+      );
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 220));
+    });
+
+    await waitFor(() => {
+      expect(term.reset).toHaveBeenCalledTimes(1);
+    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+
+    term.write.mockClear();
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          content={appendedContent}
+          contentByteCount={appendedContent.length}
+          contentGeneration={1}
+          readOnly={false}
+          inputEnabled
+        />
+      );
+    });
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('does not resume follow from a programmatic scroll-to-bottom while paused', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${initialContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 20;
+    await act(async () => {
+      for (const listener of term.onScrollListeners) {
+        listener(20);
+      }
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 170));
+    });
+
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          content={nextContent}
+          contentByteCount={nextContent.length}
+          contentGeneration={0}
+          readOnly={false}
+          inputEnabled
+        />
+      );
+    });
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('resumes follow when the user scrolls back to bottom', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${initialContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 19;
+    term.scrollToBottom.mockClear();
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: 32 });
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 170));
+    });
+
+    rerender(
+      <TerminalPanel
+        sessionId="session-1"
+        content={nextContent}
+        contentByteCount={nextContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+    });
+    expect(term.scrollToBottom).toHaveBeenCalled();
+  });
+
+  it('keeps a downward wheel resume armed across paused viewport scroll events until xterm reaches bottom', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${initialContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('.terminal-follow-button')).not.toBeNull();
+    });
+
+    viewport!.dataset.skipXtermWheel = 'true';
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 19;
+    Object.defineProperty(viewport, 'clientHeight', {
+      configurable: true,
+      value: 200
+    });
+    Object.defineProperty(viewport, 'scrollHeight', {
+      configurable: true,
+      value: 1200
+    });
+    Object.defineProperty(viewport, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 980
+    });
+
+    await act(async () => {
+      fireEvent.wheel(viewport as HTMLElement, { deltaY: 32 });
+    });
+
+    await act(async () => {
+      fireEvent.scroll(viewport as HTMLElement);
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 20;
+    await act(async () => {
+      for (const listener of term.onScrollListeners) {
+        listener(20);
+      }
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 170));
+    });
+
+    term.scrollToBottom.mockClear();
+    rerender(
+      <TerminalPanel
+        sessionId="session-1"
+        content={nextContent}
+        contentByteCount={nextContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+    });
+    expect(term.scrollToBottom).toHaveBeenCalled();
   });
 
   it('keeps the final terminal instance consistent across repeated repair requests', async () => {

@@ -2700,12 +2700,6 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
-    use std::sync::{Mutex, OnceLock};
-
-    fn test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn ignores_launch_command_echo_when_detecting_ready_output() {
@@ -2837,7 +2831,9 @@ mod tests {
 
     #[test]
     fn discover_importable_claude_sessions_reads_sessions_index() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = crate::storage::test_env_lock()
+            .lock()
+            .expect("lock poisoned");
 
         let temp_root =
             std::env::temp_dir().join(format!("claude-desk-import-discovery-{}", Uuid::new_v4()));
@@ -2917,7 +2913,9 @@ mod tests {
 
     #[test]
     fn discover_importable_claude_sessions_falls_back_to_jsonl() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = crate::storage::test_env_lock()
+            .lock()
+            .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
             "claude-desk-import-discovery-jsonl-{}",
@@ -2973,7 +2971,9 @@ mod tests {
 
     #[test]
     fn validate_importable_claude_session_accepts_sessions_index_entries() {
-        let _guard = test_lock().lock().expect("lock poisoned");
+        let _guard = crate::storage::test_env_lock()
+            .lock()
+            .expect("lock poisoned");
 
         let temp_root = std::env::temp_dir().join(format!(
             "claude-desk-validate-importable-session-index-{}",
