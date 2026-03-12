@@ -7,11 +7,12 @@ use std::os::raw::c_char;
 #[cfg(target_os = "macos")]
 use tokio::sync::oneshot;
 #[cfg(target_os = "macos")]
-use tokio::time::{Duration, timeout};
+use tokio::time::{timeout, Duration};
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn claude_desk_notifications_init() -> bool;
+    fn claude_desk_set_dock_badge_label(label_utf8: *const c_char) -> bool;
     fn claude_desk_send_notification_async(
         title: *const c_char,
         body: *const c_char,
@@ -33,6 +34,31 @@ pub fn initialize() -> Result<(), String> {
 #[cfg(not(target_os = "macos"))]
 pub fn initialize() -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn set_badge_count(count: Option<i64>) -> Result<bool, String> {
+    let label = count
+        .filter(|value| *value > 0)
+        .map(|value| value.to_string());
+    let label = label
+        .as_deref()
+        .map(CString::new)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let success = unsafe {
+        claude_desk_set_dock_badge_label(
+            label
+                .as_ref()
+                .map_or(std::ptr::null(), |value| value.as_ptr()),
+        )
+    };
+    Ok(success)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_badge_count(_count: Option<i64>) -> Result<bool, String> {
+    Ok(false)
 }
 
 #[cfg(target_os = "macos")]

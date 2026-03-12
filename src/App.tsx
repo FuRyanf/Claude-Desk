@@ -939,6 +939,7 @@ export default function App() {
   const terminalDataListenerReadyResolverRef = useRef<(() => void) | null>(null);
   const terminalDataListenerReadyPromiseRef = useRef<Promise<void> | null>(null);
   const unreadOutputByThreadRef = useRef<Record<string, boolean>>({});
+  const lastAppBadgeCountRef = useRef<number | null | undefined>(undefined);
   const unreadAlertStatusByThreadRef = useRef<Record<string, Extract<RunStatus, 'Succeeded' | 'Failed'>>>({});
   const latestOutputSequenceByThreadRef = useRef<Record<string, number>>({});
   const seenOutputSequenceByThreadRef = useRef<Record<string, number>>({});
@@ -1753,6 +1754,23 @@ export default function App() {
       status
     });
   }, [hasUnseenMeaningfulOutputSinceRead, settings.taskCompletionAlerts]);
+
+  const unreadThreadCount = useMemo(
+    () =>
+      Object.keys(unreadOutputByThread).reduce((count, threadId) => {
+        return count + (hasUnseenMeaningfulOutputSinceRead(threadId) ? 1 : 0);
+      }, 0),
+    [hasUnseenMeaningfulOutputSinceRead, unreadOutputByThread]
+  );
+
+  useEffect(() => {
+    const nextBadgeCount = unreadThreadCount > 0 ? unreadThreadCount : null;
+    if (lastAppBadgeCountRef.current === nextBadgeCount) {
+      return;
+    }
+    lastAppBadgeCountRef.current = nextBadgeCount;
+    void api.setAppBadgeCount(nextBadgeCount).catch(() => undefined);
+  }, [unreadThreadCount]);
 
   const scheduleThreadWorkingStop = useCallback(
     (threadId: string, delayMs = THREAD_WORKING_IDLE_TIMEOUT_MS) => {

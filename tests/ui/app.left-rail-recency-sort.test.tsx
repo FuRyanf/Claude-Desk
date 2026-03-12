@@ -145,6 +145,7 @@ const mocks = vi.hoisted(() => {
     openInFinder: vi.fn(async () => undefined),
     openInTerminal: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
+    setAppBadgeCount: vi.fn(async () => true),
     validateImportableClaudeSession: vi.fn(async () => true),
     writeTextToClipboard: vi.fn(async () => undefined)
   };
@@ -747,6 +748,107 @@ describe('Left rail recency and sorting semantics', () => {
       expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledWith({
         threadTitle: 'Newer thread',
         status: 'Succeeded'
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('mirrors unread thread count to the app badge and clears it once read', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(null);
+      });
+      mocks.api.setAppBadgeCount.mockClear();
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(1);
+      });
+
+      mocks.api.setAppBadgeCount.mockClear();
+
+      await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(null);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('counts multiple unread threads in the app badge', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const baseMs = Date.parse('2026-02-22T10:00:00.000Z');
+      mocks.prependThread({
+        id: 'thread-oldest',
+        workspaceId: 'ws-1',
+        agentId: 'claude-code',
+        fullAccess: false,
+        enabledSkills: [],
+        createdAt: new Date(baseMs - 10_800_000).toISOString(),
+        updatedAt: new Date(baseMs - 10_800_000).toISOString(),
+        title: 'Oldest thread',
+        isArchived: false,
+        lastRunStatus: 'Idle',
+        lastRunStartedAt: null,
+        lastRunEndedAt: null,
+        claudeSessionId: null,
+        lastResumeAt: null,
+        lastNewSessionAt: null
+      });
+
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      mocks.api.setAppBadgeCount.mockClear();
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+      await waitFor(() => {
+        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(1);
+      });
+
+      mocks.api.setAppBadgeCount.mockClear();
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await user.click(screen.getByRole('button', { name: /Oldest thread/i }));
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-older', data: 'assistant output\n' });
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(screen.getByTestId('thread-unread-thread-older')).toBeInTheDocument();
+        expect(mocks.api.setAppBadgeCount).toHaveBeenLastCalledWith(2);
       });
     } finally {
       vi.useRealTimers();

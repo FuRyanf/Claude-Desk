@@ -90,6 +90,14 @@ static void claude_desk_dispatch_to_main(void (^block)(void)) {
   dispatch_async(dispatch_get_main_queue(), block);
 }
 
+static void claude_desk_dispatch_sync_to_main(void (^block)(void)) {
+  if ([NSThread isMainThread]) {
+    block();
+    return;
+  }
+  dispatch_sync(dispatch_get_main_queue(), block);
+}
+
 bool claude_desk_notifications_init(void) {
   @autoreleasepool {
     if ([NSThread isMainThread]) {
@@ -100,6 +108,20 @@ bool claude_desk_notifications_init(void) {
       });
     }
     return true;
+  }
+}
+
+bool claude_desk_set_dock_badge_label(const char *label_utf8) {
+  @autoreleasepool {
+    __block BOOL success = YES;
+    claude_desk_dispatch_sync_to_main(^{
+      NSString *label = nil;
+      if (label_utf8 != NULL) {
+        label = [NSString stringWithUTF8String:label_utf8];
+      }
+      [[[NSApplication sharedApplication] dockTile] setBadgeLabel:label];
+    });
+    return success;
   }
 }
 

@@ -108,6 +108,7 @@ const mocks = vi.hoisted(() => {
     openInTerminal: vi.fn(async () => undefined),
     openTerminalCommand: vi.fn(async () => undefined),
     copyTerminalEnvDiagnostics: vi.fn(async () => 'diagnostics'),
+    setAppBadgeCount: vi.fn(async () => true),
     validateImportableClaudeSession: vi.fn(async () => true),
     writeTextToClipboard: vi.fn(async () => undefined)
   };

@@ -564,6 +564,11 @@ async fn send_desktop_notification(title: String, body: String) -> Result<bool, 
 }
 
 #[tauri::command]
+fn set_app_badge_count(count: Option<i64>) -> Result<bool, String> {
+    macos_notifications::set_badge_count(count)
+}
+
+#[tauri::command]
 fn open_terminal_command(command: String) -> Result<(), String> {
     let escaped = command
         .replace('\\', "\\\\")
@@ -715,6 +720,7 @@ fn main() {
             open_in_terminal,
             open_external_url,
             send_desktop_notification,
+            set_app_badge_count,
             open_terminal_command,
             copy_terminal_env_diagnostics,
             validate_importable_claude_session,

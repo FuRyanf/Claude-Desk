@@ -132,6 +132,7 @@ export const api = {
   openInTerminal: (path: string) => invoke<void>('open_in_terminal', { path }),
   openExternalUrl: (url: string) => invoke<void>('open_external_url', { url }),
   openTerminalCommand: (command: string) => invoke<void>('open_terminal_command', { command }),
+  setAppBadgeCount: (count: number | null) => invoke<boolean>('set_app_badge_count', { count }),
   copyTerminalEnvDiagnostics: (workspacePath: string) =>
     invoke<string>('copy_terminal_env_diagnostics', { workspacePath }),
   validateImportableClaudeSession: (workspacePath: string, claudeSessionId: string) =>
