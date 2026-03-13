@@ -263,6 +263,49 @@ vi.mock('xterm-addon-web-links', () => ({
 
 import { TerminalPanel } from '../../src/components/TerminalPanel';
 
+function setViewportMetrics(
+  viewport: HTMLElement,
+  {
+    clientHeight,
+    scrollHeight,
+    scrollTop,
+    clientWidth,
+    offsetWidth
+  }: {
+    clientHeight: number;
+    scrollHeight: number;
+    scrollTop: number;
+    clientWidth?: number;
+    offsetWidth?: number;
+  }
+) {
+  Object.defineProperty(viewport, 'clientHeight', {
+    configurable: true,
+    value: clientHeight
+  });
+  Object.defineProperty(viewport, 'scrollHeight', {
+    configurable: true,
+    value: scrollHeight
+  });
+  Object.defineProperty(viewport, 'scrollTop', {
+    configurable: true,
+    writable: true,
+    value: scrollTop
+  });
+  if (typeof clientWidth === 'number') {
+    Object.defineProperty(viewport, 'clientWidth', {
+      configurable: true,
+      value: clientWidth
+    });
+  }
+  if (typeof offsetWidth === 'number') {
+    Object.defineProperty(viewport, 'offsetWidth', {
+      configurable: true,
+      value: offsetWidth
+    });
+  }
+}
+
 describe('TerminalPanel manual repair', () => {
   beforeEach(() => {
     (globalThis as { __CLAUDE_DESK_ENABLE_XTERM_TESTS__?: boolean }).__CLAUDE_DESK_ENABLE_XTERM_TESTS__ = true;
@@ -865,6 +908,336 @@ describe('TerminalPanel manual repair', () => {
     expect(term.scrollToBottom).not.toHaveBeenCalled();
   });
 
+  it('restores a paused viewport after a write-induced native scroll drift', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${initialContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 600
+    });
+
+    await act(async () => {
+      fireEvent.scroll(viewport as HTMLElement);
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    const originalWrite = term.write.getMockImplementation();
+    term.write.mockImplementation((chunk: string, callback?: () => void) => {
+      originalWrite?.(chunk, () => {
+        if (chunk === '\nnext streamed line') {
+          setViewportMetrics(viewport as HTMLElement, {
+            clientHeight: 200,
+            scrollHeight: 1240,
+            scrollTop: 640
+          });
+          fireEvent.scroll(viewport as HTMLElement);
+        }
+        callback?.();
+      });
+    });
+
+    term.scrollToBottom.mockClear();
+    term.scrollToLine.mockClear();
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          content={nextContent}
+          contentByteCount={nextContent.length}
+          contentGeneration={0}
+          readOnly={false}
+          inputEnabled
+        />
+      );
+    });
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+      expect(term.scrollToLine).toHaveBeenCalledWith(14);
+      expect((viewport as HTMLElement).scrollTop).toBe(600);
+    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('updates the paused viewport snapshot from an overlay scrollbar drag', async () => {
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${initialContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 600,
+      clientWidth: 400,
+      offsetWidth: 400
+    });
+    Object.defineProperty(viewport as HTMLElement, 'getBoundingClientRect', {
+      configurable: true,
+      value: () =>
+        ({
+          left: 0,
+          top: 0,
+          right: 400,
+          bottom: 200,
+          width: 400,
+          height: 200,
+          x: 0,
+          y: 0,
+          toJSON: () => ({})
+        }) satisfies DOMRect
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    await act(async () => {
+      fireEvent.scroll(viewport as HTMLElement);
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    await act(async () => {
+      fireEvent.pointerDown(viewport as HTMLElement, { clientX: 392 });
+      setViewportMetrics(viewport as HTMLElement, {
+        clientHeight: 200,
+        scrollHeight: 1200,
+        scrollTop: 400,
+        clientWidth: 400,
+        offsetWidth: 400
+      });
+      fireEvent.scroll(viewport as HTMLElement);
+      fireEvent.pointerUp(viewport as HTMLElement, { clientX: 392 });
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    const originalWrite = term.write.getMockImplementation();
+    term.write.mockImplementation((chunk: string, callback?: () => void) => {
+      originalWrite?.(chunk, () => {
+        if (chunk === '\nnext streamed line') {
+          setViewportMetrics(viewport as HTMLElement, {
+            clientHeight: 200,
+            scrollHeight: 1240,
+            scrollTop: 440,
+            clientWidth: 400,
+            offsetWidth: 400
+          });
+          fireEvent.scroll(viewport as HTMLElement);
+        }
+        callback?.();
+      });
+    });
+
+    term.scrollToBottom.mockClear();
+    term.scrollToLine.mockClear();
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          content={nextContent}
+          contentByteCount={nextContent.length}
+          contentGeneration={0}
+          readOnly={false}
+          inputEnabled
+        />
+      );
+    });
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+      expect(term.scrollToLine).toHaveBeenCalledWith(10);
+      expect((viewport as HTMLElement).scrollTop).toBe(400);
+    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('preserves a native off-bottom viewport position through reset when xterm viewportY is still stale', async () => {
+    const initialContent = Array.from({ length: 44 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = Array.from({ length: 44 }, (_, index) => `line ${index + 2}`).join('\n');
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 20;
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 600
+    });
+
+    await act(async () => {
+      fireEvent.scroll(viewport as HTMLElement);
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 20;
+    term.reset.mockClear();
+    term.scrollToBottom.mockClear();
+    term.scrollToLine.mockClear();
+
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          content={nextContent}
+          contentByteCount={nextContent.length}
+          contentGeneration={1}
+          readOnly={false}
+          inputEnabled
+        />
+      );
+    });
+
+    await waitFor(() => {
+      expect(term.reset).toHaveBeenCalledTimes(1);
+      expect(term.scrollToLine).toHaveBeenCalledWith(12);
+    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('prefers a smaller DOM scrollback offset when the user scrolls back down before reset', async () => {
+    const initialContent = Array.from({ length: 44 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = Array.from({ length: 44 }, (_, index) => `line ${index + 2}`).join('\n');
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 600
+    });
+
+    await act(async () => {
+      fireEvent.scroll(viewport as HTMLElement);
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 800
+    });
+
+    await act(async () => {
+      fireEvent.scroll(viewport as HTMLElement);
+    });
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    term.reset.mockClear();
+    term.scrollToBottom.mockClear();
+    term.scrollToLine.mockClear();
+
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          content={nextContent}
+          contentByteCount={nextContent.length}
+          contentGeneration={1}
+          readOnly={false}
+          inputEnabled
+        />
+      );
+    });
+
+    await waitFor(() => {
+      expect(term.reset).toHaveBeenCalledTimes(1);
+      expect(term.scrollToLine).toHaveBeenCalledWith(16);
+    });
+    expect(term.scrollToBottom).not.toHaveBeenCalled();
+  });
+
   it('does not auto-resume follow from reset-induced scroll events during a paused bulk replay', async () => {
     const initialContent = Array.from({ length: 44 }, (_, index) => `line ${index + 1}`).join('\n');
     const nextContent = Array.from({ length: 44 }, (_, index) => `line ${index + 2}`).join('\n');
@@ -1313,6 +1686,71 @@ describe('TerminalPanel manual repair', () => {
     await waitFor(() => {
       expect(finalTerm.write).toHaveBeenCalledWith('\nline 4', expect.any(Function));
       expect(finalTerm.reset).not.toHaveBeenCalled();
+    });
+  });
+
+  it('captures a native off-bottom viewport position for manual repair even before xterm onScroll catches up', async () => {
+    const content = Array.from({ length: 44 }, (_, index) => `line ${index + 1}`).join('\n');
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={content}
+        contentByteCount={content.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+        repairRequestId={0}
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const firstTerm = mocks.terminals[0];
+    await waitFor(() => {
+      expect(firstTerm.write).toHaveBeenCalledWith(content, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    firstTerm.buffer.active.baseY = 20;
+    firstTerm.buffer.active.viewportY = 20;
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 600
+    });
+
+    await act(async () => {
+      fireEvent.scroll(viewport as HTMLElement);
+    });
+
+    firstTerm.buffer.active.baseY = 20;
+    firstTerm.buffer.active.viewportY = 20;
+
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          content={content}
+          contentByteCount={content.length}
+          contentGeneration={0}
+          readOnly={false}
+          inputEnabled
+          repairRequestId={1}
+        />
+      );
+    });
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(2);
+    });
+
+    const repairedTerm = mocks.terminals[1];
+    await waitFor(() => {
+      expect(repairedTerm.scrollToLine).toHaveBeenCalledWith(12);
     });
   });
 });

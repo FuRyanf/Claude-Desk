@@ -34,6 +34,7 @@ const OUTPUT_QUEUE_WARN_PENDING_BYTES = 128 * 1024;
 const OUTPUT_QUEUE_WARN_LATENCY_MS = 96;
 const OUTPUT_QUEUE_WARN_COOLDOWN_MS = 2_000;
 const VIEWPORT_OFF_BOTTOM_THRESHOLD_PX = 4;
+const VIEWPORT_OVERLAY_SCROLLBAR_HIT_WIDTH_PX = 24;
 const MULTILINE_ENTER_SEQUENCE = '\x1b\r';
 const MULTILINE_ENTER_DUPLICATE_SUPPRESSION_MS = 64;
 const DECTCEM_HIDE = '\x1b[?25l';
@@ -144,7 +145,13 @@ export function TerminalPanel({
   const isWritingRef = useRef(false);
   const userScrollIntentRef = useRef(false);
   const userResumeFollowRef = useRef(false);
+  const userViewportCapturePendingRef = useRef(false);
+  const userViewportCaptureResetRafRef = useRef<number | null>(null);
+  const viewportPointerDownRef = useRef(false);
   const scrollRafRef = useRef<number | null>(null);
+  const pausedViewportCaptureRafRef = useRef<number | null>(null);
+  const pausedViewportRestoreRafRef = useRef<number | null>(null);
+  const pausedViewportScrollTopRef = useRef<number | null>(null);
   const scrollPauseCooldownRef = useRef(0);
   const streamRepairTimerRef = useRef<number | null>(null);
   const streamRepairEpochRef = useRef(0);
@@ -298,29 +305,6 @@ export function TerminalPanel({
     });
   }, [logTerminalDebug]);
 
-  const pauseFollowOutput = useCallback(() => {
-    const next = pauseFollowByUser(followStateRef.current);
-    if (next === followStateRef.current) {
-      logTerminalDebug('follow:pause-noop');
-      return;
-    }
-    followStateRef.current = next;
-    // Set a short cooldown so in-flight rAF scroll-to-bottom calls are suppressed.
-    // This closes the race window between the user's scroll gesture and pending
-    // write-batch completions that would snap the viewport back to the bottom.
-    scrollPauseCooldownRef.current = Date.now() + 150;
-    clearScheduledStreamRepair();
-    // Cancel any pending scroll-to-bottom rAF.
-    if (scrollRafRef.current !== null) {
-      window.cancelAnimationFrame(scrollRafRef.current);
-      scrollRafRef.current = null;
-    }
-    logTerminalDebug('follow:pause', {
-      cooldownUntil: scrollPauseCooldownRef.current
-    });
-    syncFollowOutputPaused(true);
-  }, [clearScheduledStreamRepair, logTerminalDebug, syncFollowOutputPaused]);
-
   const openExternalLink = useCallback((_: MouseEvent, uri: string) => {
     const target = uri.trim();
     if (!target) {
@@ -352,6 +336,202 @@ export function TerminalPanel({
     });
   }, []);
 
+  const getViewportElement = useCallback((): HTMLElement | null => {
+    const host = hostRef.current;
+    if (!host) {
+      return null;
+    }
+    const viewport = host.querySelector('.xterm-viewport');
+    return viewport instanceof HTMLElement ? viewport : null;
+  }, []);
+
+  const armUserViewportInteraction = useCallback(() => {
+    userViewportCapturePendingRef.current = true;
+    if (userViewportCaptureResetRafRef.current !== null) {
+      window.cancelAnimationFrame(userViewportCaptureResetRafRef.current);
+    }
+    userViewportCaptureResetRafRef.current = window.requestAnimationFrame(() => {
+      userViewportCaptureResetRafRef.current = null;
+      if (!userScrollIntentRef.current) {
+        userViewportCapturePendingRef.current = false;
+      }
+    });
+  }, []);
+
+  const clearPausedViewportScrollTop = useCallback(
+    (reason: string, term: Terminal | null = terminalRef.current) => {
+      if (pausedViewportScrollTopRef.current === null) {
+        return;
+      }
+      logTerminalDebug('viewportScrollTop:clear', {
+        reason,
+        scrollTop: pausedViewportScrollTopRef.current
+      }, term);
+      pausedViewportScrollTopRef.current = null;
+    },
+    [logTerminalDebug]
+  );
+
+  const capturePausedViewportScrollTop = useCallback(
+    (
+      reason: string,
+      term: Terminal | null = terminalRef.current,
+      viewport: HTMLElement | null = getViewportElement()
+    ) => {
+      if (!viewport) {
+        return;
+      }
+      pausedViewportScrollTopRef.current = viewport.scrollTop;
+      logTerminalDebug('viewportScrollTop:capture', {
+        reason,
+        scrollTop: viewport.scrollTop,
+        scrollHeight: viewport.scrollHeight,
+        clientHeight: viewport.clientHeight
+      }, term);
+    },
+    [getViewportElement, logTerminalDebug]
+  );
+
+  const schedulePausedViewportCapture = useCallback(
+    (term: Terminal, reason: string) => {
+      if (pausedViewportCaptureRafRef.current !== null) {
+        return;
+      }
+      pausedViewportCaptureRafRef.current = window.requestAnimationFrame(() => {
+        pausedViewportCaptureRafRef.current = null;
+        if (terminalRef.current !== term || shouldAutoFollow(followStateRef.current)) {
+          return;
+        }
+        capturePausedViewportScrollTop(reason, term);
+      });
+    },
+    [capturePausedViewportScrollTop]
+  );
+
+  const schedulePausedViewportRestore = useCallback(
+    (term: Terminal, reason: string) => {
+      if (pausedViewportRestoreRafRef.current !== null) {
+        return;
+      }
+      pausedViewportRestoreRafRef.current = window.requestAnimationFrame(() => {
+        pausedViewportRestoreRafRef.current = null;
+        if (terminalRef.current !== term || shouldAutoFollow(followStateRef.current)) {
+          return;
+        }
+        const viewport = getViewportElement();
+        const savedScrollTop = pausedViewportScrollTopRef.current;
+        if (!viewport || savedScrollTop === null) {
+          return;
+        }
+        const maxScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+        const targetScrollTop = Math.max(0, Math.min(savedScrollTop, maxScrollTop));
+        const targetViewportY =
+          maxScrollTop <= 0 || term.buffer.active.baseY <= 0
+            ? 0
+            : Math.max(
+                0,
+                Math.min(
+                  term.buffer.active.baseY,
+                  Math.round((targetScrollTop / maxScrollTop) * term.buffer.active.baseY)
+                )
+              );
+        const currentScrollTop = viewport.scrollTop;
+        logTerminalDebug('viewportScrollTop:restore-check', {
+          reason,
+          currentScrollTop,
+          targetScrollTop,
+          targetViewportY,
+          currentViewportY: term.buffer.active.viewportY
+        }, term);
+        if (term.buffer.active.viewportY !== targetViewportY) {
+          logTerminalDebug('scrollToLine:write-preserve', {
+            targetLine: targetViewportY,
+            reason
+          }, term);
+          term.scrollToLine(targetViewportY);
+        }
+        const updatedScrollTop = viewport.scrollTop;
+        if (Math.abs(updatedScrollTop - targetScrollTop) <= 0.5) {
+          return;
+        }
+        viewport.scrollTop = targetScrollTop;
+        logTerminalDebug('viewportScrollTop:restore', {
+          reason,
+          previousScrollTop: updatedScrollTop,
+          targetScrollTop
+        }, term);
+        scheduleTerminalRefresh(term);
+      });
+    },
+    [getViewportElement, logTerminalDebug, scheduleTerminalRefresh]
+  );
+
+  const pauseFollowOutput = useCallback(() => {
+    const next = pauseFollowByUser(followStateRef.current);
+    if (next === followStateRef.current) {
+      logTerminalDebug('follow:pause-noop');
+      return;
+    }
+    followStateRef.current = next;
+    // Set a short cooldown so in-flight rAF scroll-to-bottom calls are suppressed.
+    // This closes the race window between the user's scroll gesture and pending
+    // write-batch completions that would snap the viewport back to the bottom.
+    scrollPauseCooldownRef.current = Date.now() + 150;
+    clearScheduledStreamRepair();
+    // Cancel any pending scroll-to-bottom rAF.
+    if (scrollRafRef.current !== null) {
+      window.cancelAnimationFrame(scrollRafRef.current);
+      scrollRafRef.current = null;
+    }
+    logTerminalDebug('follow:pause', {
+      cooldownUntil: scrollPauseCooldownRef.current
+    });
+    capturePausedViewportScrollTop('pause');
+    syncFollowOutputPaused(true);
+  }, [capturePausedViewportScrollTop, clearScheduledStreamRepair, logTerminalDebug, syncFollowOutputPaused]);
+
+  const estimateViewportScrollbackOffset = useCallback(
+    (term: Terminal, viewport: HTMLElement | null = getViewportElement()): number | null => {
+      if (!viewport) {
+        return null;
+      }
+      const baseY = term.buffer.active.baseY;
+      const clientHeight = viewport.clientHeight;
+      const scrollHeight = viewport.scrollHeight;
+      const scrollTop = viewport.scrollTop;
+      if (!Number.isFinite(baseY) || baseY <= 0) {
+        return 0;
+      }
+      if (!Number.isFinite(clientHeight) || !Number.isFinite(scrollHeight) || !Number.isFinite(scrollTop)) {
+        return null;
+      }
+      const maxScrollTop = scrollHeight - clientHeight;
+      if (maxScrollTop <= 0) {
+        return baseY > 0 ? null : 0;
+      }
+      const distanceFromBottomPx = Math.max(0, maxScrollTop - scrollTop);
+      return Math.max(0, Math.min(baseY, Math.round((distanceFromBottomPx / maxScrollTop) * baseY)));
+    },
+    [getViewportElement]
+  );
+
+  const captureScrollbackOffset = useCallback(
+    (term: Terminal, reason: string, viewport: HTMLElement | null = getViewportElement()) => {
+      const bufferOffset = Math.max(0, term.buffer.active.baseY - term.buffer.active.viewportY);
+      const domOffset = estimateViewportScrollbackOffset(term, viewport);
+      const scrollbackOffset = domOffset ?? bufferOffset;
+      logTerminalDebug('scrollbackOffset:capture', {
+        reason,
+        bufferOffset,
+        domOffset,
+        scrollbackOffset,
+        source: domOffset === null ? 'buffer' : 'dom'
+      }, term);
+      return scrollbackOffset;
+    },
+    [estimateViewportScrollbackOffset, getViewportElement, logTerminalDebug]
+  );
+
   const applyStreamRepair = useCallback(
     (term: Terminal) => {
       if (terminalRef.current !== term) {
@@ -359,7 +539,7 @@ export function TerminalPanel({
       }
       const preserveViewport = !shouldAutoFollow(followStateRef.current);
       const scrollbackOffset = preserveViewport
-        ? Math.max(0, term.buffer.active.baseY - term.buffer.active.viewportY)
+        ? captureScrollbackOffset(term, 'stream-repair')
         : 0;
       logTerminalDebug('streamRepair:apply', {
         preserveViewport,
@@ -382,10 +562,17 @@ export function TerminalPanel({
         };
         logTerminalDebug('follow:repair-preserve', {}, term);
         syncFollowOutputPaused(true);
+        schedulePausedViewportCapture(term, 'repair-preserve');
       }
       scheduleTerminalRefresh(term);
     },
-    [logTerminalDebug, scheduleTerminalRefresh, syncFollowOutputPaused]
+    [
+      captureScrollbackOffset,
+      logTerminalDebug,
+      schedulePausedViewportCapture,
+      scheduleTerminalRefresh,
+      syncFollowOutputPaused
+    ]
   );
 
   const runStreamRepair = useCallback(
@@ -531,7 +718,7 @@ export function TerminalPanel({
       }
       const preserveViewport = Boolean(options.preserveViewport);
       const scrollbackOffset = preserveViewport
-        ? Math.max(0, term.buffer.active.baseY - term.buffer.active.viewportY)
+        ? captureScrollbackOffset(term, 'reset')
         : 0;
       logTerminalDebug('reset:start', {
         nextContentLength: nextContent.length,
@@ -579,11 +766,13 @@ export function TerminalPanel({
             bulkWriteEpoch
           }, term);
           syncFollowOutputPaused(true);
+          schedulePausedViewportCapture(term, 'reset-preserve');
         } else {
           followStateRef.current = createFollowState();
           logTerminalDebug('follow:reset-following', {
             bulkWriteEpoch
           }, term);
+          clearPausedViewportScrollTop('reset-following', term);
           syncFollowOutputPaused(false);
           scrollToBottomSoon(term);
         }
@@ -597,10 +786,13 @@ export function TerminalPanel({
       });
     },
     [
+      captureScrollbackOffset,
       clearPendingWrites,
+      clearPausedViewportScrollTop,
       clearScheduledStreamRepair,
       logTerminalDebug,
       queueWrite,
+      schedulePausedViewportCapture,
       scheduleTerminalRefresh,
       scrollToBottomSoon,
       syncFollowOutputPaused
@@ -709,6 +901,7 @@ export function TerminalPanel({
           return false;
         }
         if (event.type === 'keydown' && event.key === 'PageUp') {
+          armUserViewportInteraction();
           pauseFollowOutput();
         }
         return true;
@@ -728,12 +921,12 @@ export function TerminalPanel({
               bulkWriting: bulkWritingRef.current,
               autoFollow: shouldAutoFollow(followStateRef.current)
             }, term);
-            if (
-              terminalRef.current === term &&
-              !bulkWritingRef.current &&
-              shouldAutoFollow(followStateRef.current)
-            ) {
-              scrollToBottomSoon(term);
+            if (terminalRef.current === term && !bulkWritingRef.current) {
+              if (shouldAutoFollow(followStateRef.current)) {
+                scrollToBottomSoon(term);
+              } else {
+                schedulePausedViewportRestore(term, 'write');
+              }
             }
             scheduleTerminalRefresh(term);
             bytesSinceRepairRef.current += chunk.length;
@@ -772,7 +965,7 @@ export function TerminalPanel({
       const fitPreservingViewport = () => {
         const preserveViewport = !shouldAutoFollow(followStateRef.current);
         const scrollbackOffset = preserveViewport
-          ? Math.max(0, term.buffer.active.baseY - term.buffer.active.viewportY)
+          ? captureScrollbackOffset(term, 'fit-preserve')
           : 0;
         logTerminalDebug('fit:preserve-start', {
           preserveViewport,
@@ -795,6 +988,7 @@ export function TerminalPanel({
           };
           logTerminalDebug('follow:fit-preserve', {}, term);
           syncFollowOutputPaused(true);
+          schedulePausedViewportCapture(term, 'fit-preserve');
           scheduleTerminalRefresh(term);
           return;
         }
@@ -805,6 +999,7 @@ export function TerminalPanel({
           baseY: term.buffer.active.baseY
         };
         logTerminalDebug('follow:fit-following', {}, term);
+        clearPausedViewportScrollTop('fit-following', term);
         syncFollowOutputPaused(false);
       };
 
@@ -875,9 +1070,11 @@ export function TerminalPanel({
           };
           logTerminalDebug('follow:replay-preserve', {}, term);
           syncFollowOutputPaused(true);
+          schedulePausedViewportCapture(term, 'replay-preserve');
         } else {
           followStateRef.current = createFollowState();
           logTerminalDebug('follow:replay-following', {}, term);
+          clearPausedViewportScrollTop('replay-following', term);
           syncFollowOutputPaused(false);
           scrollToBottomSoon(term);
         }
@@ -1003,6 +1200,7 @@ export function TerminalPanel({
             resolved = jumpFollowStateToLatest(resolved, { baseY });
             followStateRef.current = resolved;
             logTerminalDebug('follow:user-resume-bottom', {}, term);
+            clearPausedViewportScrollTop('user-resume-bottom', term);
             syncFollowOutputPaused(false);
             return;
           }
@@ -1012,6 +1210,7 @@ export function TerminalPanel({
           if (resolved.mode === 'pausedByUser' && viewportY >= baseY) {
             resolved = jumpFollowStateToLatest(resolved, { baseY });
             logTerminalDebug('follow:wheel-resume-bottom', {}, term);
+            clearPausedViewportScrollTop('wheel-resume-bottom', term);
           }
           userResumeFollowRef.current = false;
         }
@@ -1023,6 +1222,7 @@ export function TerminalPanel({
       });
 
       const onWheel = (event: WheelEvent) => {
+        armUserViewportInteraction();
         logTerminalDebug('wheel', {
           deltaY: event.deltaY
         }, term);
@@ -1040,15 +1240,35 @@ export function TerminalPanel({
 
       const viewport = host.querySelector('.xterm-viewport') as HTMLElement | null;
       const onViewportScroll = () => {
+        const estimatedScrollbackOffset = estimateViewportScrollbackOffset(term, viewport);
         const distanceFromBottomPx = viewport
           ? Math.max(0, viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop)
           : null;
+        const userInteracting =
+          userScrollIntentRef.current ||
+          userViewportCapturePendingRef.current ||
+          viewportPointerDownRef.current;
         logTerminalDebug('viewport:scroll', {
           scrollTop: viewport?.scrollTop ?? null,
           scrollHeight: viewport?.scrollHeight ?? null,
           clientHeight: viewport?.clientHeight ?? null,
-          distanceFromBottomPx
+          distanceFromBottomPx,
+          estimatedScrollbackOffset,
+          userInteracting,
+          pausedViewportScrollTop: pausedViewportScrollTopRef.current
         }, term);
+        if (
+          viewport &&
+          followStateRef.current.mode === 'pausedByUser' &&
+          userInteracting &&
+          !bulkWritingRef.current &&
+          !isWritingRef.current
+        ) {
+          capturePausedViewportScrollTop('viewport-scroll-user', term, viewport);
+          if (!userScrollIntentRef.current) {
+            userViewportCapturePendingRef.current = false;
+          }
+        }
         if (
           viewport &&
           distanceFromBottomPx !== null &&
@@ -1060,29 +1280,49 @@ export function TerminalPanel({
             distanceFromBottomPx
           }, term);
           pauseFollowOutput();
+          userViewportCapturePendingRef.current = false;
           userResumeFollowRef.current = false;
         }
       };
       const onViewportPointerDown = (e: PointerEvent) => {
         // Only set scroll intent when the click lands in the native scrollbar area.
         // el.clientWidth excludes the permanent scrollbar gutter; clicks beyond it are on the track.
-        // On macOS overlay-scrollbar mode offsetWidth === clientWidth (no gutter), so the check
-        // is skipped — trackpad wheel events already handle pause in that case.
+        // In macOS overlay-scrollbar mode there is no gutter, so also treat a click near the
+        // right edge as a likely thumb drag. That keeps paused viewport snapshots in sync when
+        // the user repositions the viewport with the native scrollbar instead of the wheel.
         const el = e.currentTarget as HTMLElement;
+        viewportPointerDownRef.current = true;
+        const rect = el.getBoundingClientRect();
         const hasVisibleScrollbar = el.offsetWidth > el.clientWidth;
+        const distanceFromRightPx = rect.right - e.clientX;
+        const isOverlayScrollbarHit =
+          !hasVisibleScrollbar &&
+          distanceFromRightPx >= 0 &&
+          distanceFromRightPx <= VIEWPORT_OVERLAY_SCROLLBAR_HIT_WIDTH_PX;
         logTerminalDebug('viewport:pointerdown', {
           clientX: e.clientX,
+          distanceFromRightPx,
           hasVisibleScrollbar,
+          isOverlayScrollbarHit,
           clientWidth: el.clientWidth,
           offsetWidth: el.offsetWidth
         }, term);
-        if (hasVisibleScrollbar && e.clientX > el.getBoundingClientRect().left + el.clientWidth) {
+        if (
+          (hasVisibleScrollbar && e.clientX > rect.left + el.clientWidth) ||
+          isOverlayScrollbarHit
+        ) {
+          armUserViewportInteraction();
           userScrollIntentRef.current = true;
           logTerminalDebug('follow:scroll-intent-armed', {}, term);
         }
       };
       const clearViewportScrollIntent = () => {
+        if (viewport && followStateRef.current.mode === 'pausedByUser' && userScrollIntentRef.current) {
+          capturePausedViewportScrollTop('viewport-pointerup', term, viewport);
+        }
+        viewportPointerDownRef.current = false;
         userScrollIntentRef.current = false;
+        userViewportCapturePendingRef.current = false;
         userResumeFollowRef.current = false;
         logTerminalDebug('follow:scroll-intent-cleared', {}, term);
       };
@@ -1158,6 +1398,21 @@ export function TerminalPanel({
           window.cancelAnimationFrame(scrollRafRef.current);
           scrollRafRef.current = null;
         }
+        if (userViewportCaptureResetRafRef.current !== null) {
+          window.cancelAnimationFrame(userViewportCaptureResetRafRef.current);
+          userViewportCaptureResetRafRef.current = null;
+        }
+        if (pausedViewportCaptureRafRef.current !== null) {
+          window.cancelAnimationFrame(pausedViewportCaptureRafRef.current);
+          pausedViewportCaptureRafRef.current = null;
+        }
+        if (pausedViewportRestoreRafRef.current !== null) {
+          window.cancelAnimationFrame(pausedViewportRestoreRafRef.current);
+          pausedViewportRestoreRafRef.current = null;
+        }
+        userViewportCapturePendingRef.current = false;
+        viewportPointerDownRef.current = false;
+        pausedViewportScrollTopRef.current = null;
         searchAddonRef.current = null;
         logTerminalDebug('panel:dispose', {}, term);
       };
@@ -1167,7 +1422,11 @@ export function TerminalPanel({
       return;
     }
   }, [
+    armUserViewportInteraction,
+    captureScrollbackOffset,
+    clearPausedViewportScrollTop,
     fallback,
+    estimateViewportScrollbackOffset,
     flushOutgoingInput,
     logTerminalDebug,
     maybeLogQueueHealth,
@@ -1175,6 +1434,8 @@ export function TerminalPanel({
     pauseFollowOutput,
     queueWrite,
     clearScheduledStreamRepair,
+    schedulePausedViewportCapture,
+    schedulePausedViewportRestore,
     scheduleStreamRepair,
     scrollToBottomSoon,
     scheduleOutgoingInputFlush,
@@ -1423,7 +1684,7 @@ export function TerminalPanel({
     pendingRepairStateRef.current = {
       preserveViewport,
       scrollbackOffset: preserveViewport
-        ? Math.max(0, term.buffer.active.baseY - term.buffer.active.viewportY)
+        ? captureScrollbackOffset(term, 'repair-request')
         : 0
     };
     logTerminalDebug('repair:request', {
@@ -1435,7 +1696,7 @@ export function TerminalPanel({
     bulkWriteEpochRef.current += 1;
     streamRepairEpochRef.current += 1;
     setTerminalInstanceVersion((current) => current + 1);
-  }, [clearPendingWrites, clearScheduledStreamRepair, logTerminalDebug, repairRequestId]);
+  }, [captureScrollbackOffset, clearPendingWrites, clearScheduledStreamRepair, logTerminalDebug, repairRequestId]);
 
   const jumpToLatest = useCallback(() => {
     const term = terminalRef.current;
@@ -1446,12 +1707,13 @@ export function TerminalPanel({
       baseY: term.buffer.active.baseY
     });
     logTerminalDebug('follow:jump-latest', {}, term);
+    clearPausedViewportScrollTop('jump-latest', term);
     syncFollowOutputPaused(false);
     // Clear cooldown so the explicit user action isn't suppressed.
     scrollPauseCooldownRef.current = 0;
     scrollToBottomSoon(term);
     scheduleTerminalRefresh(term);
-  }, [logTerminalDebug, scheduleTerminalRefresh, scrollToBottomSoon, syncFollowOutputPaused]);
+  }, [clearPausedViewportScrollTop, logTerminalDebug, scheduleTerminalRefresh, scrollToBottomSoon, syncFollowOutputPaused]);
 
   const handlePanelFocusCapture = useCallback(() => {
     onFocusChangeRef.current?.(true);
