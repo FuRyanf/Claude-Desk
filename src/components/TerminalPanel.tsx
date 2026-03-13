@@ -147,7 +147,6 @@ export function TerminalPanel({
   const userResumeFollowRef = useRef(false);
   const userViewportCapturePendingRef = useRef(false);
   const userViewportCaptureResetRafRef = useRef<number | null>(null);
-  const viewportPointerDownRef = useRef(false);
   const scrollRafRef = useRef<number | null>(null);
   const pausedViewportCaptureRafRef = useRef<number | null>(null);
   const pausedViewportRestoreRafRef = useRef<number | null>(null);
@@ -183,6 +182,11 @@ export function TerminalPanel({
 
   const syncFollowOutputPaused = useCallback((nextPaused: boolean) => {
     setFollowOutputPaused((current) => (current === nextPaused ? current : nextPaused));
+    const term = terminalRef.current;
+    if (!term) {
+      return;
+    }
+    term.options.disableStdin = readOnlyRef.current || !inputEnabledRef.current || nextPaused;
   }, []);
 
   useEffect(() => {
@@ -891,7 +895,11 @@ export function TerminalPanel({
           !event.metaKey &&
           !event.altKey
         ) {
-          if (!readOnlyRef.current && inputEnabledRef.current) {
+          if (
+            !readOnlyRef.current &&
+            inputEnabledRef.current &&
+            shouldAutoFollow(followStateRef.current)
+          ) {
             event.preventDefault();
             event.stopPropagation();
             suppressPlainEnterUntilRef.current = Date.now() + MULTILINE_ENTER_DUPLICATE_SUPPRESSION_MS;
@@ -1146,7 +1154,11 @@ export function TerminalPanel({
       });
 
       const onDataDisposable = term.onData((data) => {
-        if (readOnlyRef.current || !inputEnabledRef.current) {
+        if (
+          readOnlyRef.current ||
+          !inputEnabledRef.current ||
+          !shouldAutoFollow(followStateRef.current)
+        ) {
           return;
         }
 
@@ -1244,10 +1256,7 @@ export function TerminalPanel({
         const distanceFromBottomPx = viewport
           ? Math.max(0, viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop)
           : null;
-        const userInteracting =
-          userScrollIntentRef.current ||
-          userViewportCapturePendingRef.current ||
-          viewportPointerDownRef.current;
+        const userInteracting = userScrollIntentRef.current || userViewportCapturePendingRef.current;
         logTerminalDebug('viewport:scroll', {
           scrollTop: viewport?.scrollTop ?? null,
           scrollHeight: viewport?.scrollHeight ?? null,
@@ -1291,7 +1300,6 @@ export function TerminalPanel({
         // right edge as a likely thumb drag. That keeps paused viewport snapshots in sync when
         // the user repositions the viewport with the native scrollbar instead of the wheel.
         const el = e.currentTarget as HTMLElement;
-        viewportPointerDownRef.current = true;
         const rect = el.getBoundingClientRect();
         const hasVisibleScrollbar = el.offsetWidth > el.clientWidth;
         const distanceFromRightPx = rect.right - e.clientX;
@@ -1320,7 +1328,6 @@ export function TerminalPanel({
         if (viewport && followStateRef.current.mode === 'pausedByUser' && userScrollIntentRef.current) {
           capturePausedViewportScrollTop('viewport-pointerup', term, viewport);
         }
-        viewportPointerDownRef.current = false;
         userScrollIntentRef.current = false;
         userViewportCapturePendingRef.current = false;
         userResumeFollowRef.current = false;
@@ -1411,7 +1418,6 @@ export function TerminalPanel({
           pausedViewportRestoreRafRef.current = null;
         }
         userViewportCapturePendingRef.current = false;
-        viewportPointerDownRef.current = false;
         pausedViewportScrollTopRef.current = null;
         searchAddonRef.current = null;
         logTerminalDebug('panel:dispose', {}, term);
@@ -1494,7 +1500,7 @@ export function TerminalPanel({
       return;
     }
 
-    term.options.disableStdin = readOnly || !inputEnabled;
+    term.options.disableStdin = readOnly || !inputEnabled || followOutputPaused;
     term.write(cursorVisible ? DECTCEM_SHOW : DECTCEM_HIDE);
 
     const wasEnabled = previousInputEnabledRef.current;
@@ -1514,7 +1520,7 @@ export function TerminalPanel({
       }, 80);
     }
     previousInputEnabledRef.current = inputEnabled;
-  }, [cursorVisible, inputEnabled, logTerminalDebug, readOnly, scrollToBottomSoon]);
+  }, [cursorVisible, followOutputPaused, inputEnabled, logTerminalDebug, readOnly, scrollToBottomSoon]);
 
   useEffect(() => {
     const term = terminalRef.current;
