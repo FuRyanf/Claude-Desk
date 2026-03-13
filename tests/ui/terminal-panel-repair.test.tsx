@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => {
     screenLines: string[];
     wrappedRows: Set<number>;
     isUserScrolling: boolean;
+    onDataListeners: Set<(data: string) => void>;
     onScrollListeners: Set<(viewportY: number) => void>;
     buffer: {
       active: {
@@ -44,6 +45,12 @@ const mocks = vi.hoisted(() => {
   const emitScroll = (term: (typeof terminals)[number]) => {
     for (const listener of term.onScrollListeners) {
       listener(term.buffer.active.viewportY);
+    }
+  };
+
+  const emitData = (term: (typeof terminals)[number], data: string) => {
+    for (const listener of term.onDataListeners) {
+      listener(data);
     }
   };
 
@@ -139,7 +146,15 @@ const mocks = vi.hoisted(() => {
       }),
       loadAddon: vi.fn(),
       attachCustomKeyEventHandler: vi.fn(),
-      onData: vi.fn(() => ({ dispose: vi.fn() })),
+      onDataListeners: new Set<(data: string) => void>(),
+      onData: vi.fn((listener: (data: string) => void) => {
+        term.onDataListeners.add(listener);
+        return {
+          dispose: vi.fn(() => {
+            term.onDataListeners.delete(listener);
+          })
+        };
+      }),
       onScrollListeners: new Set<(viewportY: number) => void>(),
       onScroll: vi.fn((listener: (viewportY: number) => void) => {
         term.onScrollListeners.add(listener);
@@ -235,6 +250,7 @@ const mocks = vi.hoisted(() => {
 
   return {
     createTerminal,
+    emitData,
     fit,
     terminals
   };
@@ -717,6 +733,90 @@ describe('TerminalPanel manual repair', () => {
       expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
     });
     expect(term.scrollToBottom).not.toHaveBeenCalled();
+  });
+
+  it('resumes follow and keeps the viewport at latest when the user types while paused', async () => {
+    const onData = vi.fn();
+    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
+    const nextContent = `${initialContent}\nnext streamed line`;
+    const { container, rerender } = render(
+      <TerminalPanel
+        sessionId="session-1"
+        content={initialContent}
+        contentByteCount={initialContent.length}
+        contentGeneration={0}
+        readOnly={false}
+        inputEnabled
+        onData={onData}
+      />
+    );
+
+    await waitFor(() => {
+      expect(mocks.terminals).toHaveLength(1);
+    });
+
+    const term = mocks.terminals[0];
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
+    });
+
+    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
+    expect(viewport).not.toBeNull();
+
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 12;
+    setViewportMetrics(viewport as HTMLElement, {
+      clientHeight: 200,
+      scrollHeight: 1200,
+      scrollTop: 600
+    });
+
+    await act(async () => {
+      fireEvent.scroll(viewport as HTMLElement);
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('.terminal-follow-button')).not.toBeNull();
+    });
+
+    // Model the live path where native viewport scrolling has moved the DOM off-bottom,
+    // but xterm's internal viewportY has already drifted back to baseY.
+    term.buffer.active.baseY = 20;
+    term.buffer.active.viewportY = 20;
+    term.scrollToBottom.mockClear();
+    term.scrollToLine.mockClear();
+    await act(async () => {
+      mocks.emitData(term, 'x');
+      mocks.emitData(term, '\r');
+    });
+
+    await waitFor(() => {
+      expect(term.scrollToBottom).toHaveBeenCalled();
+      expect(onData).toHaveBeenCalledWith('x\r');
+      expect(container.querySelector('.terminal-follow-button')).toBeNull();
+      expect((viewport as HTMLElement).scrollTop).toBe(1000);
+    });
+
+    term.scrollToBottom.mockClear();
+    term.scrollToLine.mockClear();
+    await act(async () => {
+      rerender(
+        <TerminalPanel
+          sessionId="session-1"
+          content={nextContent}
+          contentByteCount={nextContent.length}
+          contentGeneration={0}
+          readOnly={false}
+          inputEnabled
+          onData={onData}
+        />
+      );
+    });
+
+    await waitFor(() => {
+      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
+    });
+    expect(term.scrollToLine).not.toHaveBeenCalled();
   });
 
   it('does not pause follow for a viewport scroll event that remains at bottom', async () => {

@@ -372,6 +372,59 @@ export function TerminalPanel({
     [logTerminalDebug]
   );
 
+  const resumeFollowOutput = useCallback(
+    (term: Terminal, reason: string) => {
+      if (scrollRafRef.current !== null) {
+        window.cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+      if (userViewportCaptureResetRafRef.current !== null) {
+        window.cancelAnimationFrame(userViewportCaptureResetRafRef.current);
+        userViewportCaptureResetRafRef.current = null;
+      }
+      if (pausedViewportCaptureRafRef.current !== null) {
+        window.cancelAnimationFrame(pausedViewportCaptureRafRef.current);
+        pausedViewportCaptureRafRef.current = null;
+      }
+      if (pausedViewportRestoreRafRef.current !== null) {
+        window.cancelAnimationFrame(pausedViewportRestoreRafRef.current);
+        pausedViewportRestoreRafRef.current = null;
+      }
+      userScrollIntentRef.current = false;
+      userResumeFollowRef.current = false;
+      userViewportCapturePendingRef.current = false;
+      viewportPointerDownRef.current = false;
+      followStateRef.current = jumpFollowStateToLatest(followStateRef.current, {
+        baseY: term.buffer.active.baseY
+      });
+      logTerminalDebug(reason, {}, term);
+      clearPausedViewportScrollTop(reason, term);
+      syncFollowOutputPaused(false);
+      scrollPauseCooldownRef.current = 0;
+      term.scrollToBottom();
+      const viewport = getViewportElement();
+      if (viewport) {
+        const targetScrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+        if (Math.abs(viewport.scrollTop - targetScrollTop) > 0.5) {
+          logTerminalDebug('viewportScrollTop:resume-latest', {
+            reason,
+            previousScrollTop: viewport.scrollTop,
+            targetScrollTop
+          }, term);
+          viewport.scrollTop = targetScrollTop;
+        }
+      }
+      scheduleTerminalRefresh(term);
+    },
+    [
+      clearPausedViewportScrollTop,
+      getViewportElement,
+      logTerminalDebug,
+      scheduleTerminalRefresh,
+      syncFollowOutputPaused
+    ]
+  );
+
   const capturePausedViewportScrollTop = useCallback(
     (
       reason: string,
@@ -892,6 +945,9 @@ export function TerminalPanel({
           !event.altKey
         ) {
           if (!readOnlyRef.current && inputEnabledRef.current) {
+            if (!shouldAutoFollow(followStateRef.current)) {
+              resumeFollowOutput(term, 'follow:input-resume');
+            }
             event.preventDefault();
             event.stopPropagation();
             suppressPlainEnterUntilRef.current = Date.now() + MULTILINE_ENTER_DUPLICATE_SUPPRESSION_MS;
@@ -1148,6 +1204,9 @@ export function TerminalPanel({
       const onDataDisposable = term.onData((data) => {
         if (readOnlyRef.current || !inputEnabledRef.current) {
           return;
+        }
+        if (!shouldAutoFollow(followStateRef.current)) {
+          resumeFollowOutput(term, 'follow:input-resume');
         }
 
         if ((data === '\r' || data === '\n') && Date.now() < suppressPlainEnterUntilRef.current) {
@@ -1433,6 +1492,7 @@ export function TerminalPanel({
     openExternalLink,
     pauseFollowOutput,
     queueWrite,
+    resumeFollowOutput,
     clearScheduledStreamRepair,
     schedulePausedViewportCapture,
     schedulePausedViewportRestore,
@@ -1703,17 +1763,8 @@ export function TerminalPanel({
     if (!term) {
       return;
     }
-    followStateRef.current = jumpFollowStateToLatest(followStateRef.current, {
-      baseY: term.buffer.active.baseY
-    });
-    logTerminalDebug('follow:jump-latest', {}, term);
-    clearPausedViewportScrollTop('jump-latest', term);
-    syncFollowOutputPaused(false);
-    // Clear cooldown so the explicit user action isn't suppressed.
-    scrollPauseCooldownRef.current = 0;
-    scrollToBottomSoon(term);
-    scheduleTerminalRefresh(term);
-  }, [clearPausedViewportScrollTop, logTerminalDebug, scheduleTerminalRefresh, scrollToBottomSoon, syncFollowOutputPaused]);
+    resumeFollowOutput(term, 'follow:jump-latest');
+  }, [resumeFollowOutput]);
 
   const handlePanelFocusCapture = useCallback(() => {
     onFocusChangeRef.current?.(true);
