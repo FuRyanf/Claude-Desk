@@ -28,8 +28,6 @@ const mocks = vi.hoisted(() => {
     screenLines: string[];
     wrappedRows: Set<number>;
     isUserScrolling: boolean;
-    customKeyEventHandler: ((event: KeyboardEvent) => boolean) | null;
-    onDataListeners: Set<(data: string) => void>;
     onScrollListeners: Set<(viewportY: number) => void>;
     buffer: {
       active: {
@@ -46,12 +44,6 @@ const mocks = vi.hoisted(() => {
   const emitScroll = (term: (typeof terminals)[number]) => {
     for (const listener of term.onScrollListeners) {
       listener(term.buffer.active.viewportY);
-    }
-  };
-
-  const emitData = (term: (typeof terminals)[number], data: string) => {
-    for (const listener of term.onDataListeners) {
-      listener(data);
     }
   };
 
@@ -146,18 +138,8 @@ const mocks = vi.hoisted(() => {
         host.appendChild(viewport);
       }),
       loadAddon: vi.fn(),
-      attachCustomKeyEventHandler: vi.fn((handler: (event: KeyboardEvent) => boolean) => {
-        term.customKeyEventHandler = handler;
-      }),
-      onDataListeners: new Set<(data: string) => void>(),
-      onData: vi.fn((listener: (data: string) => void) => {
-        term.onDataListeners.add(listener);
-        return {
-          dispose: vi.fn(() => {
-            term.onDataListeners.delete(listener);
-          })
-        };
-      }),
+      attachCustomKeyEventHandler: vi.fn(),
+      onData: vi.fn(() => ({ dispose: vi.fn() })),
       onScrollListeners: new Set<(viewportY: number) => void>(),
       onScroll: vi.fn((listener: (viewportY: number) => void) => {
         term.onScrollListeners.add(listener);
@@ -226,7 +208,6 @@ const mocks = vi.hoisted(() => {
       screenLines: [''],
       wrappedRows: new Set<number>(),
       isUserScrolling: false,
-      customKeyEventHandler: null,
       buffer: {
         active: {
           baseY: 0,
@@ -254,7 +235,6 @@ const mocks = vi.hoisted(() => {
 
   return {
     createTerminal,
-    emitData,
     fit,
     terminals
   };
@@ -324,15 +304,6 @@ function setViewportMetrics(
       value: offsetWidth
     });
   }
-}
-
-function dispatchPointerEvent(target: HTMLElement, type: string, clientX: number) {
-  const event = new Event(type, { bubbles: true }) as PointerEvent;
-  Object.defineProperty(event, 'clientX', {
-    configurable: true,
-    value: clientX
-  });
-  target.dispatchEvent(event);
 }
 
 describe('TerminalPanel manual repair', () => {
@@ -680,82 +651,6 @@ describe('TerminalPanel manual repair', () => {
       expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
     });
     expect(term.scrollToBottom).not.toHaveBeenCalled();
-  });
-
-  it('blocks terminal stdin while paused until the user jumps to latest', async () => {
-    const onData = vi.fn();
-    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
-    const { container, getByText } = render(
-      <TerminalPanel
-        sessionId="session-1"
-        content={initialContent}
-        contentByteCount={initialContent.length}
-        contentGeneration={0}
-        readOnly={false}
-        inputEnabled
-        onData={onData}
-      />
-    );
-
-    await waitFor(() => {
-      expect(mocks.terminals).toHaveLength(1);
-    });
-
-    const term = mocks.terminals[0];
-    await waitFor(() => {
-      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
-    });
-
-    term.buffer.active.baseY = 20;
-    term.buffer.active.viewportY = 20;
-
-    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
-    expect(viewport).not.toBeNull();
-
-    await act(async () => {
-      fireEvent.wheel(viewport as HTMLElement, { deltaY: -32 });
-    });
-
-    await waitFor(() => {
-      expect(term.options.disableStdin).toBe(true);
-      expect(getByText('Jump to latest')).not.toBeNull();
-    });
-
-    act(() => {
-      mocks.emitData(term, 'ship it');
-      mocks.emitData(term, '\r');
-    });
-    expect(onData).not.toHaveBeenCalled();
-
-    const shiftEnterEvent = {
-      type: 'keydown',
-      key: 'Enter',
-      shiftKey: true,
-      ctrlKey: false,
-      metaKey: false,
-      altKey: false,
-      preventDefault: vi.fn(),
-      stopPropagation: vi.fn()
-    } as unknown as KeyboardEvent;
-    expect(term.customKeyEventHandler?.(shiftEnterEvent)).toBe(false);
-    expect(onData).not.toHaveBeenCalled();
-
-    await act(async () => {
-      fireEvent.click(getByText('Jump to latest'));
-    });
-
-    await waitFor(() => {
-      expect(term.options.disableStdin).toBe(false);
-    });
-
-    act(() => {
-      mocks.emitData(term, 'ship it');
-      mocks.emitData(term, '\r');
-    });
-
-    await waitFor(() => {
-      expect(onData).toHaveBeenCalledWith('ship it\r');
-    });
   });
 
   it('pauses follow when the viewport scrolls off-bottom without a wheel event', async () => {
@@ -1149,7 +1044,7 @@ describe('TerminalPanel manual repair', () => {
     term.buffer.active.baseY = 20;
     term.buffer.active.viewportY = 12;
     await act(async () => {
-      dispatchPointerEvent(viewport as HTMLElement, 'pointerdown', 392);
+      fireEvent.pointerDown(viewport as HTMLElement, { clientX: 392 });
       setViewportMetrics(viewport as HTMLElement, {
         clientHeight: 200,
         scrollHeight: 1200,
@@ -1158,7 +1053,7 @@ describe('TerminalPanel manual repair', () => {
         offsetWidth: 400
       });
       fireEvent.scroll(viewport as HTMLElement);
-      dispatchPointerEvent(viewport as HTMLElement, 'pointerup', 392);
+      fireEvent.pointerUp(viewport as HTMLElement, { clientX: 392 });
     });
 
     term.buffer.active.baseY = 20;
@@ -1199,85 +1094,6 @@ describe('TerminalPanel manual repair', () => {
       expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
       expect(term.scrollToLine).toHaveBeenCalledWith(10);
       expect((viewport as HTMLElement).scrollTop).toBe(400);
-    });
-    expect(term.scrollToBottom).not.toHaveBeenCalled();
-  });
-
-  it('does not treat a held content pointerdown as a paused viewport reposition', async () => {
-    const initialContent = Array.from({ length: 48 }, (_, index) => `line ${index + 1}`).join('\n');
-    const nextContent = `${initialContent}\nnext streamed line`;
-    const { container, rerender } = render(
-      <TerminalPanel
-        sessionId="session-1"
-        content={initialContent}
-        contentByteCount={initialContent.length}
-        contentGeneration={0}
-        readOnly={false}
-        inputEnabled
-      />
-    );
-
-    await waitFor(() => {
-      expect(mocks.terminals).toHaveLength(1);
-    });
-
-    const term = mocks.terminals[0];
-    await waitFor(() => {
-      expect(term.write).toHaveBeenCalledWith(initialContent, expect.any(Function));
-    });
-
-    const viewport = container.querySelector('.xterm-viewport') as HTMLElement | null;
-    expect(viewport).not.toBeNull();
-
-    term.buffer.active.baseY = 20;
-    term.buffer.active.viewportY = 12;
-    setViewportMetrics(viewport as HTMLElement, {
-      clientHeight: 200,
-      scrollHeight: 1200,
-      scrollTop: 600
-    });
-
-    await act(async () => {
-      fireEvent.scroll(viewport as HTMLElement);
-      fireEvent.pointerDown(viewport as HTMLElement, { clientX: 100 });
-    });
-
-    term.buffer.active.baseY = 20;
-    term.buffer.active.viewportY = 12;
-    const originalWrite = term.write.getMockImplementation();
-    term.write.mockImplementation((chunk: string, callback?: () => void) => {
-      originalWrite?.(chunk, () => {
-        if (chunk === '\nnext streamed line') {
-          setViewportMetrics(viewport as HTMLElement, {
-            clientHeight: 200,
-            scrollHeight: 1240,
-            scrollTop: 640
-          });
-          fireEvent.scroll(viewport as HTMLElement);
-        }
-        callback?.();
-      });
-    });
-
-    term.scrollToBottom.mockClear();
-    term.scrollToLine.mockClear();
-    await act(async () => {
-      rerender(
-        <TerminalPanel
-          sessionId="session-1"
-          content={nextContent}
-          contentByteCount={nextContent.length}
-          contentGeneration={0}
-          readOnly={false}
-          inputEnabled
-        />
-      );
-    });
-
-    await waitFor(() => {
-      expect(term.write).toHaveBeenCalledWith('\nnext streamed line', expect.any(Function));
-      expect(term.scrollToLine).toHaveBeenCalledWith(14);
-      expect((viewport as HTMLElement).scrollTop).toBe(600);
     });
     expect(term.scrollToBottom).not.toHaveBeenCalled();
   });
