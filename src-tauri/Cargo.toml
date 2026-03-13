@@ -1,6 +1,6 @@
 [package]
 name = "claude_desk"
-version = "0.1.28"
+version = "0.1.58"
 description = "Claude Desk"
 authors = ["Claude Desk"]
 license = "MIT"

@@ -716,6 +716,62 @@ describe('Left rail recency and sorting semantics', () => {
     }
   });
 
+  it('does not re-mark unread from replayed output that was already visible via snapshot hydration', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let dateNowSpy: ReturnType<typeof vi.spyOn> | null = null;
+    try {
+      let nowMs = Date.parse('2026-02-22T10:00:00.000Z');
+      dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => {
+        nowMs += 1;
+        return nowMs;
+      });
+      mocks.api.terminalReadOutput.mockImplementation(async (sessionId: string) =>
+        sessionId === 'session-thread-newer' ? 'assistant output\n' : ''
+      );
+
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      await waitFor(() => {
+        expect(mocks.api.terminalReadOutput).toHaveBeenCalledWith('session-thread-newer');
+      });
+      await waitFor(() => {
+        const raw = window.localStorage.getItem('claude-desk:visible-output-guard') ?? '{}';
+        const parsed = JSON.parse(raw) as Record<string, { tail?: unknown }>;
+        expect(parsed['thread-newer']).toMatchObject({ tail: 'assistant output' });
+      });
+
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
+      });
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    } finally {
+      dateNowSpy?.mockRestore();
+      mocks.api.terminalReadOutput.mockImplementation(async () => '');
+      vi.useRealTimers();
+    }
+  });
+
   it('fires an alert when a background thread first turns unread', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

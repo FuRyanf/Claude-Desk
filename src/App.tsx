@@ -86,6 +86,7 @@ const SELECTED_WORKSPACE_KEY = 'claude-desk:selected-workspace';
 const SIDEBAR_WIDTH_KEY = 'claude-desk:sidebar-width';
 const SHELL_DRAWER_HEIGHT_KEY = 'claude-desk:shell-drawer-height';
 const THREAD_LAST_READ_AT_KEY = 'claude-desk:last-read-at';
+const THREAD_VISIBLE_OUTPUT_GUARD_KEY = 'claude-desk:visible-output-guard';
 const TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY = 'claude-desk:task-completion-alerts-bootstrap-v1';
 const SIDEBAR_WIDTH_DEFAULT = 320;
 const SIDEBAR_WIDTH_MIN = 260;
@@ -109,6 +110,7 @@ const THREAD_WORKING_STUCK_TIMEOUT_MS = 15_000;
 const MAX_ATTACHMENT_DRAFTS = 24;
 const MAX_ATTACHMENTS_PER_MESSAGE = 12;
 const MAX_HIDDEN_INJECTED_PROMPTS_PER_THREAD = 80;
+const MAX_VISIBLE_OUTPUT_TAIL_CHARS = 512;
 const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'tif', 'tiff', 'heic', 'heif']);
 const REMOTE_FULL_ACCESS_STARTUP_BLOCK_REASON =
@@ -126,6 +128,12 @@ function normalizeSettings(settings?: Settings | null): Settings {
 interface PendingSessionStart {
   requestId: number;
   promise: Promise<string>;
+}
+
+interface ThreadVisibleOutputGuard {
+  seenAtMs: number;
+  baselineUserInputAtMs: number;
+  tail: string;
 }
 
 function removeThreadFlag(map: Record<string, boolean>, threadId: string) {
@@ -170,12 +178,104 @@ function loadThreadTimestampMap(storageKey: string): Record<string, number> {
   return parseThreadTimestampMap(window.localStorage.getItem(storageKey));
 }
 
+function parseThreadVisibleOutputGuardMap(raw: string | null): Record<string, ThreadVisibleOutputGuard> {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    const normalized: Record<string, ThreadVisibleOutputGuard> = {};
+    for (const [threadId, value] of Object.entries(parsed)) {
+      if (!threadId || !value || typeof value !== 'object' || Array.isArray(value)) {
+        continue;
+      }
+      const seenAtMs =
+        typeof (value as { seenAtMs?: unknown }).seenAtMs === 'number'
+          ? (value as { seenAtMs: number }).seenAtMs
+          : Number((value as { seenAtMs?: unknown }).seenAtMs);
+      if (!Number.isFinite(seenAtMs) || seenAtMs <= 0) {
+        continue;
+      }
+      const baselineUserInputAtMs =
+        typeof (value as { baselineUserInputAtMs?: unknown }).baselineUserInputAtMs === 'number'
+          ? (value as { baselineUserInputAtMs: number }).baselineUserInputAtMs
+          : Number((value as { baselineUserInputAtMs?: unknown }).baselineUserInputAtMs ?? 0);
+      const rawTail = typeof (value as { tail?: unknown }).tail === 'string' ? (value as { tail: string }).tail : '';
+      const tail = rawTail.trim();
+      if (!tail) {
+        continue;
+      }
+      normalized[threadId] = {
+        seenAtMs: Math.trunc(seenAtMs),
+        baselineUserInputAtMs:
+          Number.isFinite(baselineUserInputAtMs) && baselineUserInputAtMs > 0
+            ? Math.trunc(baselineUserInputAtMs)
+            : 0,
+        tail:
+          tail.length <= MAX_VISIBLE_OUTPUT_TAIL_CHARS
+            ? tail
+            : tail.slice(tail.length - MAX_VISIBLE_OUTPUT_TAIL_CHARS)
+      };
+    }
+    return normalized;
+  } catch {
+    return {};
+  }
+}
+
+function loadThreadVisibleOutputGuardMap(storageKey: string): Record<string, ThreadVisibleOutputGuard> {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  return parseThreadVisibleOutputGuardMap(window.localStorage.getItem(storageKey));
+}
+
 function persistThreadTimestampMap(storageKey: string, map: Record<string, number>) {
   if (typeof window === 'undefined') {
     return;
   }
   try {
     const entries = Object.entries(map).filter(([, value]) => Number.isFinite(value) && value > 0);
+    if (entries.length === 0) {
+      window.localStorage.removeItem(storageKey);
+      return;
+    }
+    window.localStorage.setItem(storageKey, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // best effort
+  }
+}
+
+function persistThreadVisibleOutputGuardMap(storageKey: string, map: Record<string, ThreadVisibleOutputGuard>) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const entries = Object.entries(map)
+      .map(([threadId, value]) => {
+        const tail = typeof value.tail === 'string' ? value.tail.trim() : '';
+        if (!threadId || !tail || !Number.isFinite(value.seenAtMs) || value.seenAtMs <= 0) {
+          return null;
+        }
+        return [
+          threadId,
+          {
+            seenAtMs: Math.trunc(value.seenAtMs),
+            baselineUserInputAtMs:
+              Number.isFinite(value.baselineUserInputAtMs) && value.baselineUserInputAtMs > 0
+                ? Math.trunc(value.baselineUserInputAtMs)
+                : 0,
+            tail:
+              tail.length <= MAX_VISIBLE_OUTPUT_TAIL_CHARS
+                ? tail
+                : tail.slice(tail.length - MAX_VISIBLE_OUTPUT_TAIL_CHARS)
+          }
+        ] as const;
+      })
+      .filter((entry): entry is readonly [string, ThreadVisibleOutputGuard] => entry !== null);
     if (entries.length === 0) {
       window.localStorage.removeItem(storageKey);
       return;
@@ -673,6 +773,43 @@ function looksLikeShellPromptText(chunk: string): boolean {
   });
 }
 
+function extractMeaningfulOutputTail(text: string, maxChars = MAX_VISIBLE_OUTPUT_TAIL_CHARS): string {
+  if (!text) {
+    return '';
+  }
+
+  const lines = stripAnsi(text)
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim())
+    .filter((line) => line.length > 0);
+
+  while (lines.length > 0 && looksLikeShellPromptText(lines[lines.length - 1] ?? '')) {
+    lines.pop();
+  }
+
+  if (lines.length === 0) {
+    return '';
+  }
+
+  const normalized = normalizeMeaningfulOutputText(lines.join('\n'));
+  if (!normalized) {
+    return '';
+  }
+  return normalized.length <= maxChars ? normalized : normalized.slice(normalized.length - maxChars);
+}
+
+function matchesVisibleOutputTail(normalizedChunk: string, visibleTail: string): boolean {
+  if (!normalizedChunk || !visibleTail) {
+    return false;
+  }
+  return (
+    visibleTail === normalizedChunk ||
+    visibleTail.endsWith(normalizedChunk) ||
+    normalizedChunk.endsWith(visibleTail)
+  );
+}
+
 function mergeTerminalLogSnapshot(existing: string, incoming: string): string {
   if (!incoming) {
     return existing;
@@ -945,6 +1082,9 @@ export default function App() {
   const seenOutputSequenceByThreadRef = useRef<Record<string, number>>({});
   const taskCompletionAlertBootstrapAttemptedRef = useRef(false);
   const lastReadAtMsByThreadRef = useRef<Record<string, number>>(loadThreadTimestampMap(THREAD_LAST_READ_AT_KEY));
+  const visibleOutputGuardByThreadRef = useRef<Record<string, ThreadVisibleOutputGuard>>(
+    loadThreadVisibleOutputGuardMap(THREAD_VISIBLE_OUTPUT_GUARD_KEY)
+  );
   const threadReadStateDirtyRef = useRef(false);
   const lastMeaningfulOutputAtMsByThreadRef = useRef<Record<string, number>>({});
   const lastMeaningfulOutputByThreadRef = useRef<Record<string, string>>({});
@@ -1114,7 +1254,56 @@ export default function App() {
     }
     threadReadStateDirtyRef.current = false;
     persistThreadTimestampMap(THREAD_LAST_READ_AT_KEY, lastReadAtMsByThreadRef.current);
+    persistThreadVisibleOutputGuardMap(THREAD_VISIBLE_OUTPUT_GUARD_KEY, visibleOutputGuardByThreadRef.current);
   }, []);
+
+  const rememberThreadVisibleOutput = useCallback((threadId: string, outputText: string, seenAtMs = Date.now()) => {
+    const tail = extractMeaningfulOutputTail(outputText);
+    if (!tail) {
+      return;
+    }
+    visibleOutputGuardByThreadRef.current[threadId] = {
+      seenAtMs,
+      baselineUserInputAtMs: lastUserInputAtMsByThreadRef.current[threadId] ?? 0,
+      tail
+    };
+    threadReadStateDirtyRef.current = true;
+  }, []);
+
+  const markThreadOutputSeen = useCallback((threadId: string) => {
+    seenOutputSequenceByThreadRef.current[threadId] = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
+  }, []);
+
+  const applyThreadReadBoundary = useCallback((threadId: string, readAtMs: number) => {
+    lastReadAtMsByThreadRef.current[threadId] = readAtMs;
+    threadReadStateDirtyRef.current = true;
+    markThreadOutputSeen(threadId);
+    delete unreadAlertStatusByThreadRef.current[threadId];
+    if (unreadOutputByThreadRef.current[threadId]) {
+      const nextUnread = { ...unreadOutputByThreadRef.current };
+      delete nextUnread[threadId];
+      unreadOutputByThreadRef.current = nextUnread;
+    }
+    setUnreadOutputByThread((current) => removeThreadFlag(current, threadId));
+  }, [markThreadOutputSeen]);
+
+  const clearThreadUnread = useCallback((threadId: string, persistNow = false, readAtMs = Date.now()) => {
+    applyThreadReadBoundary(threadId, readAtMs);
+    if (persistNow) {
+      flushThreadReadState();
+    }
+  }, [applyThreadReadBoundary, flushThreadReadState]);
+
+  const markThreadVisibleOutputRead = useCallback(
+    (threadId: string, outputText: string, persistNow = false, readAtMs = Date.now()) => {
+      applyThreadReadBoundary(threadId, readAtMs);
+      rememberThreadVisibleOutput(threadId, outputText, readAtMs);
+      if (persistNow) {
+        flushThreadReadState();
+      }
+    },
+    [applyThreadReadBoundary, flushThreadReadState, rememberThreadVisibleOutput]
+  );
 
   selectedWorkspaceIdRef.current = selectedWorkspaceId;
   selectedThreadIdRef.current = selectedThreadId;
@@ -1471,6 +1660,7 @@ export default function App() {
       const appendBytesByThread = options?.appendBytesByThread ?? {};
       const current = lastTerminalLogByThreadRef.current;
       const next = updater(current);
+      const selectedThreadId = selectedThreadIdRef.current;
       if (next === current) {
         if (mode === 'append' && Object.keys(appendBytesByThread).length > 0) {
           const nextByteCounts = { ...terminalLogByteCountByThreadRef.current };
@@ -1527,9 +1717,16 @@ export default function App() {
       terminalLogByteCountByThreadRef.current = nextByteCounts;
       terminalLogGenerationByThreadRef.current = nextGenerations;
       setLastTerminalLogByThread(next);
+      if (mode === 'snapshot' && selectedThreadId) {
+        const previousSelectedText = current[selectedThreadId] ?? '';
+        const nextSelectedText = next[selectedThreadId] ?? '';
+        if (nextSelectedText && nextSelectedText !== previousSelectedText) {
+          markThreadVisibleOutputRead(selectedThreadId, nextSelectedText);
+        }
+      }
       return next;
     },
-    []
+    [markThreadVisibleOutputRead]
   );
 
   const flushPendingTerminalLogChunks = useCallback(() => {
@@ -1655,6 +1852,8 @@ export default function App() {
     const seenOutputSeq = seenOutputSequenceByThreadRef.current[threadId] ?? 0;
     const lastUserInputSeq = lastUserInputSequenceByThreadRef.current[threadId] ?? 0;
     const lastReadAtMs = lastReadAtMsByThreadRef.current[threadId] ?? 0;
+    const lastUserInputAtMs = lastUserInputAtMsByThreadRef.current[threadId] ?? 0;
+    const visibleOutputGuard = visibleOutputGuardByThreadRef.current[threadId];
     const isReplayOfAlreadyReadOutput =
       lastMeaningfulOutputAtMs > 0 &&
       lastMeaningfulOutput === normalized &&
@@ -1662,6 +1861,14 @@ export default function App() {
       seenOutputSeq >= latestOutputSeq &&
       lastUserInputSeq < latestOutputSeq;
     if (isReplayOfAlreadyReadOutput) {
+      return false;
+    }
+    const isReplayOfVisibleReadOutput =
+      Boolean(visibleOutputGuard) &&
+      lastReadAtMs >= visibleOutputGuard.seenAtMs &&
+      lastUserInputAtMs <= visibleOutputGuard.baselineUserInputAtMs &&
+      matchesVisibleOutputTail(normalized, visibleOutputGuard.tail);
+    if (isReplayOfVisibleReadOutput) {
       return false;
     }
 
@@ -1676,26 +1883,6 @@ export default function App() {
     latestOutputSequenceByThreadRef.current[threadId] = outputSequenceCounterRef.current;
     return true;
   }, []);
-
-  const markThreadOutputSeen = useCallback((threadId: string) => {
-    seenOutputSequenceByThreadRef.current[threadId] = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
-  }, []);
-
-  const clearThreadUnread = useCallback((threadId: string, persistNow = false) => {
-    lastReadAtMsByThreadRef.current[threadId] = Date.now();
-    threadReadStateDirtyRef.current = true;
-    markThreadOutputSeen(threadId);
-    delete unreadAlertStatusByThreadRef.current[threadId];
-    if (unreadOutputByThreadRef.current[threadId]) {
-      const nextUnread = { ...unreadOutputByThreadRef.current };
-      delete nextUnread[threadId];
-      unreadOutputByThreadRef.current = nextUnread;
-    }
-    setUnreadOutputByThread((current) => removeThreadFlag(current, threadId));
-    if (persistNow) {
-      flushThreadReadState();
-    }
-  }, [flushThreadReadState, markThreadOutputSeen]);
 
   // Returns true only if the user sent at least one message in the current session
   // (i.e. after the most recent session bind). Prevents Claude's startup prompt from
@@ -3390,6 +3577,7 @@ export default function App() {
       delete latestOutputSequenceByThreadRef.current[threadId];
       delete seenOutputSequenceByThreadRef.current[threadId];
       delete lastReadAtMsByThreadRef.current[threadId];
+      delete visibleOutputGuardByThreadRef.current[threadId];
       threadReadStateDirtyRef.current = true;
       delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
       delete lastMeaningfulOutputByThreadRef.current[threadId];
@@ -3792,8 +3980,13 @@ export default function App() {
     if (!selectedThreadId) {
       return;
     }
+    const visibleLog = lastTerminalLogByThreadRef.current[selectedThreadId] ?? '';
+    if (visibleLog) {
+      markThreadVisibleOutputRead(selectedThreadId, visibleLog, true);
+      return;
+    }
     clearThreadUnread(selectedThreadId, true);
-  }, [clearThreadUnread, selectedThreadId]);
+  }, [clearThreadUnread, markThreadVisibleOutputRead, selectedThreadId]);
 
   useEffect(() => {
     if (!selectedWorkspaceId || !selectedThreadId || selectedSessionId) {
@@ -3989,7 +4182,11 @@ export default function App() {
         if (isSelectedThread) {
           setStartingByThread((current) => removeThreadFlag(current, threadId));
           setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
-          clearThreadUnread(threadId);
+          if (hasMeaningfulOutput) {
+            markThreadVisibleOutputRead(threadId, visibleEventData);
+          } else {
+            clearThreadUnread(threadId);
+          }
         }
         if (workingByThreadRef.current[threadId]) {
           scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
@@ -4009,7 +4206,11 @@ export default function App() {
       if (isSelectedThread) {
         setStartingByThread((current) => removeThreadFlag(current, threadId));
         setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
-        clearThreadUnread(threadId);
+        if (hasMeaningfulOutput) {
+          markThreadVisibleOutputRead(threadId, visibleEventData);
+        } else {
+          clearThreadUnread(threadId);
+        }
       }
       if (workingByThreadRef.current[threadId]) {
         scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
@@ -4030,6 +4231,7 @@ export default function App() {
       clearThreadWorkingStopTimer,
       clearThreadUnread,
       hasUserSentMessageInCurrentSession,
+      markThreadVisibleOutputRead,
       noteThreadOutput,
       stripThreadHiddenInjectedPrompts,
       startThreadWorking,
@@ -4914,6 +5116,7 @@ export default function App() {
         delete latestOutputSequenceByThreadRef.current[threadId];
         delete seenOutputSequenceByThreadRef.current[threadId];
         delete lastReadAtMsByThreadRef.current[threadId];
+        delete visibleOutputGuardByThreadRef.current[threadId];
         threadReadStateDirtyRef.current = true;
         delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
         delete lastMeaningfulOutputByThreadRef.current[threadId];
