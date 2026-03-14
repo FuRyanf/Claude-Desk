@@ -162,8 +162,13 @@ const mocks = vi.hoisted(() => {
     terminalResize: vi.fn(async () => true),
     terminalKill: vi.fn(async () => true),
     terminalSendSignal: vi.fn(async () => true),
-    terminalGetLastLog: vi.fn(async (_workspaceId: string, threadId: string) => `log-${threadId}`),
-    terminalReadOutput: vi.fn(async () => ''),
+    terminalGetLastLog: vi.fn(async (_workspaceId: string, threadId: string) => ({
+      text: `log-${threadId}`,
+      startPosition: 0,
+      endPosition: `log-${threadId}`.length,
+      truncated: false
+    })),
+    terminalReadOutput: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
     runClaude: vi.fn(async () => ({ runId: 'run-1' })),
     cancelRun: vi.fn(async () => true),
     generateCommitMessage: vi.fn(async () => 'chore: update'),
@@ -194,6 +199,7 @@ const mocks = vi.hoisted(() => {
     onRunExit: vi.fn(async () => () => undefined),
     onTerminalData: vi.fn(async () => () => undefined),
     onTerminalReady: vi.fn(async () => () => undefined),
+    onTerminalTurnCompleted: vi.fn(async () => () => undefined),
     onTerminalExit: vi.fn(async () => () => undefined),
     onThreadUpdated: vi.fn(async () => () => undefined)
   };
@@ -205,6 +211,7 @@ vi.mock('../../src/lib/api', () => ({
   onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
+  onTerminalTurnCompleted: mocks.onTerminalTurnCompleted,
   onTerminalExit: mocks.onTerminalExit,
   onThreadUpdated: mocks.onThreadUpdated
 }));

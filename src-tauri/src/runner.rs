@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader as StdBufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -23,7 +23,8 @@ use crate::git_tools;
 use crate::models::{
     ContextFilePreview, ContextPreview, ImportableClaudeProject, ImportableClaudeSession,
     RunClaudeRequest, RunClaudeResponse, RunExitEvent, RunMetadata, Settings, StreamEvent,
-    TerminalDataEvent, TerminalExitEvent, TerminalReadyEvent, TerminalStartResponse,
+    TerminalDataEvent, TerminalExitEvent, TerminalOutputSnapshot, TerminalReadyEvent,
+    TerminalStartResponse,
     TerminalTurnCompletedEvent, ThreadRunStatus, TranscriptEntry, WorkspaceKind,
     WorkspaceShellStartResponse,
 };
@@ -42,6 +43,7 @@ const POST_CONNECT_PROMPT_BUFFER_MAX: usize = 16 * 1024;
 const POST_CONNECT_COMMAND_AFTER_SSH_START_TIMEOUT: Duration = Duration::from_secs(6);
 const CLAUDE_TURN_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_LOG_SNAPSHOT_MAX_BYTES: u64 = 512 * 1024;
+const TERMINAL_STREAM_TAIL_MAX_CHARS: u64 = 280_000;
 const TERMINAL_ENV_DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(8);
 const COMMIT_MESSAGE_TIMEOUT: Duration = Duration::from_secs(90);
 const COMMAND_TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -955,10 +957,10 @@ fn extract_claude_resume_session_id(text: &str) -> Option<String> {
 
 fn recover_session_id_from_logs(workspace_id: &str, thread_id: &str) -> Option<String> {
     let snapshot = terminal_get_last_log(workspace_id, thread_id).ok()?;
-    if snapshot.trim().is_empty() {
+    if snapshot.text.trim().is_empty() {
         return None;
     }
-    extract_claude_resume_session_id(&strip_ansi_sequences(&snapshot))
+    extract_claude_resume_session_id(&strip_ansi_sequences(&snapshot.text))
 }
 
 fn emit_terminal_ready(app: &AppHandle, thread_id: &str, session_id: &str) {
@@ -1075,6 +1077,7 @@ fn claude_session_jsonl_path(workspace_path: &str, claude_session_id: &str) -> R
         .join(format!("{claude_session_id}.jsonl")))
 }
 
+#[cfg(test)]
 fn latest_claude_turn_completion_after(
     session_path: &Path,
     after_ms: i64,
@@ -1243,6 +1246,7 @@ fn update_prompt_submit_buffer(buffer: &mut String, chunk: &str) -> bool {
     submitted_prompt
 }
 
+#[cfg(test)]
 fn input_chunk_submits_prompt(chunk: &str) -> bool {
     let mut buffer = String::new();
     update_prompt_submit_buffer(&mut buffer, chunk)
@@ -1285,6 +1289,7 @@ struct TerminalSession {
     started_at: chrono::DateTime<Utc>,
     command: Vec<String>,
     output_log_path: PathBuf,
+    output_state: Arc<TerminalOutputState>,
     submitted_prompt_count: AtomicU64,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -1518,7 +1523,140 @@ fn decode_utf8_chunk(buffer: &[u8], carry: &mut Vec<u8>) -> Option<String> {
     }
 }
 
-fn read_log_snapshot(path: &Path) -> Result<String> {
+fn terminal_position_len(text: &str) -> u64 {
+    text.encode_utf16().count() as u64
+}
+
+fn utf16_boundary_after_units(text: &str, min_units: u64) -> (usize, u64) {
+    if min_units == 0 {
+        return (0, 0);
+    }
+
+    let mut consumed_units = 0_u64;
+    for (index, ch) in text.char_indices() {
+        consumed_units = consumed_units.saturating_add(ch.len_utf16() as u64);
+        if consumed_units >= min_units {
+            return (index + ch.len_utf8(), consumed_units);
+        }
+    }
+
+    (text.len(), consumed_units)
+}
+
+#[derive(Debug, Clone)]
+struct TerminalOutputBuffer {
+    text: String,
+    start_position: u64,
+    end_position: u64,
+    text_len: u64,
+}
+
+impl TerminalOutputBuffer {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            start_position: 0,
+            end_position: 0,
+            text_len: 0,
+        }
+    }
+
+    fn snapshot(&self) -> TerminalOutputSnapshot {
+        TerminalOutputSnapshot {
+            text: self.text.clone(),
+            start_position: self.start_position,
+            end_position: self.end_position,
+            truncated: self.start_position > 0,
+        }
+    }
+
+    fn append(&mut self, chunk: &str) -> (u64, u64) {
+        let start_position = self.end_position;
+        let delta = terminal_position_len(chunk);
+        self.text.push_str(chunk);
+        self.end_position = self.end_position.saturating_add(delta);
+        self.text_len = self.text_len.saturating_add(delta);
+
+        if self.text_len > TERMINAL_STREAM_TAIL_MAX_CHARS {
+            let min_units_to_trim = self.text_len - TERMINAL_STREAM_TAIL_MAX_CHARS;
+            let (trim_end, trimmed_units) = utf16_boundary_after_units(&self.text, min_units_to_trim);
+            if trim_end > 0 {
+                self.text.drain(..trim_end);
+                self.start_position = self.start_position.saturating_add(trimmed_units);
+                self.text_len = self.text_len.saturating_sub(trimmed_units);
+            }
+        }
+
+        (start_position, self.end_position)
+    }
+}
+
+#[derive(Debug)]
+struct TerminalOutputState {
+    buffer: Mutex<TerminalOutputBuffer>,
+    reader_done: Mutex<bool>,
+    reader_done_cv: Condvar,
+}
+
+impl TerminalOutputState {
+    fn new() -> Self {
+        Self {
+            buffer: Mutex::new(TerminalOutputBuffer::new()),
+            reader_done: Mutex::new(false),
+            reader_done_cv: Condvar::new(),
+        }
+    }
+
+    fn append(&self, chunk: &str) -> Result<(u64, u64)> {
+        let mut buffer = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("Terminal output buffer lock poisoned"))?;
+        Ok(buffer.append(chunk))
+    }
+
+    fn snapshot(&self) -> Result<TerminalOutputSnapshot> {
+        let buffer = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("Terminal output buffer lock poisoned"))?;
+        Ok(buffer.snapshot())
+    }
+
+    fn end_position(&self) -> Result<u64> {
+        let buffer = self
+            .buffer
+            .lock()
+            .map_err(|_| anyhow!("Terminal output buffer lock poisoned"))?;
+        Ok(buffer.end_position)
+    }
+
+    fn mark_reader_done(&self) -> Result<()> {
+        let mut done = self
+            .reader_done
+            .lock()
+            .map_err(|_| anyhow!("Terminal reader state lock poisoned"))?;
+        *done = true;
+        self.reader_done_cv.notify_all();
+        Ok(())
+    }
+
+    fn wait_until_reader_done(&self) -> Result<()> {
+        let mut done = self
+            .reader_done
+            .lock()
+            .map_err(|_| anyhow!("Terminal reader state lock poisoned"))?;
+        while !*done {
+            done = self
+                .reader_done_cv
+                .wait(done)
+                .map_err(|_| anyhow!("Terminal reader state lock poisoned"))?;
+        }
+        Ok(())
+    }
+}
+
+fn read_log_snapshot(path: &Path) -> Result<(String, bool)> {
     let mut file = File::open(path)?;
     let total_len = file.metadata()?.len();
     let start_offset = total_len.saturating_sub(TERMINAL_LOG_SNAPSHOT_MAX_BYTES);
@@ -1534,14 +1672,10 @@ fn read_log_snapshot(path: &Path) -> Result<String> {
         if let Some(newline_index) = text.find('\n') {
             text = text[(newline_index + 1)..].to_string();
         }
-        return Ok(format!(
-            "(output truncated to last {} KB)\n{}",
-            TERMINAL_LOG_SNAPSHOT_MAX_BYTES / 1024,
-            text
-        ));
+        return Ok((text, true));
     }
 
-    Ok(text)
+    Ok((text, false))
 }
 
 pub fn build_context_preview(workspace_path: &str, context_pack: &str) -> Result<ContextPreview> {
@@ -1674,10 +1808,29 @@ pub async fn cancel_run(state: Arc<RunnerState>, run_id: String) -> Result<bool>
     Ok(false)
 }
 
-pub fn terminal_get_last_log(workspace_id: &str, thread_id: &str) -> Result<String> {
+fn read_run_end_position(run_dir: &Path, fallback_text: &str) -> u64 {
+    let metadata_path = run_dir.join("metadata.json");
+    let Ok(raw) = fs::read_to_string(metadata_path) else {
+        return terminal_position_len(fallback_text);
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return terminal_position_len(fallback_text);
+    };
+    value
+        .get("endPosition")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| terminal_position_len(fallback_text))
+}
+
+pub fn terminal_get_last_log(workspace_id: &str, thread_id: &str) -> Result<TerminalOutputSnapshot> {
     let runs_root = storage::runs_dir(workspace_id, thread_id)?;
     if !runs_root.exists() {
-        return Ok(String::new());
+        return Ok(TerminalOutputSnapshot {
+            text: String::new(),
+            start_position: 0,
+            end_position: 0,
+            truncated: false,
+        });
     }
 
     let mut logs: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
@@ -1699,18 +1852,36 @@ pub fn terminal_get_last_log(workspace_id: &str, thread_id: &str) -> Result<Stri
 
     logs.sort_by(|a, b| a.0.cmp(&b.0));
     let Some((_, last_log)) = logs.last() else {
-        return Ok(String::new());
+        return Ok(TerminalOutputSnapshot {
+            text: String::new(),
+            start_position: 0,
+            end_position: 0,
+            truncated: false,
+        });
     };
 
-    read_log_snapshot(last_log)
+    let run_dir = last_log.parent().unwrap_or_else(|| Path::new(""));
+    let (text, truncated) = read_log_snapshot(last_log)?;
+    let end_position = read_run_end_position(run_dir, &text);
+    let text_len = terminal_position_len(&text);
+    let start_position = end_position.saturating_sub(text_len);
+    Ok(TerminalOutputSnapshot {
+        text,
+        start_position,
+        end_position,
+        truncated,
+    })
 }
 
-pub fn terminal_read_output(state: Arc<RunnerState>, session_id: String) -> Result<String> {
+pub fn terminal_read_output(
+    state: Arc<RunnerState>,
+    session_id: String,
+) -> Result<TerminalOutputSnapshot> {
     let Some(session) = state.terminal_sessions.get(&session_id)? else {
         return Err(anyhow!("Terminal session not found"));
     };
 
-    read_log_snapshot(&session.output_log_path)
+    session.output_state.snapshot()
 }
 
 pub async fn terminal_start_session(
@@ -1721,7 +1892,6 @@ pub async fn terminal_start_session(
     env_vars: Option<HashMap<String, String>>,
     full_access_flag: bool,
     thread_id: String,
-    reattach_completion_after_ms: Option<i64>,
 ) -> Result<TerminalStartResponse> {
     let workspace = storage::resolve_workspace_by_path(&workspace_path)?.ok_or_else(|| {
         anyhow!("Workspace not registered. Add workspace before starting terminal.")
@@ -1794,27 +1964,6 @@ pub async fn terminal_start_session(
             .to_string()
     };
     let session_id = Uuid::new_v4().to_string();
-    let reattach_turn_completion = if workspace.kind == WorkspaceKind::Local
-        && session_mode == TerminalSessionMode::Resumed
-    {
-        if let Some(after_ms) = reattach_completion_after_ms {
-            match claude_session_jsonl_path(&workspace_path, &launch_session_id) {
-                Ok(session_path) => latest_claude_turn_completion_after(&session_path, after_ms)
-                    .map(|completion| TerminalTurnCompletedEvent {
-                        session_id: session_id.clone(),
-                        thread_id: Some(thread_id.clone()),
-                        status: completion.status.to_string(),
-                        has_meaningful_output: completion.has_meaningful_output,
-                        completed_at_ms: completion.completed_at_ms,
-                    }),
-                Err(_) => None,
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
     let run_dir = storage::runs_dir(&workspace_id, &thread_id)?.join(&session_id);
     fs::create_dir_all(&run_dir)?;
 
@@ -1913,6 +2062,7 @@ pub async fn terminal_start_session(
             .append(true)
             .open(&output_log_path)?,
     ));
+    let output_state = Arc::new(TerminalOutputState::new());
 
     let session_killed = Arc::new(AtomicBool::new(false));
     let session = Arc::new(TerminalSession {
@@ -1933,6 +2083,7 @@ pub async fn terminal_start_session(
         started_at,
         command: command_manifest.clone(),
         output_log_path,
+        output_state: output_state.clone(),
         submitted_prompt_count: AtomicU64::new(0),
         master: Arc::new(Mutex::new(pty_pair.master)),
         writer: Arc::new(Mutex::new(writer)),
@@ -1952,6 +2103,7 @@ pub async fn terminal_start_session(
     let data_session_id = session_id.clone();
     let data_thread_id = thread_id.clone();
     let data_output_log = output_log.clone();
+    let data_output_state = output_state.clone();
     let data_app = app.clone();
     let post_connect_writer = session.writer.clone();
     let post_connect_started_at = Instant::now();
@@ -1966,7 +2118,6 @@ pub async fn terminal_start_session(
     std::thread::spawn(move || {
         let mut buffer = [0u8; 32_768];
         let mut utf8_carry = Vec::<u8>::new();
-        let mut chunk_sequence: u64 = 0;
         loop {
             let read = match reader.read(&mut buffer) {
                 Ok(0) => break,
@@ -2035,14 +2186,16 @@ pub async fn terminal_start_session(
                     ready_emitted = true;
                     emit_terminal_ready(&data_app, &data_thread_id, &data_session_id);
                 }
-                chunk_sequence = chunk_sequence.saturating_add(1);
+                let (start_position, end_position) =
+                    data_output_state.append(&chunk).unwrap_or((0, 0));
                 let _ = data_app.emit(
                     TERMINAL_DATA_EVENT,
                     TerminalDataEvent {
                         session_id: data_session_id.clone(),
                         thread_id: Some(data_thread_id.clone()),
                         data: chunk,
-                        sequence: chunk_sequence,
+                        start_position,
+                        end_position,
                     },
                 );
             }
@@ -2061,17 +2214,24 @@ pub async fn terminal_start_session(
             {
                 emit_terminal_ready(&data_app, &data_thread_id, &data_session_id);
             }
-            chunk_sequence = chunk_sequence.saturating_add(1);
+            let (start_position, end_position) =
+                data_output_state.append(&trailing).unwrap_or((0, 0));
             let _ = data_app.emit(
                 TERMINAL_DATA_EVENT,
                 TerminalDataEvent {
                     session_id: data_session_id.clone(),
                     thread_id: Some(data_thread_id.clone()),
                     data: trailing,
-                    sequence: chunk_sequence,
+                    start_position,
+                    end_position,
                 },
             );
         }
+
+        if let Ok(file) = data_output_log.lock() {
+            let _ = file.sync_data();
+        }
+        let _ = data_output_state.mark_reader_done();
     });
 
     let wait_state = state.clone();
@@ -2088,6 +2248,8 @@ pub async fn terminal_start_session(
                 Err(_) => (None, None),
             }
         };
+        let _ = wait_session.output_state.wait_until_reader_done();
+        let end_position = wait_session.output_state.end_position().unwrap_or(0);
 
         wait_session.killed.store(true, Ordering::Release);
         let _ = wait_state.terminal_sessions.remove(&wait_session_id);
@@ -2116,6 +2278,7 @@ pub async fn terminal_start_session(
                 "signal": signal,
                 "startedAt": wait_session.started_at,
                 "endedAt": ended_at,
+                "endPosition": end_position,
                 "rawOutputLogPath": wait_session.output_log_path,
                 "userInputsLogPath": serde_json::Value::Null,
                 "outputLogPath": wait_session.output_log_path,
@@ -2160,7 +2323,6 @@ pub async fn terminal_start_session(
         } else {
             "idle".to_string()
         },
-        reattach_turn_completion,
         thread,
     })
 }
@@ -2279,6 +2441,7 @@ pub async fn workspace_shell_start_session(
             .append(true)
             .open(&output_log_path)?,
     ));
+    let output_state = Arc::new(TerminalOutputState::new());
 
     let started_at = Utc::now();
     let session = Arc::new(TerminalSession {
@@ -2295,6 +2458,7 @@ pub async fn workspace_shell_start_session(
         started_at,
         command: command_manifest.clone(),
         output_log_path: output_log_path.clone(),
+        output_state: output_state.clone(),
         submitted_prompt_count: AtomicU64::new(0),
         master: Arc::new(Mutex::new(pty_pair.master)),
         writer: Arc::new(Mutex::new(writer)),
@@ -2305,6 +2469,7 @@ pub async fn workspace_shell_start_session(
 
     let data_session_id = session_id.clone();
     let data_output_log = output_log.clone();
+    let data_output_state = output_state.clone();
     let data_app = app.clone();
     let post_connect_writer = session.writer.clone();
     let post_connect_started_at = Instant::now();
@@ -2314,7 +2479,6 @@ pub async fn workspace_shell_start_session(
     std::thread::spawn(move || {
         let mut buffer = [0u8; 32_768];
         let mut utf8_carry = Vec::<u8>::new();
-        let mut chunk_sequence: u64 = 0;
         loop {
             let read = match reader.read(&mut buffer) {
                 Ok(0) => break,
@@ -2357,14 +2521,16 @@ pub async fn workspace_shell_start_session(
                     }
                 }
 
-                chunk_sequence = chunk_sequence.saturating_add(1);
+                let (start_position, end_position) =
+                    data_output_state.append(&chunk).unwrap_or((0, 0));
                 let _ = data_app.emit(
                     TERMINAL_DATA_EVENT,
                     TerminalDataEvent {
                         session_id: data_session_id.clone(),
                         thread_id: None,
                         data: chunk,
-                        sequence: chunk_sequence,
+                        start_position,
+                        end_position,
                     },
                 );
             }
@@ -2372,17 +2538,24 @@ pub async fn workspace_shell_start_session(
 
         if !utf8_carry.is_empty() {
             let trailing = String::from_utf8_lossy(&utf8_carry).to_string();
-            chunk_sequence = chunk_sequence.saturating_add(1);
+            let (start_position, end_position) =
+                data_output_state.append(&trailing).unwrap_or((0, 0));
             let _ = data_app.emit(
                 TERMINAL_DATA_EVENT,
                 TerminalDataEvent {
                     session_id: data_session_id.clone(),
                     thread_id: None,
                     data: trailing,
-                    sequence: chunk_sequence,
+                    start_position,
+                    end_position,
                 },
             );
         }
+
+        if let Ok(file) = data_output_log.lock() {
+            let _ = file.sync_data();
+        }
+        let _ = data_output_state.mark_reader_done();
     });
 
     let wait_state = state.clone();
@@ -2399,6 +2572,8 @@ pub async fn workspace_shell_start_session(
                 Err(_) => (None, None),
             }
         };
+        let _ = wait_session.output_state.wait_until_reader_done();
+        let end_position = wait_session.output_state.end_position().unwrap_or(0);
 
         wait_session.killed.store(true, Ordering::Release);
         let _ = wait_state.terminal_sessions.remove(&wait_session_id);
@@ -2416,6 +2591,7 @@ pub async fn workspace_shell_start_session(
                 "signal": signal,
                 "startedAt": wait_session.started_at,
                 "endedAt": ended_at,
+                "endPosition": end_position,
                 "outputLogPath": wait_session.output_log_path,
             }),
         );
@@ -3301,7 +3477,7 @@ mod tests {
 
         fs::write(&path, "line 1\nline 2\n").expect("should write fixture log");
         let snapshot = read_log_snapshot(&path).expect("should read snapshot");
-        assert_eq!(snapshot, "line 1\nline 2\n");
+        assert_eq!(snapshot, ("line 1\nline 2\n".to_string(), false));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -3319,16 +3495,13 @@ mod tests {
         }
 
         let snapshot = read_log_snapshot(&path).expect("should read snapshot");
+        assert!(snapshot.1, "snapshot should mark truncation");
         assert!(
-            snapshot.starts_with("(output truncated to last "),
-            "snapshot should mark truncation"
-        );
-        assert!(
-            snapshot.contains("line-"),
+            snapshot.0.contains("line-"),
             "snapshot should include log content"
         );
         assert!(
-            !snapshot.contains("line-00000"),
+            !snapshot.0.contains("line-00000"),
             "snapshot should contain only the tail and exclude earliest lines"
         );
 

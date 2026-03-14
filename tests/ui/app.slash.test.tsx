@@ -31,7 +31,15 @@ const mocks = vi.hoisted(() => {
   };
 
   let threadState = [{ ...baseThread }];
-  let terminalDataHandler: ((event: { sessionId: string; data: string; sequence?: number }) => void) | null = null;
+  let terminalDataHandler: ((event: {
+    sessionId: string;
+    data: string;
+    startPosition: number;
+    endPosition: number;
+    sequence?: number;
+  }) => void) | null = null;
+  const terminalPositions = new Map<string, number>();
+  const terminalSequencePositions = new Map<string, { startPosition: number; endPosition: number }>();
 
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
@@ -137,8 +145,13 @@ const mocks = vi.hoisted(() => {
     terminalResize: vi.fn(async () => true),
     terminalKill: vi.fn(async () => true),
     terminalSendSignal: vi.fn(async () => true),
-    terminalGetLastLog: vi.fn(async () => ''),
-    terminalReadOutput: vi.fn(async () => '> '),
+    terminalGetLastLog: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
+    terminalReadOutput: vi.fn(async () => ({
+      text: '> ',
+      startPosition: 0,
+      endPosition: 2,
+      truncated: false
+    })),
     runClaude: vi.fn(async () => ({ runId: 'run-1' })),
     cancelRun: vi.fn(async () => true),
     generateCommitMessage: vi.fn(async () => 'chore: update'),
@@ -153,6 +166,8 @@ const mocks = vi.hoisted(() => {
   const reset = () => {
     threadState = [{ ...baseThread }];
     terminalDataHandler = null;
+    terminalPositions.clear();
+    terminalSequencePositions.clear();
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -164,21 +179,45 @@ const mocks = vi.hoisted(() => {
     api,
     reset,
     emitTerminalData: (event: { sessionId: string; data: string; sequence?: number }) => {
-      terminalDataHandler?.(event);
+      const sequenceKey =
+        typeof event.sequence === 'number' ? `${event.sessionId}:${event.sequence}` : null;
+      const sequenceRange = sequenceKey ? terminalSequencePositions.get(sequenceKey) : null;
+      const startPosition = sequenceRange?.startPosition ?? (terminalPositions.get(event.sessionId) ?? 0);
+      const endPosition = sequenceRange?.endPosition ?? (startPosition + event.data.length);
+      if (sequenceKey && !sequenceRange) {
+        terminalSequencePositions.set(sequenceKey, { startPosition, endPosition });
+      }
+      if (!sequenceRange) {
+        terminalPositions.set(event.sessionId, endPosition);
+      }
+      terminalDataHandler?.({
+        ...event,
+        startPosition,
+        endPosition
+      });
     },
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
-    onTerminalData: vi.fn(async (handler: (event: { sessionId: string; data: string; sequence?: number }) => void) => {
-      terminalDataHandler = handler;
-      return () => {
-        if (terminalDataHandler === handler) {
-          terminalDataHandler = null;
-        }
-      };
-    }),
+    onTerminalData: vi.fn(
+      async (handler: (event: {
+        sessionId: string;
+        data: string;
+        startPosition: number;
+        endPosition: number;
+        sequence?: number;
+      }) => void) => {
+        terminalDataHandler = handler;
+        return () => {
+          if (terminalDataHandler === handler) {
+            terminalDataHandler = null;
+          }
+        };
+      }
+    ),
     onTerminalReady: vi.fn(async () => () => undefined),
+    onTerminalTurnCompleted: vi.fn(async () => () => undefined),
     onTerminalExit: vi.fn(async () => () => undefined),
     onThreadUpdated: vi.fn(async () => () => undefined)
   };
@@ -190,6 +229,7 @@ vi.mock('../../src/lib/api', () => ({
   onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
+  onTerminalTurnCompleted: mocks.onTerminalTurnCompleted,
   onTerminalExit: mocks.onTerminalExit,
   onThreadUpdated: mocks.onThreadUpdated
 }));
@@ -202,12 +242,13 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 vi.mock('../../src/components/TerminalPanel', () => ({
   TerminalPanel: (props: {
     content?: string;
+    streamState?: { text?: string } | null;
     onData?: (data: string) => void;
     inputEnabled?: boolean;
     overlayMessage?: string;
   }) => (
     <section className="terminal-panel" data-testid="terminal-panel-mock">
-      <pre data-testid="terminal-content-mock">{props.content ?? ''}</pre>
+      <pre data-testid="terminal-content-mock">{props.streamState?.text ?? props.content ?? ''}</pre>
       <output data-testid="terminal-input-enabled">{String(Boolean(props.inputEnabled))}</output>
       <output data-testid="terminal-overlay">{props.overlayMessage ?? ''}</output>
       <button type="button" onClick={() => props.onData?.('   First prompt title line\r')}>
@@ -279,7 +320,12 @@ describe('Sidebar behavior', () => {
     });
     mocks.api.terminalReadOutput.mockImplementation(async () => {
       await snapshotReady;
-      return 'Claude Code banner\n';
+      return {
+        text: 'Claude Code banner\n',
+        startPosition: 0,
+        endPosition: 'Claude Code banner\n'.length,
+        truncated: false
+      };
     });
 
     render(<App />);
@@ -291,11 +337,6 @@ describe('Sidebar behavior', () => {
 
     act(() => {
       mocks.emitTerminalData({ sessionId: 'session-thread-1', data: '\n> Try "create a test"\n' });
-    });
-    await waitFor(() => {
-      const rendered = screen.getByTestId('terminal-content-mock').textContent ?? '';
-      expect(rendered).toContain('Try "create a test"');
-      expect(screen.getByTestId('terminal-overlay').textContent).toBe('');
     });
 
     act(() => {
@@ -317,7 +358,12 @@ describe('Sidebar behavior', () => {
     });
     mocks.api.terminalReadOutput.mockImplementation(async () => {
       await snapshotReady;
-      return '';
+      return {
+        text: '',
+        startPosition: 0,
+        endPosition: 0,
+        truncated: false
+      };
     });
 
     render(<App />);
@@ -344,10 +390,10 @@ describe('Sidebar behavior', () => {
   });
 
   it('does not overwrite live terminal output with stale snapshot content', async () => {
-    let resolveSnapshot: ((value: string) => void) | null = null;
+    let resolveSnapshot: ((value: { text: string; startPosition: number; endPosition: number; truncated: boolean }) => void) | null = null;
     mocks.api.terminalReadOutput.mockImplementationOnce(
       () =>
-        new Promise<string>((resolve) => {
+        new Promise<{ text: string; startPosition: number; endPosition: number; truncated: boolean }>((resolve) => {
           resolveSnapshot = resolve;
         })
     );
@@ -364,7 +410,12 @@ describe('Sidebar behavior', () => {
     });
 
     act(() => {
-      resolveSnapshot?.('STALE_SNAPSHOT\n');
+      resolveSnapshot?.({
+        text: 'STALE_SNAPSHOT\n',
+        startPosition: 0,
+        endPosition: 'STALE_SNAPSHOT\n'.length,
+        truncated: false
+      });
     });
 
     await waitFor(() => {

@@ -257,7 +257,6 @@ pub struct TerminalStartResponse {
     pub session_mode: String,
     pub resume_session_id: Option<String>,
     pub turn_completion_mode: String,
-    pub reattach_turn_completion: Option<TerminalTurnCompletedEvent>,
     pub thread: ThreadMetadata,
 }
 
@@ -273,7 +272,17 @@ pub struct TerminalDataEvent {
     pub session_id: String,
     pub thread_id: Option<String>,
     pub data: String,
-    pub sequence: u64,
+    pub start_position: u64,
+    pub end_position: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalOutputSnapshot {
+    pub text: String,
+    pub start_position: u64,
+    pub end_position: u64,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -18,6 +18,7 @@ import type {
   SkillInfo,
   TerminalDataEvent,
   TerminalExitEvent,
+  TerminalOutputSnapshot,
   TerminalReadyEvent,
   TerminalStartResponse,
   TerminalTurnCompletedEvent,
@@ -108,7 +109,6 @@ export const api = {
     envVars?: Record<string, string> | null;
     fullAccessFlag: boolean;
     threadId: string;
-    reattachCompletionAfterMs?: number | null;
   }) =>
     invoke<TerminalStartResponse>('terminal_start_session', params),
   workspaceShellStartSession: (params: {
@@ -126,9 +126,9 @@ export const api = {
   terminalSendSignal: (sessionId: string, signal: string) =>
     invoke<boolean>('terminal_send_signal', { sessionId, signal }),
   terminalGetLastLog: (workspaceId: string, threadId: string) =>
-    invoke<string>('terminal_get_last_log', { workspaceId, threadId }),
+    invoke<TerminalOutputSnapshot>('terminal_get_last_log', { workspaceId, threadId }),
   terminalReadOutput: (sessionId: string) =>
-    invoke<string>('terminal_read_output', { sessionId }),
+    invoke<TerminalOutputSnapshot>('terminal_read_output', { sessionId }),
   generateCommitMessage: (workspacePath: string, fullAccess: boolean) =>
     invoke<string>('generate_commit_message', { workspacePath, fullAccess }),
   openInFinder: (path: string) => invoke<void>('open_in_finder', { path }),

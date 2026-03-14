@@ -146,7 +146,6 @@ export interface TerminalStartResponse {
   sessionMode: TerminalSessionMode;
   resumeSessionId?: string | null;
   turnCompletionMode?: TerminalTurnCompletionMode;
-  reattachTurnCompletion?: TerminalTurnCompletedEvent | null;
   thread: ThreadMetadata;
 }
 
@@ -158,7 +157,15 @@ export interface TerminalDataEvent {
   sessionId: string;
   threadId?: string | null;
   data: string;
-  sequence?: number;
+  startPosition: number;
+  endPosition: number;
+}
+
+export interface TerminalOutputSnapshot {
+  text: string;
+  startPosition: number;
+  endPosition: number;
+  truncated: boolean;
 }
 
 export interface TerminalReadyEvent {

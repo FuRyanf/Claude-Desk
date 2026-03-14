@@ -38,11 +38,20 @@ const mocks = vi.hoisted(() => {
   let threadState = [{ ...baseThread }];
   let sessionCounter = 0;
   let terminalDataHandler: ((
-    event: { sessionId: string; threadId?: string; data: string; sequence?: number }
+    event: {
+      sessionId: string;
+      threadId?: string;
+      data: string;
+      startPosition: number;
+      endPosition: number;
+      sequence?: number;
+    }
   ) => void) | null = null;
   let terminalExitHandler: ((event: { sessionId: string; code?: number | null; signal?: string | null }) => void) | null =
     null;
   let threadUpdatedHandler: ((thread: typeof baseThread) => void) | null = null;
+  const terminalPositions = new Map<string, number>();
+  const terminalSequencePositions = new Map<string, { startPosition: number; endPosition: number }>();
 
   const terminalStartSessionImpl = async (params: { threadId: string }) => {
     const thread = threadState.find((item) => item.id === params.threadId) ?? threadState[0];
@@ -58,7 +67,12 @@ const mocks = vi.hoisted(() => {
       }
     };
   };
-  const terminalReadOutputImpl = async () => '? for shortcuts';
+  const terminalReadOutputImpl = async () => ({
+    text: '? for shortcuts',
+    startPosition: 0,
+    endPosition: '? for shortcuts'.length,
+    truncated: false
+  });
 
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
@@ -174,7 +188,7 @@ const mocks = vi.hoisted(() => {
     terminalResize: vi.fn(async () => true),
     terminalKill: vi.fn(async () => true),
     terminalSendSignal: vi.fn(async () => true),
-    terminalGetLastLog: vi.fn(async () => ''),
+    terminalGetLastLog: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
     terminalReadOutput: vi.fn(terminalReadOutputImpl),
     runClaude: vi.fn(async () => ({ runId: 'run-1' })),
     cancelRun: vi.fn(async () => true),
@@ -194,6 +208,8 @@ const mocks = vi.hoisted(() => {
     terminalDataHandler = null;
     terminalExitHandler = null;
     threadUpdatedHandler = null;
+    terminalPositions.clear();
+    terminalSequencePositions.clear();
     helperMocks.sendTaskCompletionAlert.mockClear();
     helperMocks.sendTaskCompletionAlertsEnabledConfirmation.mockClear();
     helperMocks.sendTaskCompletionAlertsTestNotification.mockClear();
@@ -227,10 +243,32 @@ const mocks = vi.hoisted(() => {
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
     emitTerminalData: (event: { sessionId: string; threadId?: string; data: string; sequence?: number }) => {
-      terminalDataHandler?.(event);
+      const sequenceKey =
+        typeof event.sequence === 'number' ? `${event.sessionId}:${event.sequence}` : null;
+      const sequenceRange = sequenceKey ? terminalSequencePositions.get(sequenceKey) : null;
+      const startPosition = sequenceRange?.startPosition ?? (terminalPositions.get(event.sessionId) ?? 0);
+      const endPosition = sequenceRange?.endPosition ?? (startPosition + event.data.length);
+      if (sequenceKey && !sequenceRange) {
+        terminalSequencePositions.set(sequenceKey, { startPosition, endPosition });
+      }
+      if (!sequenceRange) {
+        terminalPositions.set(event.sessionId, endPosition);
+      }
+      terminalDataHandler?.({
+        ...event,
+        startPosition,
+        endPosition
+      });
     },
     onTerminalData: vi.fn(
-      async (handler: (event: { sessionId: string; threadId?: string; data: string; sequence?: number }) => void) => {
+      async (handler: (event: {
+        sessionId: string;
+        threadId?: string;
+        data: string;
+        startPosition: number;
+        endPosition: number;
+        sequence?: number;
+      }) => void) => {
         terminalDataHandler = handler;
         return () => {
           if (terminalDataHandler === handler) {
@@ -240,6 +278,7 @@ const mocks = vi.hoisted(() => {
       }
     ),
     onTerminalReady: vi.fn(async () => () => undefined),
+    onTerminalTurnCompleted: vi.fn(async () => () => undefined),
     emitTerminalExit: (event: { sessionId: string; code?: number | null; signal?: string | null }) => {
       terminalExitHandler?.(event);
     },
@@ -274,6 +313,7 @@ vi.mock('../../src/lib/api', () => ({
   onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
+  onTerminalTurnCompleted: mocks.onTerminalTurnCompleted,
   onTerminalExit: mocks.onTerminalExit,
   onThreadUpdated: mocks.onThreadUpdated
 }));
@@ -290,9 +330,17 @@ vi.mock('../../src/lib/taskCompletionAlerts', () => ({
 }));
 
 vi.mock('../../src/components/TerminalPanel', () => ({
-  TerminalPanel: ({ content, onData }: { content?: string; onData?: (data: string) => void }) => (
+  TerminalPanel: ({
+    content,
+    streamState,
+    onData
+  }: {
+    content?: string;
+    streamState?: { text?: string } | null;
+    onData?: (data: string) => void;
+  }) => (
     <section data-testid="terminal-panel-mock">
-      <pre data-testid="terminal-content-mock">{content ?? ''}</pre>
+      <pre data-testid="terminal-content-mock">{streamState?.text ?? content ?? ''}</pre>
       <button type="button" onClick={() => onData?.('draft')}>
         Type draft
       </button>
@@ -765,9 +813,20 @@ describe('Terminal launch flags', () => {
     mocks.api.terminalReadOutput.mockImplementation(async (sessionId: string) => {
       if (sessionId === 'session-2') {
         replacementSessionReads += 1;
-        return replacementSessionReads === 1 ? '' : '? for shortcuts';
+        const text = replacementSessionReads === 1 ? '' : '? for shortcuts';
+        return {
+          text,
+          startPosition: 0,
+          endPosition: text.length,
+          truncated: false
+        };
       }
-      return '? for shortcuts';
+      return {
+        text: '? for shortcuts',
+        startPosition: 0,
+        endPosition: '? for shortcuts'.length,
+        truncated: false
+      };
     });
 
     const user = userEvent.setup();
@@ -802,7 +861,12 @@ describe('Terminal launch flags', () => {
 
   it('toggles full access in-place for rdev without reconnecting', async () => {
     mocks.setWorkspaceKind('rdev');
-    mocks.api.terminalReadOutput.mockResolvedValue('[rfu@bloody-faraday li-productivity-agents]$ ');
+    mocks.api.terminalReadOutput.mockResolvedValue({
+      text: '[rfu@bloody-faraday li-productivity-agents]$ ',
+      startPosition: 0,
+      endPosition: '[rfu@bloody-faraday li-productivity-agents]$ '.length,
+      truncated: false
+    });
 
     const user = userEvent.setup();
     render(<App />);

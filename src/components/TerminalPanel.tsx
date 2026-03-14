@@ -6,7 +6,6 @@ import { SearchAddon, type ISearchOptions } from 'xterm-addon-search';
 import { WebLinksAddon } from 'xterm-addon-web-links';
 import { Terminal } from 'xterm';
 import { api } from '../lib/api';
-import { resolveTerminalContentUpdate } from '../lib/terminalContentUpdate';
 import {
   clearTerminalDebug,
   formatTerminalDebugEvent,
@@ -22,6 +21,7 @@ import {
   shouldAutoFollow
 } from '../lib/terminalFollowState';
 import { shouldScheduleTerminalStreamRepair } from '../lib/terminalStreamRepair';
+import type { TerminalSessionStreamState } from '../lib/terminalSessionStream';
 import { TerminalWriteQueue } from '../lib/terminalWriteQueue';
 
 const INPUT_FLUSH_MS = 8;
@@ -56,7 +56,8 @@ interface PendingRepairState {
 
 interface TerminalPanelProps {
   sessionId?: string | null;
-  content: string;
+  streamState?: TerminalSessionStreamState | null;
+  content?: string;
   contentByteCount?: number;
   contentGeneration?: number;
   contentLimitChars?: number;
@@ -74,10 +75,11 @@ interface TerminalPanelProps {
 
 export function TerminalPanel({
   sessionId = null,
-  content,
+  streamState = null,
+  content = '',
   contentByteCount,
   contentGeneration,
-  contentLimitChars,
+  contentLimitChars: _contentLimitChars,
   readOnly = false,
   inputEnabled = true,
   cursorVisible = true,
@@ -110,11 +112,11 @@ export function TerminalPanel({
   const searchOpenRef = useRef(searchOpen);
   const searchQueryRef = useRef(searchQuery);
   const contentRef = useRef(content);
-  const contentByteCountRef = useRef(contentByteCount ?? content.length);
-  const contentGenerationRef = useRef(contentGeneration ?? 0);
   const renderedContentRef = useRef(content);
   const renderedByteCountRef = useRef(contentByteCount ?? content.length);
   const renderedGenerationRef = useRef(contentGeneration ?? 0);
+  const renderedStreamEndPositionRef = useRef(streamState?.endPosition ?? content.length);
+  const renderedResetTokenRef = useRef(streamState?.resetToken ?? 0);
   const onDataRef = useRef(onData);
   const onResizeRef = useRef(onResize);
   const onFocusChangeRef = useRef(onFocusChange);
@@ -866,9 +868,14 @@ export function TerminalPanel({
 
   useEffect(() => {
     contentRef.current = content;
-    contentByteCountRef.current = contentByteCount ?? content.length;
-    contentGenerationRef.current = contentGeneration ?? 0;
-  }, [content, contentByteCount, contentGeneration]);
+  }, [content]);
+
+  useEffect(() => {
+    if (!streamState) {
+      return;
+    }
+    contentRef.current = streamState.text;
+  }, [streamState]);
 
   useEffect(() => {
     if (fallback) {
@@ -1102,8 +1109,10 @@ export function TerminalPanel({
         }, term);
 
         renderedContentRef.current = contentRef.current;
-        renderedByteCountRef.current = contentByteCountRef.current;
-        renderedGenerationRef.current = contentGenerationRef.current;
+        renderedByteCountRef.current = contentByteCount ?? contentRef.current.length;
+        renderedGenerationRef.current = contentGeneration ?? 0;
+        renderedStreamEndPositionRef.current = streamState?.endPosition ?? contentRef.current.length;
+        renderedResetTokenRef.current = streamState?.resetToken ?? 0;
         clearScheduledStreamRepair();
         bytesSinceRepairRef.current = 0;
         lastStreamRepairAtRef.current = Date.now();
@@ -1195,8 +1204,10 @@ export function TerminalPanel({
         writeQueueRef.current.flushImmediate();
       }
       renderedContentRef.current = initialContent;
-      renderedByteCountRef.current = contentByteCountRef.current;
-      renderedGenerationRef.current = contentGenerationRef.current;
+      renderedByteCountRef.current = contentByteCount ?? initialContent.length;
+      renderedGenerationRef.current = contentGeneration ?? 0;
+      renderedStreamEndPositionRef.current = streamState?.endPosition ?? initialContent.length;
+      renderedResetTokenRef.current = streamState?.resetToken ?? 0;
       void writeQueueRef.current.whenIdle().then(() => {
         finalizeTerminalReplay();
       });
@@ -1577,6 +1588,9 @@ export function TerminalPanel({
   }, [cursorVisible, inputEnabled, logTerminalDebug, readOnly, scrollToBottomSoon]);
 
   useEffect(() => {
+    if (streamState) {
+      return;
+    }
     const term = terminalRef.current;
     if (!term) {
       sessionRef.current = sessionId;
@@ -1604,8 +1618,20 @@ export function TerminalPanel({
     renderedContentRef.current = contentRef.current;
     renderedByteCountRef.current = contentByteCount ?? contentRef.current.length;
     renderedGenerationRef.current = contentGeneration ?? 0;
+    renderedStreamEndPositionRef.current = contentRef.current.length;
+    renderedResetTokenRef.current = 0;
     scheduleTerminalRefresh(term);
-  }, [clearPendingWrites, clearScheduledStreamRepair, resetTerminalContent, scheduleTerminalRefresh, sessionId, syncFollowOutputPaused]);
+  }, [
+    clearPendingWrites,
+    clearScheduledStreamRepair,
+    contentByteCount,
+    contentGeneration,
+    resetTerminalContent,
+    scheduleTerminalRefresh,
+    sessionId,
+    streamState,
+    syncFollowOutputPaused
+  ]);
 
   useEffect(() => {
     if (previousSearchToggleRequestRef.current === searchToggleRequestId) {
@@ -1625,84 +1651,145 @@ export function TerminalPanel({
   }, [clearSearchResults, searchToggleRequestId]);
 
   useEffect(() => {
+    if (streamState) {
+      return;
+    }
     const term = terminalRef.current;
     if (!term) {
       return;
     }
 
     const rendered = renderedContentRef.current;
-    const nextUpdate = resolveTerminalContentUpdate({
-      rendered,
-      content,
-      sessionId,
-      readOnly,
-      contentLimitChars,
-      contentByteCount,
-      renderedByteCount: renderedByteCountRef.current,
-      contentGeneration,
-      renderedGeneration: renderedGenerationRef.current
-    });
-    logTerminalDebug('content:update', {
-      kind: nextUpdate.kind,
-      contentLength: content.length,
-      renderedLength: rendered.length,
-      contentByteCount: contentByteCount ?? null,
-      renderedByteCount: renderedByteCountRef.current,
-      contentGeneration: contentGeneration ?? null,
-      renderedGeneration: renderedGenerationRef.current
-    }, term);
-
-    if (nextUpdate.kind === 'none') {
-      if (content !== rendered) {
-        // Keep the logical rendered anchor in sync when we intentionally skip destructive resets
-        // (e.g. prepended snapshot history before already-rendered live tail). This prevents
-        // repeated reset classifications on subsequent appends.
-        renderedContentRef.current = content;
-        renderedByteCountRef.current = contentByteCount ?? content.length;
-        renderedGenerationRef.current = contentGeneration ?? renderedGenerationRef.current;
-      }
+    const nextByteCount = contentByteCount ?? content.length;
+    const nextGeneration = contentGeneration ?? 0;
+    if (content === rendered && nextGeneration === renderedGenerationRef.current) {
       return;
     }
 
-    if (nextUpdate.kind === 'append') {
-      if (nextUpdate.delta.length > 0) {
-        queueWrite(nextUpdate.delta);
+    const canAppendDirectly =
+      Boolean(sessionId) &&
+      !readOnly &&
+      nextGeneration === renderedGenerationRef.current &&
+      content.length >= rendered.length &&
+      content.startsWith(rendered);
+
+    if (canAppendDirectly) {
+      const delta = content.slice(rendered.length);
+      logTerminalDebug('content:append', {
+        contentLength: content.length,
+        renderedLength: rendered.length,
+        deltaLength: delta.length,
+        sessionId
+      }, term);
+      if (delta.length > 0) {
+        queueWrite(delta);
       }
       renderedContentRef.current = content;
-      renderedByteCountRef.current = contentByteCount ?? content.length;
-      renderedGenerationRef.current = contentGeneration ?? renderedGenerationRef.current;
+      renderedByteCountRef.current = nextByteCount;
+      renderedGenerationRef.current = nextGeneration;
+      renderedStreamEndPositionRef.current = content.length;
+      renderedResetTokenRef.current = 0;
       if (shouldAutoFollow(followStateRef.current)) {
         scrollToBottomSoon(term);
       }
       return;
     }
 
-    if (sessionId && !readOnly && content.length < rendered.length) {
-      // Ignore regressive snapshots while a live session is active.
-      // Allow resets for divergent/superset content so renderedContentRef can recover.
-      return;
-    }
-
+    logTerminalDebug('content:reset', {
+      contentLength: content.length,
+      renderedLength: rendered.length,
+      sessionId,
+      readOnly,
+      generationChanged: nextGeneration !== renderedGenerationRef.current
+    }, term);
     resetTerminalContent(content, {
       preserveViewport: !shouldAutoFollow(followStateRef.current)
     });
     renderedContentRef.current = content;
-    renderedByteCountRef.current = contentByteCount ?? content.length;
-    renderedGenerationRef.current = contentGeneration ?? renderedGenerationRef.current;
+    renderedByteCountRef.current = nextByteCount;
+    renderedGenerationRef.current = nextGeneration;
+    renderedStreamEndPositionRef.current = content.length;
+    renderedResetTokenRef.current = 0;
     scheduleTerminalRefresh(term);
   }, [
     content,
     contentByteCount,
     contentGeneration,
-    contentLimitChars,
     readOnly,
     resetTerminalContent,
     scheduleTerminalRefresh,
     sessionId,
-    queueWrite,
     logTerminalDebug,
-    scrollToBottomSoon
+    queueWrite,
+    scrollToBottomSoon,
   ]);
+
+  useEffect(() => {
+    if (!streamState) {
+      return;
+    }
+
+    const term = terminalRef.current;
+    if (!term) {
+      return;
+    }
+
+    if (renderedResetTokenRef.current !== streamState.resetToken) {
+      renderedResetTokenRef.current = streamState.resetToken;
+      renderedStreamEndPositionRef.current = streamState.endPosition;
+      renderedContentRef.current = streamState.text;
+      renderedByteCountRef.current = streamState.text.length;
+      renderedGenerationRef.current = streamState.resetToken;
+      resetTerminalContent(streamState.text, {
+        preserveViewport: !shouldAutoFollow(followStateRef.current)
+      });
+      scheduleTerminalRefresh(term);
+      return;
+    }
+
+    if (streamState.phase !== 'ready') {
+      return;
+    }
+
+    const pendingChunks = streamState.chunks.filter(
+      (chunk) => chunk.endPosition > renderedStreamEndPositionRef.current
+    );
+    if (pendingChunks.length === 0) {
+      return;
+    }
+
+    const firstPendingChunk = pendingChunks[0];
+    if (firstPendingChunk.startPosition > renderedStreamEndPositionRef.current) {
+      renderedStreamEndPositionRef.current = streamState.endPosition;
+      renderedContentRef.current = streamState.text;
+      renderedByteCountRef.current = streamState.text.length;
+      renderedGenerationRef.current = streamState.resetToken;
+      resetTerminalContent(streamState.text, {
+        preserveViewport: !shouldAutoFollow(followStateRef.current)
+      });
+      scheduleTerminalRefresh(term);
+      return;
+    }
+
+    const delta = pendingChunks.map((chunk) => {
+      if (chunk.startPosition >= renderedStreamEndPositionRef.current) {
+        return chunk.data;
+      }
+      return chunk.data.slice(renderedStreamEndPositionRef.current - chunk.startPosition);
+    }).join('');
+
+    if (delta.length > 0) {
+      queueWrite(delta);
+    }
+
+    renderedStreamEndPositionRef.current = pendingChunks[pendingChunks.length - 1]?.endPosition ?? renderedStreamEndPositionRef.current;
+    renderedContentRef.current = streamState.text;
+    renderedByteCountRef.current = streamState.text.length;
+    renderedGenerationRef.current = streamState.resetToken;
+    if (shouldAutoFollow(followStateRef.current)) {
+      scrollToBottomSoon(term);
+    }
+  }, [queueWrite, resetTerminalContent, scheduleTerminalRefresh, scrollToBottomSoon, streamState]);
 
   useEffect(() => {
     if (previousFocusRequestRef.current === focusRequestId) {

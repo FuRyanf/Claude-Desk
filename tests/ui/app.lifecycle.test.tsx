@@ -21,10 +21,19 @@ const mocks = vi.hoisted(() => {
 
   const now = Date.now();
   let terminalDataHandler: ((
-    event: { sessionId: string; threadId?: string; data: string; sequence?: number }
+    event: {
+      sessionId: string;
+      threadId?: string;
+      data: string;
+      startPosition: number;
+      endPosition: number;
+      sequence?: number;
+    }
   ) => void) | null = null;
   let terminalExitHandler: ((event: { sessionId: string; code?: number | null; signal?: string | null }) => void) | null =
     null;
+  const terminalPositions = new Map<string, number>();
+  const terminalSequencePositions = new Map<string, { startPosition: number; endPosition: number }>();
   const baseThreads = [
     {
       id: 'thread-1',
@@ -132,7 +141,7 @@ const mocks = vi.hoisted(() => {
     resumeSessionId: null,
     thread: threadState.find((thread) => thread.id === params.threadId) ?? threadState[0]
   });
-  const terminalReadOutputImpl = async () => '';
+  const terminalReadOutputImpl = async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false });
   const gitPullMasterForNewThreadImpl = async () => ({
     outcome: 'pulled' as const,
     message: 'Checked out master and pulled latest changes.'
@@ -201,7 +210,7 @@ const mocks = vi.hoisted(() => {
     terminalResize: vi.fn(async () => true),
     terminalKill: vi.fn(async () => true),
     terminalSendSignal: vi.fn(async () => true),
-    terminalGetLastLog: vi.fn(async () => ''),
+    terminalGetLastLog: vi.fn(async () => ({ text: '', startPosition: 0, endPosition: 0, truncated: false })),
     terminalReadOutput: vi.fn(terminalReadOutputImpl),
     runClaude: vi.fn(async () => ({ runId: 'run-1' })),
     cancelRun: vi.fn(async () => true),
@@ -244,6 +253,8 @@ const mocks = vi.hoisted(() => {
     api.terminalReadOutput.mockImplementation(terminalReadOutputImpl);
     terminalDataHandler = null;
     terminalExitHandler = null;
+    terminalPositions.clear();
+    terminalSequencePositions.clear();
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -259,10 +270,32 @@ const mocks = vi.hoisted(() => {
     onRunStream: vi.fn(async () => () => undefined),
     onRunExit: vi.fn(async () => () => undefined),
     emitTerminalData: (event: { sessionId: string; threadId?: string; data: string; sequence?: number }) => {
-      terminalDataHandler?.(event);
+      const sequenceKey =
+        typeof event.sequence === 'number' ? `${event.sessionId}:${event.sequence}` : null;
+      const sequenceRange = sequenceKey ? terminalSequencePositions.get(sequenceKey) : null;
+      const startPosition = sequenceRange?.startPosition ?? (terminalPositions.get(event.sessionId) ?? 0);
+      const endPosition = sequenceRange?.endPosition ?? (startPosition + event.data.length);
+      if (sequenceKey && !sequenceRange) {
+        terminalSequencePositions.set(sequenceKey, { startPosition, endPosition });
+      }
+      if (!sequenceRange) {
+        terminalPositions.set(event.sessionId, endPosition);
+      }
+      terminalDataHandler?.({
+        ...event,
+        startPosition,
+        endPosition
+      });
     },
     onTerminalData: vi.fn(
-      async (handler: (event: { sessionId: string; threadId?: string; data: string; sequence?: number }) => void) => {
+      async (handler: (event: {
+        sessionId: string;
+        threadId?: string;
+        data: string;
+        startPosition: number;
+        endPosition: number;
+        sequence?: number;
+      }) => void) => {
         terminalDataHandler = handler;
         return () => {
           if (terminalDataHandler === handler) {
@@ -272,6 +305,7 @@ const mocks = vi.hoisted(() => {
       }
     ),
     onTerminalReady: vi.fn(async () => () => undefined),
+    onTerminalTurnCompleted: vi.fn(async () => () => undefined),
     emitTerminalExit: (event: { sessionId: string; code?: number | null; signal?: string | null }) => {
       terminalExitHandler?.(event);
     },
@@ -295,6 +329,7 @@ vi.mock('../../src/lib/api', () => ({
   onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
+  onTerminalTurnCompleted: mocks.onTerminalTurnCompleted,
   onTerminalExit: mocks.onTerminalExit,
   onThreadUpdated: mocks.onThreadUpdated
 }));
@@ -560,7 +595,7 @@ describe('Thread lifecycle integration', () => {
       if (disconnected && sessionId === 'session-thread-rdev-recover') {
         throw new Error('Terminal session not found');
       }
-      return '';
+      return { text: '', startPosition: 0, endPosition: 0, truncated: false };
     });
 
     render(<App />);
@@ -591,7 +626,7 @@ describe('Thread lifecycle integration', () => {
       if (disconnected && sessionId === 'session-thread-1') {
         throw new Error('Terminal session not found');
       }
-      return '';
+      return { text: '', startPosition: 0, endPosition: 0, truncated: false };
     });
 
     render(<App />);

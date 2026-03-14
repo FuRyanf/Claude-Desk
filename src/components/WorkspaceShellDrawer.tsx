@@ -1,5 +1,6 @@
 import * as React from 'react';
 
+import type { TerminalSessionStreamState } from '../lib/terminalSessionStream';
 import type { Workspace } from '../types';
 import { TerminalPanel } from './TerminalPanel';
 
@@ -7,7 +8,8 @@ interface WorkspaceShellDrawerProps {
   open: boolean;
   workspace?: Workspace;
   sessionId?: string | null;
-  content: string;
+  streamState?: TerminalSessionStreamState | null;
+  content?: string;
   height?: number;
   starting?: boolean;
   focusRequestId?: number;
@@ -42,7 +44,8 @@ export function WorkspaceShellDrawer({
   open,
   workspace,
   sessionId = null,
-  content,
+  streamState = null,
+  content = '',
   height = 280,
   starting = false,
   focusRequestId = 0,
@@ -107,6 +110,7 @@ export function WorkspaceShellDrawer({
       <div className="workspace-shell-drawer-body">
         <TerminalPanel
           sessionId={sessionId}
+          streamState={streamState}
           content={content}
           inputEnabled={Boolean(sessionId) && !starting}
           overlayMessage={

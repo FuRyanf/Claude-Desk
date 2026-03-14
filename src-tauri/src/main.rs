@@ -415,7 +415,6 @@ async fn terminal_start_session(
     env_vars: Option<std::collections::HashMap<String, String>>,
     full_access_flag: bool,
     thread_id: String,
-    reattach_completion_after_ms: Option<i64>,
 ) -> Result<TerminalStartResponse, String> {
     runner::terminal_start_session(
         app,
@@ -425,7 +424,6 @@ async fn terminal_start_session(
         env_vars,
         full_access_flag,
         thread_id,
-        reattach_completion_after_ms,
     )
     .await
     .map_err(|error| error.to_string())
@@ -488,12 +486,18 @@ fn terminal_send_signal(
 }
 
 #[tauri::command]
-fn terminal_get_last_log(workspace_id: String, thread_id: String) -> Result<String, String> {
+fn terminal_get_last_log(
+    workspace_id: String,
+    thread_id: String,
+) -> Result<crate::models::TerminalOutputSnapshot, String> {
     runner::terminal_get_last_log(&workspace_id, &thread_id).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn terminal_read_output(state: State<'_, AppState>, session_id: String) -> Result<String, String> {
+fn terminal_read_output(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<crate::models::TerminalOutputSnapshot, String> {
     runner::terminal_read_output(state.runner.clone(), session_id)
         .map_err(|error| error.to_string())
 }
