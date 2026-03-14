@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../lib/api';
 import type { CreateThreadOptions, ThreadMetadata, Workspace } from '../types';
 
@@ -574,6 +575,152 @@ function LeftRailComponent({
     setNewThreadMenu({ workspaceId, ...position });
   }, []);
 
+  const menuLayer =
+    typeof document === 'undefined'
+      ? null
+      : createPortal(
+          <>
+            {contextMenu ? (
+              <div className="thread-context-menu" ref={contextMenuRef} style={{ left: contextMenu.x, top: contextMenu.y }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onStartRename(contextMenu.thread);
+                    setContextMenu(null);
+                  }}
+                >
+                  Rename
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onCopyResumeCommand(contextMenu.thread);
+                    setContextMenu(null);
+                  }}
+                >
+                  Copy resume command
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={async () => {
+                    setContextMenu(null);
+                    await onDeleteThread(contextMenu.thread.workspaceId, contextMenu.thread.id);
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            ) : null}
+
+            {workspaceContextMenu ? (
+              <div
+                className="thread-context-menu"
+                ref={workspaceContextMenuRef}
+                style={{ left: workspaceContextMenu.x, top: workspaceContextMenu.y }}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenWorkspaceInFinder(workspaceContextMenu.workspace);
+                    setWorkspaceContextMenu(null);
+                  }}
+                  disabled={isRemoteWorkspaceKind(workspaceContextMenu.workspace.kind)}
+                >
+                  Open folder
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenWorkspaceInTerminal(workspaceContextMenu.workspace);
+                    setWorkspaceContextMenu(null);
+                  }}
+                >
+                  {isRemoteWorkspaceKind(workspaceContextMenu.workspace.kind) ? 'Open remote shell' : 'Open terminal'}
+                </button>
+                {isRemoteWorkspaceKind(workspaceContextMenu.workspace.kind) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onCopyWorkspaceCommand(workspaceContextMenu.workspace);
+                      setWorkspaceContextMenu(null);
+                    }}
+                  >
+                    Copy {workspaceContextMenu.workspace.kind === 'rdev' ? 'rdev' : 'SSH'} command
+                  </button>
+                )}
+                {workspaceContextMenu.workspace.kind === 'local' ? (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const workspace = workspaceContextMenu.workspace;
+                      const enabled = !workspace.gitPullOnMasterForNewThreads;
+                      setWorkspaceContextMenu(null);
+                      await onSetWorkspaceGitPullOnMasterForNewThreads(workspace.id, enabled);
+                    }}
+                  >
+                    {workspaceContextMenu.workspace.gitPullOnMasterForNewThreads
+                      ? 'Disable git pull on master for new threads'
+                      : 'Enable git pull on master for new threads'}
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const workspace = workspaceContextMenu.workspace;
+                    setWorkspaceContextMenu(null);
+                    onImportSession(workspace);
+                  }}
+                >
+                  Import session…
+                </button>
+                <div className="thread-context-divider" />
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={async () => {
+                    const workspace = workspaceContextMenu.workspace;
+                    setWorkspaceContextMenu(null);
+                    await onRemoveWorkspace(workspace);
+                  }}
+                >
+                  Remove project
+                </button>
+              </div>
+            ) : null}
+
+            {newThreadMenu ? (
+              <div
+                className="thread-context-menu"
+                ref={newThreadMenuRef}
+                style={{ left: newThreadMenu.x, top: newThreadMenu.y }}
+              >
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const workspaceId = newThreadMenu.workspaceId;
+                    setNewThreadMenu(null);
+                    await onNewThreadInWorkspace(workspaceId, { fullAccess: false });
+                  }}
+                >
+                  Normal thread
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const workspaceId = newThreadMenu.workspaceId;
+                    setNewThreadMenu(null);
+                    await onNewThreadInWorkspace(workspaceId, { fullAccess: true });
+                  }}
+                >
+                  Full access thread
+                </button>
+              </div>
+            ) : null}
+          </>,
+          document.body
+        );
+
   return (
     <aside
       className="left-rail"
@@ -887,144 +1034,7 @@ function LeftRailComponent({
           </button>
         </div>
       </div>
-
-      {contextMenu ? (
-        <div className="thread-context-menu" ref={contextMenuRef} style={{ left: contextMenu.x, top: contextMenu.y }}>
-          <button
-            type="button"
-            onClick={() => {
-              onStartRename(contextMenu.thread);
-              setContextMenu(null);
-            }}
-          >
-            Rename
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onCopyResumeCommand(contextMenu.thread);
-              setContextMenu(null);
-            }}
-          >
-            Copy resume command
-          </button>
-          <button
-            type="button"
-            className="danger"
-            onClick={async () => {
-              setContextMenu(null);
-              await onDeleteThread(contextMenu.thread.workspaceId, contextMenu.thread.id);
-            }}
-          >
-            Delete
-          </button>
-        </div>
-      ) : null}
-
-      {workspaceContextMenu ? (
-        <div
-          className="thread-context-menu"
-          ref={workspaceContextMenuRef}
-          style={{ left: workspaceContextMenu.x, top: workspaceContextMenu.y }}
-        >
-          <button
-            type="button"
-            onClick={() => {
-              onOpenWorkspaceInFinder(workspaceContextMenu.workspace);
-              setWorkspaceContextMenu(null);
-            }}
-            disabled={isRemoteWorkspaceKind(workspaceContextMenu.workspace.kind)}
-          >
-            Open folder
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onOpenWorkspaceInTerminal(workspaceContextMenu.workspace);
-              setWorkspaceContextMenu(null);
-            }}
-          >
-            {isRemoteWorkspaceKind(workspaceContextMenu.workspace.kind) ? 'Open remote shell' : 'Open terminal'}
-          </button>
-          {isRemoteWorkspaceKind(workspaceContextMenu.workspace.kind) && (
-            <button
-              type="button"
-              onClick={() => {
-                onCopyWorkspaceCommand(workspaceContextMenu.workspace);
-                setWorkspaceContextMenu(null);
-              }}
-            >
-              Copy {workspaceContextMenu.workspace.kind === 'rdev' ? 'rdev' : 'SSH'} command
-            </button>
-          )}
-          {workspaceContextMenu.workspace.kind === 'local' ? (
-            <button
-              type="button"
-              onClick={async () => {
-                const workspace = workspaceContextMenu.workspace;
-                const enabled = !workspace.gitPullOnMasterForNewThreads;
-                setWorkspaceContextMenu(null);
-                await onSetWorkspaceGitPullOnMasterForNewThreads(workspace.id, enabled);
-              }}
-            >
-              {workspaceContextMenu.workspace.gitPullOnMasterForNewThreads
-                ? 'Disable git pull on master for new threads'
-                : 'Enable git pull on master for new threads'}
-            </button>
-          ) : null}
-          <button
-            type="button"
-            onClick={() => {
-              const workspace = workspaceContextMenu.workspace;
-              setWorkspaceContextMenu(null);
-              onImportSession(workspace);
-            }}
-          >
-            Import session…
-          </button>
-          <div className="thread-context-divider" />
-          <button
-            type="button"
-            className="danger"
-            onClick={async () => {
-              const workspace = workspaceContextMenu.workspace;
-              setWorkspaceContextMenu(null);
-              await onRemoveWorkspace(workspace);
-            }}
-          >
-            Remove project
-          </button>
-        </div>
-      ) : null}
-
-      {newThreadMenu ? (
-        <div
-          className="thread-context-menu"
-          ref={newThreadMenuRef}
-          style={{ left: newThreadMenu.x, top: newThreadMenu.y }}
-        >
-          <button
-            type="button"
-            onClick={async () => {
-              const workspaceId = newThreadMenu.workspaceId;
-              setNewThreadMenu(null);
-              await onNewThreadInWorkspace(workspaceId, { fullAccess: false });
-            }}
-          >
-            Normal thread
-          </button>
-          <button
-            type="button"
-            onClick={async () => {
-              const workspaceId = newThreadMenu.workspaceId;
-              setNewThreadMenu(null);
-              await onNewThreadInWorkspace(workspaceId, { fullAccess: true });
-            }}
-          >
-            Full access thread
-          </button>
-        </div>
-      ) : null}
+      {menuLayer}
     </aside>
   );
 }

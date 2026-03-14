@@ -202,7 +202,11 @@ describe('Thread actions', () => {
     const row = await screen.findByRole('button', { name: /Rename me/i });
     await user.pointer([{ target: row, keys: '[MouseRight]' }]);
 
-    await user.click(await screen.findByRole('button', { name: 'Rename' }));
+    const menu = (await screen.findByRole('button', { name: 'Rename' })).closest('.thread-context-menu');
+    expect(menu).not.toBeNull();
+    expect(screen.getByTestId('sidebar')).not.toContainElement(menu);
+
+    await user.click(screen.getByRole('button', { name: 'Rename' }));
     const renameInput = await screen.findByDisplayValue('Rename me');
     await user.clear(renameInput);
     await user.type(renameInput, 'Renamed thread{enter}');
