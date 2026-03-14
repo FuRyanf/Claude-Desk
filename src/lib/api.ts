@@ -20,6 +20,7 @@ import type {
   TerminalExitEvent,
   TerminalReadyEvent,
   TerminalStartResponse,
+  TerminalTurnCompletedEvent,
   WorkspaceShellStartResponse,
   ThreadMetadata,
   TranscriptEntry,
@@ -31,6 +32,7 @@ export const events = {
   runExit: 'claude://run-exit',
   terminalData: 'terminal:data',
   terminalReady: 'terminal:ready',
+  terminalTurnCompleted: 'terminal:turn-completed',
   terminalExit: 'terminal:exit',
   threadUpdated: 'thread:updated'
 } as const;
@@ -170,6 +172,13 @@ export const onTerminalReady = async (
   handler: (event: TerminalReadyEvent) => void
 ): Promise<UnlistenFn> =>
   listen<TerminalReadyEvent>(events.terminalReady, (event) => {
+    handler(event.payload);
+  });
+
+export const onTerminalTurnCompleted = async (
+  handler: (event: TerminalTurnCompletedEvent) => void
+): Promise<UnlistenFn> =>
+  listen<TerminalTurnCompletedEvent>(events.terminalTurnCompleted, (event) => {
     handler(event.payload);
   });
 

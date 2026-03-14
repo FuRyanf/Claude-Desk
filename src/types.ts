@@ -1,6 +1,7 @@
 export type RunStatus = 'Idle' | 'Running' | 'Succeeded' | 'Failed' | 'Canceled';
 export type ContextPack = 'Minimal' | 'Git Diff' | 'Debug';
 export type TerminalSessionMode = 'resumed' | 'new';
+export type TerminalTurnCompletionMode = 'idle' | 'jsonl';
 export type WorkspaceKind = 'local' | 'rdev' | 'ssh';
 export type AppearanceMode = 'dark' | 'light' | 'system';
 
@@ -144,6 +145,7 @@ export interface TerminalStartResponse {
   sessionId: string;
   sessionMode: TerminalSessionMode;
   resumeSessionId?: string | null;
+  turnCompletionMode?: TerminalTurnCompletionMode;
   thread: ThreadMetadata;
 }
 
@@ -167,6 +169,14 @@ export interface TerminalExitEvent {
   sessionId: string;
   code?: number | null;
   signal?: string | null;
+}
+
+export interface TerminalTurnCompletedEvent {
+  sessionId: string;
+  threadId?: string | null;
+  status?: Extract<RunStatus, 'Succeeded' | 'Failed'>;
+  hasMeaningfulOutput?: boolean;
+  completedAtMs?: number | null;
 }
 
 export interface RunStreamEvent {

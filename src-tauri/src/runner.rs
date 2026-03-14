@@ -4,7 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader as StdBufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,7 +24,8 @@ use crate::models::{
     ContextFilePreview, ContextPreview, ImportableClaudeProject, ImportableClaudeSession,
     RunClaudeRequest, RunClaudeResponse, RunExitEvent, RunMetadata, Settings, StreamEvent,
     TerminalDataEvent, TerminalExitEvent, TerminalReadyEvent, TerminalStartResponse,
-    ThreadRunStatus, TranscriptEntry, WorkspaceKind, WorkspaceShellStartResponse,
+    TerminalTurnCompletedEvent, ThreadRunStatus, TranscriptEntry, WorkspaceKind,
+    WorkspaceShellStartResponse,
 };
 use crate::skills;
 use crate::storage;
@@ -33,11 +34,13 @@ const STREAM_EVENT: &str = "claude://run-stream";
 const EXIT_EVENT: &str = "claude://run-exit";
 const TERMINAL_DATA_EVENT: &str = "terminal:data";
 const TERMINAL_READY_EVENT: &str = "terminal:ready";
+const TERMINAL_TURN_COMPLETED_EVENT: &str = "terminal:turn-completed";
 const TERMINAL_EXIT_EVENT: &str = "terminal:exit";
 const THREAD_UPDATED_EVENT: &str = "thread:updated";
 const LAUNCH_OUTPUT_PARSE_BUFFER_MAX: usize = 16 * 1024;
 const POST_CONNECT_PROMPT_BUFFER_MAX: usize = 16 * 1024;
 const POST_CONNECT_COMMAND_AFTER_SSH_START_TIMEOUT: Duration = Duration::from_secs(6);
+const CLAUDE_TURN_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_LOG_SNAPSHOT_MAX_BYTES: u64 = 512 * 1024;
 const TERMINAL_ENV_DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(8);
 const COMMIT_MESSAGE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -184,6 +187,8 @@ struct ClaudeJsonlMessage {
     role: Option<String>,
     #[serde(default)]
     content: Option<Value>,
+    #[serde(default, rename = "stop_reason")]
+    stop_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -966,6 +971,205 @@ fn emit_terminal_ready(app: &AppHandle, thread_id: &str, session_id: &str) {
     );
 }
 
+fn assistant_content_has_type(content: Option<&Value>, expected_type: &str) -> bool {
+    match content {
+        Some(Value::Array(items)) => items.iter().any(|item| {
+            item.as_object()
+                .and_then(|record| record.get("type"))
+                .and_then(Value::as_str)
+                == Some(expected_type)
+        }),
+        _ => false,
+    }
+}
+
+fn assistant_content_text(content: Option<&Value>) -> Option<String> {
+    let Some(Value::Array(items)) = content else {
+        return None;
+    };
+
+    let text = items
+        .iter()
+        .filter_map(|item| {
+            let record = item.as_object()?;
+            if record.get("type").and_then(Value::as_str) != Some("text") {
+                return None;
+            }
+            record.get("text").and_then(Value::as_str)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaudeTurnCompletion {
+    status: &'static str,
+    has_meaningful_output: bool,
+    completed_at_ms: i64,
+}
+
+fn classify_claude_turn_completion_entry(entry: &ClaudeJsonlEntry) -> Option<ClaudeTurnCompletion> {
+    if entry.r#type.as_deref() != Some("assistant") {
+        return None;
+    }
+    let Some(message) = entry.message.as_ref() else {
+        return None;
+    };
+    if message.role.as_deref() != Some("assistant") {
+        return None;
+    }
+    if !assistant_content_has_type(message.content.as_ref(), "text") {
+        return None;
+    }
+    if assistant_content_has_type(message.content.as_ref(), "tool_use") {
+        return None;
+    }
+
+    let completed_at_ms = entry
+        .timestamp
+        .as_ref()
+        .map(|timestamp| timestamp.timestamp_millis())
+        .unwrap_or_else(|| Utc::now().timestamp_millis());
+    let text = assistant_content_text(message.content.as_ref()).unwrap_or_default();
+
+    match message.stop_reason.as_deref() {
+        Some("end_turn") => Some(ClaudeTurnCompletion {
+            status: "Succeeded",
+            has_meaningful_output: true,
+            completed_at_ms,
+        }),
+        Some("stop_sequence") => {
+            if text == "No response requested." {
+                Some(ClaudeTurnCompletion {
+                    status: "Succeeded",
+                    has_meaningful_output: false,
+                    completed_at_ms,
+                })
+            } else if text.starts_with("API Error:") || text.starts_with("Prompt is too long") {
+                Some(ClaudeTurnCompletion {
+                    status: "Failed",
+                    has_meaningful_output: true,
+                    completed_at_ms,
+                })
+            } else {
+                Some(ClaudeTurnCompletion {
+                    status: "Succeeded",
+                    has_meaningful_output: true,
+                    completed_at_ms,
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
+fn claude_session_jsonl_path(workspace_path: &str, claude_session_id: &str) -> Result<PathBuf> {
+    Ok(claude_projects_root()?
+        .join(claude_project_dir_for_workspace(workspace_path))
+        .join(format!("{claude_session_id}.jsonl")))
+}
+
+fn spawn_claude_turn_completion_watcher(
+    app: AppHandle,
+    session: Arc<TerminalSession>,
+    thread_id: String,
+    claude_session_id: String,
+) {
+    let session_id = session.session_id.clone();
+    let session_path = match claude_session_jsonl_path(&session.workspace_path, &claude_session_id)
+    {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    let initial_read_offset = fs::metadata(&session_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+
+    std::thread::spawn(move || {
+        let mut read_offset = initial_read_offset;
+        let mut emitted_completion_count = 0_u64;
+
+        loop {
+            if session.killed.load(Ordering::Acquire) {
+                break;
+            }
+
+            let metadata = match fs::metadata(&session_path) {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    std::thread::sleep(CLAUDE_TURN_COMPLETION_POLL_INTERVAL);
+                    continue;
+                }
+            };
+
+            if metadata.len() < read_offset {
+                read_offset = 0;
+            }
+
+            if metadata.len() > read_offset {
+                let file = match File::open(&session_path) {
+                    Ok(file) => file,
+                    Err(_) => {
+                        std::thread::sleep(CLAUDE_TURN_COMPLETION_POLL_INTERVAL);
+                        continue;
+                    }
+                };
+                let mut reader = StdBufReader::new(file);
+                if reader.seek(SeekFrom::Start(read_offset)).is_ok() {
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        let bytes_read = match reader.read_line(&mut line) {
+                            Ok(0) => break,
+                            Ok(bytes_read) => bytes_read,
+                            Err(_) => break,
+                        };
+                        if !line.ends_with('\n') {
+                            break;
+                        }
+                        read_offset = read_offset.saturating_add(bytes_read as u64);
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let Ok(entry) = serde_json::from_str::<ClaudeJsonlEntry>(trimmed) else {
+                            continue;
+                        };
+                        let Some(completion) = classify_claude_turn_completion_entry(&entry) else {
+                            continue;
+                        };
+
+                        let submitted_prompt_count =
+                            session.submitted_prompt_count.load(Ordering::Acquire);
+                        if emitted_completion_count >= submitted_prompt_count {
+                            continue;
+                        }
+                        emitted_completion_count = emitted_completion_count.saturating_add(1);
+                        let _ = app.emit(
+                            TERMINAL_TURN_COMPLETED_EVENT,
+                            TerminalTurnCompletedEvent {
+                                session_id: session_id.clone(),
+                                thread_id: Some(thread_id.clone()),
+                                status: completion.status.to_string(),
+                                has_meaningful_output: completion.has_meaningful_output,
+                                completed_at_ms: completion.completed_at_ms,
+                            },
+                        );
+                    }
+                }
+            }
+
+            std::thread::sleep(CLAUDE_TURN_COMPLETION_POLL_INTERVAL);
+        }
+    });
+}
+
 fn normalize_terminal_input_chunk(chunk: &str) -> String {
     chunk.replace("\u{1b}\r", "\n")
 }
@@ -1010,6 +1214,7 @@ struct TerminalSession {
     started_at: chrono::DateTime<Utc>,
     command: Vec<String>,
     output_log_path: PathBuf,
+    submitted_prompt_count: AtomicU64,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
@@ -1634,12 +1839,21 @@ pub async fn terminal_start_session(
         started_at,
         command: command_manifest.clone(),
         output_log_path,
+        submitted_prompt_count: AtomicU64::new(0),
         master: Arc::new(Mutex::new(pty_pair.master)),
         writer: Arc::new(Mutex::new(writer)),
         child: Arc::new(Mutex::new(child)),
         killed: session_killed.clone(),
     });
     state.terminal_sessions.insert(session.clone())?;
+    if workspace.kind == WorkspaceKind::Local {
+        spawn_claude_turn_completion_watcher(
+            app.clone(),
+            session.clone(),
+            thread_id.clone(),
+            launch_session_id.clone(),
+        );
+    }
 
     let data_session_id = session_id.clone();
     let data_thread_id = thread_id.clone();
@@ -1781,6 +1995,7 @@ pub async fn terminal_start_session(
             }
         };
 
+        wait_session.killed.store(true, Ordering::Release);
         let _ = wait_state.terminal_sessions.remove(&wait_session_id);
 
         let ended_at = Utc::now();
@@ -1846,6 +2061,11 @@ pub async fn terminal_start_session(
         session_id,
         session_mode: session_mode.as_str().to_string(),
         resume_session_id,
+        turn_completion_mode: if workspace.kind == WorkspaceKind::Local {
+            "jsonl".to_string()
+        } else {
+            "idle".to_string()
+        },
         thread,
     })
 }
@@ -1979,6 +2199,7 @@ pub async fn workspace_shell_start_session(
         started_at,
         command: command_manifest.clone(),
         output_log_path: output_log_path.clone(),
+        submitted_prompt_count: AtomicU64::new(0),
         master: Arc::new(Mutex::new(pty_pair.master)),
         writer: Arc::new(Mutex::new(writer)),
         child: Arc::new(Mutex::new(child)),
@@ -2083,6 +2304,7 @@ pub async fn workspace_shell_start_session(
             }
         };
 
+        wait_session.killed.store(true, Ordering::Release);
         let _ = wait_state.terminal_sessions.remove(&wait_session_id);
 
         let ended_at = Utc::now();
@@ -2133,6 +2355,9 @@ pub fn terminal_write(
     writer.flush()?;
 
     if session.kind == TerminalSessionKind::ClaudeThread && input_chunk_submits_prompt(&data) {
+        session
+            .submitted_prompt_count
+            .fetch_add(1, Ordering::AcqRel);
         let pending_session_id = session
             .pending_confirmation_session_id
             .lock()
@@ -2761,6 +2986,139 @@ mod tests {
     fn input_chunk_submits_prompt_ignores_multiline_enter_escape() {
         assert!(!input_chunk_submits_prompt("\u{1b}\r"));
         assert!(!input_chunk_submits_prompt("draft\u{1b}\r"));
+    }
+
+    #[test]
+    fn detects_claude_turn_completion_from_end_turn_text_message() {
+        let entry: ClaudeJsonlEntry = serde_json::from_str(
+            r#"{
+                "type":"assistant",
+                "message":{
+                    "role":"assistant",
+                    "stop_reason":"end_turn",
+                    "content":[{"type":"text","text":"Done."}]
+                },
+                "timestamp":"1970-01-01T00:00:00Z"
+            }"#,
+        )
+        .expect("fixture should parse");
+
+        assert_eq!(
+            classify_claude_turn_completion_entry(&entry),
+            Some(ClaudeTurnCompletion {
+                status: "Succeeded",
+                has_meaningful_output: true,
+                completed_at_ms: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_intermediate_assistant_tool_use_messages_for_turn_completion() {
+        let entry: ClaudeJsonlEntry = serde_json::from_str(
+            r#"{
+                "type":"assistant",
+                "message":{
+                    "role":"assistant",
+                    "stop_reason":"tool_use",
+                    "content":[{"type":"tool_use","name":"bash"}]
+                }
+            }"#,
+        )
+        .expect("fixture should parse");
+
+        assert_eq!(classify_claude_turn_completion_entry(&entry), None);
+    }
+
+    #[test]
+    fn ignores_assistant_text_without_terminal_stop_reason() {
+        let entry: ClaudeJsonlEntry = serde_json::from_str(
+            r#"{
+                "type":"assistant",
+                "message":{
+                    "role":"assistant",
+                    "content":[{"type":"text","text":"Checking..."},{"type":"tool_use","name":"bash"}]
+                }
+            }"#,
+        )
+        .expect("fixture should parse");
+
+        assert_eq!(classify_claude_turn_completion_entry(&entry), None);
+    }
+
+    #[test]
+    fn treats_no_response_requested_stop_sequence_as_non_meaningful_success() {
+        let entry: ClaudeJsonlEntry = serde_json::from_str(
+            r#"{
+                "type":"assistant",
+                "message":{
+                    "role":"assistant",
+                    "stop_reason":"stop_sequence",
+                    "content":[{"type":"text","text":"No response requested."}]
+                },
+                "timestamp":"1970-01-01T00:00:00Z"
+            }"#,
+        )
+        .expect("fixture should parse");
+
+        assert_eq!(
+            classify_claude_turn_completion_entry(&entry),
+            Some(ClaudeTurnCompletion {
+                status: "Succeeded",
+                has_meaningful_output: false,
+                completed_at_ms: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn treats_api_error_stop_sequence_as_failed_meaningful_output() {
+        let entry: ClaudeJsonlEntry = serde_json::from_str(
+            r#"{
+                "type":"assistant",
+                "message":{
+                    "role":"assistant",
+                    "stop_reason":"stop_sequence",
+                    "content":[{"type":"text","text":"API Error: request failed"}]
+                },
+                "timestamp":"1970-01-01T00:00:00Z"
+            }"#,
+        )
+        .expect("fixture should parse");
+
+        assert_eq!(
+            classify_claude_turn_completion_entry(&entry),
+            Some(ClaudeTurnCompletion {
+                status: "Failed",
+                has_meaningful_output: true,
+                completed_at_ms: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn treats_prompt_too_long_stop_sequence_as_failed_meaningful_output() {
+        let entry: ClaudeJsonlEntry = serde_json::from_str(
+            r#"{
+                "type":"assistant",
+                "message":{
+                    "role":"assistant",
+                    "stop_reason":"stop_sequence",
+                    "content":[{"type":"text","text":"Prompt is too long for this model"}]
+                },
+                "timestamp":"1970-01-01T00:00:00Z"
+            }"#,
+        )
+        .expect("fixture should parse");
+
+        assert_eq!(
+            classify_claude_turn_completion_entry(&entry),
+            Some(ClaudeTurnCompletion {
+                status: "Failed",
+                has_meaningful_output: true,
+                completed_at_ms: 0,
+            })
+        );
     }
 
     #[test]

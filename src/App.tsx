@@ -24,7 +24,7 @@ import { TerminalPanel } from './components/TerminalPanel';
 import { ThreadSkillsPopover } from './components/ThreadSkillsPopover';
 import { ToastRegion, type ToastItem } from './components/ToastRegion';
 import { WorkspaceShellDrawer } from './components/WorkspaceShellDrawer';
-import { api, onTerminalData, onTerminalExit, onTerminalReady, onThreadUpdated } from './lib/api';
+import * as apiModule from './lib/api';
 import { clampTerminalLog as clampTerminalLogText } from './lib/terminalLogClamp';
 import { resolveAppendedTerminalLogChunk } from './lib/terminalLogChunkUpdate';
 import {
@@ -76,17 +76,25 @@ import type {
   SkillInfo,
   TerminalDataEvent,
   TerminalExitEvent,
+  TerminalTurnCompletedEvent,
+  TerminalTurnCompletionMode,
   TerminalSessionMode,
   CreateThreadOptions,
   ThreadMetadata,
   Workspace
 } from './types';
 
+const { api, onTerminalData, onTerminalExit, onTerminalReady, onThreadUpdated } = apiModule;
+const onTerminalTurnCompleted =
+  apiModule.onTerminalTurnCompleted ??
+  (async (_handler: (event: TerminalTurnCompletedEvent) => void) => () => undefined);
+
 const SELECTED_WORKSPACE_KEY = 'claude-desk:selected-workspace';
 const SIDEBAR_WIDTH_KEY = 'claude-desk:sidebar-width';
 const SHELL_DRAWER_HEIGHT_KEY = 'claude-desk:shell-drawer-height';
 const THREAD_LAST_READ_AT_KEY = 'claude-desk:last-read-at';
 const THREAD_VISIBLE_OUTPUT_GUARD_KEY = 'claude-desk:visible-output-guard';
+const THREAD_ATTENTION_STATE_V2_KEY = 'claude-desk:thread-attention-v2';
 const TASK_COMPLETION_ALERTS_BOOTSTRAP_KEY = 'claude-desk:task-completion-alerts-bootstrap-v1';
 const SIDEBAR_WIDTH_DEFAULT = 320;
 const SIDEBAR_WIDTH_MIN = 260;
@@ -128,6 +136,24 @@ function normalizeSettings(settings?: Settings | null): Settings {
 interface PendingSessionStart {
   requestId: number;
   promise: Promise<string>;
+}
+
+type ThreadAttentionActiveTurnStatus = 'idle' | 'running' | 'completed';
+type ThreadAttentionCompletionStatus = Extract<RunStatus, 'Succeeded' | 'Failed'>;
+
+interface ThreadAttentionState {
+  activeTurnId: number | null;
+  activeTurnStatus: ThreadAttentionActiveTurnStatus;
+  activeTurnHasMeaningfulOutput: boolean;
+  activeTurnLastOutputAtMs: number | null;
+  lastCompletedTurnIdWithOutput: number;
+  lastCompletedTurnStatus: ThreadAttentionCompletionStatus | null;
+  lastCompletedTurnAtMs: number | null;
+  lastCompletedTurnLastOutputAtMs: number | null;
+  lastViewedTurnId: number;
+  lastViewedAtMs: number | null;
+  lastNotifiedTurnId: number;
+  lastNotifiedTurnStatus: ThreadAttentionCompletionStatus | null;
 }
 
 interface ThreadVisibleOutputGuard {
@@ -284,6 +310,241 @@ function persistThreadVisibleOutputGuardMap(storageKey: string, map: Record<stri
   } catch {
     // best effort
   }
+}
+
+function createThreadAttentionState(): ThreadAttentionState {
+  return {
+    activeTurnId: null,
+    activeTurnStatus: 'idle',
+    activeTurnHasMeaningfulOutput: false,
+    activeTurnLastOutputAtMs: null,
+    lastCompletedTurnIdWithOutput: 0,
+    lastCompletedTurnStatus: null,
+    lastCompletedTurnAtMs: null,
+    lastCompletedTurnLastOutputAtMs: null,
+    lastViewedTurnId: 0,
+    lastViewedAtMs: null,
+    lastNotifiedTurnId: 0,
+    lastNotifiedTurnStatus: null
+  };
+}
+
+function normalizePositiveInteger(value: unknown): number | null {
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null;
+  }
+  return Math.trunc(numeric);
+}
+
+function normalizeNonNegativeInteger(value: unknown): number {
+  const normalized = normalizePositiveInteger(value);
+  return normalized ?? 0;
+}
+
+function normalizeThreadAttentionTurnStatus(value: unknown): ThreadAttentionActiveTurnStatus {
+  return value === 'running' || value === 'completed' ? value : 'idle';
+}
+
+function normalizeThreadAttentionCompletionStatus(value: unknown): ThreadAttentionCompletionStatus | null {
+  return value === 'Succeeded' || value === 'Failed' ? value : null;
+}
+
+function normalizeThreadAttentionState(value: unknown): ThreadAttentionState | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const activeTurnId = normalizePositiveInteger(record.activeTurnId);
+  const activeTurnStatus = normalizeThreadAttentionTurnStatus(record.activeTurnStatus);
+  const activeTurnLastOutputAtMs = normalizePositiveInteger(record.activeTurnLastOutputAtMs);
+  const lastCompletedTurnIdWithOutput = normalizeNonNegativeInteger(record.lastCompletedTurnIdWithOutput);
+  const lastCompletedTurnStatus = normalizeThreadAttentionCompletionStatus(record.lastCompletedTurnStatus);
+  const lastCompletedTurnAtMs = normalizePositiveInteger(record.lastCompletedTurnAtMs);
+  const lastCompletedTurnLastOutputAtMs = normalizePositiveInteger(record.lastCompletedTurnLastOutputAtMs);
+  const lastViewedTurnId = normalizeNonNegativeInteger(record.lastViewedTurnId);
+  const lastViewedAtMs = normalizePositiveInteger(record.lastViewedAtMs);
+  const lastNotifiedTurnId = normalizeNonNegativeInteger(record.lastNotifiedTurnId);
+  const lastNotifiedTurnStatus = normalizeThreadAttentionCompletionStatus(record.lastNotifiedTurnStatus);
+
+  return {
+    activeTurnId,
+    activeTurnStatus: activeTurnId ? activeTurnStatus : 'idle',
+    activeTurnHasMeaningfulOutput: record.activeTurnHasMeaningfulOutput === true,
+    activeTurnLastOutputAtMs,
+    lastCompletedTurnIdWithOutput,
+    lastCompletedTurnStatus,
+    lastCompletedTurnAtMs,
+    lastCompletedTurnLastOutputAtMs,
+    lastViewedTurnId,
+    lastViewedAtMs,
+    lastNotifiedTurnId,
+    lastNotifiedTurnStatus
+  };
+}
+
+function parseThreadAttentionStateMap(raw: string | null): Record<string, ThreadAttentionState> {
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    const normalized: Record<string, ThreadAttentionState> = {};
+    for (const [threadId, value] of Object.entries(parsed)) {
+      if (!threadId) {
+        continue;
+      }
+      const state = normalizeThreadAttentionState(value);
+      if (!state) {
+        continue;
+      }
+      normalized[threadId] = state;
+    }
+    return normalized;
+  } catch {
+    return {};
+  }
+}
+
+function loadThreadAttentionStateMap(storageKey: string): Record<string, ThreadAttentionState> {
+  if (typeof window === 'undefined') {
+    return {};
+  }
+  return parseThreadAttentionStateMap(window.localStorage.getItem(storageKey));
+}
+
+function migrateLegacyThreadReadStateIntoAttentionMap(
+  attentionByThread: Record<string, ThreadAttentionState>,
+  lastReadAtByThread: Record<string, number>
+): Record<string, ThreadAttentionState> {
+  if (Object.keys(lastReadAtByThread).length === 0) {
+    return attentionByThread;
+  }
+
+  const nextByThread = { ...attentionByThread };
+  for (const [threadId, readAtMs] of Object.entries(lastReadAtByThread)) {
+    const currentState = nextByThread[threadId] ?? createThreadAttentionState();
+    const nextState: ThreadAttentionState = {
+      ...currentState,
+      lastViewedAtMs: Math.max(currentState.lastViewedAtMs ?? 0, readAtMs)
+    };
+
+    if (
+      currentState.lastCompletedTurnIdWithOutput > 0 &&
+      currentState.lastCompletedTurnAtMs !== null &&
+      readAtMs >= currentState.lastCompletedTurnAtMs &&
+      currentState.lastCompletedTurnIdWithOutput > nextState.lastViewedTurnId
+    ) {
+      nextState.lastViewedTurnId = currentState.lastCompletedTurnIdWithOutput;
+    } else if (
+      currentState.activeTurnId !== null &&
+      currentState.activeTurnLastOutputAtMs !== null &&
+      readAtMs >= currentState.activeTurnLastOutputAtMs &&
+      currentState.activeTurnId > nextState.lastViewedTurnId
+    ) {
+      nextState.lastViewedTurnId = currentState.activeTurnId;
+    }
+
+    nextByThread[threadId] = nextState;
+  }
+
+  return nextByThread;
+}
+
+function isDefaultThreadAttentionState(state: ThreadAttentionState): boolean {
+  return (
+    state.activeTurnId === null &&
+    state.activeTurnStatus === 'idle' &&
+    !state.activeTurnHasMeaningfulOutput &&
+    state.activeTurnLastOutputAtMs === null &&
+    state.lastCompletedTurnIdWithOutput === 0 &&
+    state.lastCompletedTurnStatus === null &&
+    state.lastCompletedTurnAtMs === null &&
+    state.lastCompletedTurnLastOutputAtMs === null &&
+    state.lastViewedTurnId === 0 &&
+    state.lastViewedAtMs === null &&
+    state.lastNotifiedTurnId === 0 &&
+    state.lastNotifiedTurnStatus === null
+  );
+}
+
+function persistThreadAttentionStateMap(storageKey: string, map: Record<string, ThreadAttentionState>) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const entries = Object.entries(map).filter(([, value]) => !isDefaultThreadAttentionState(value));
+    if (entries.length === 0) {
+      window.localStorage.removeItem(storageKey);
+      return;
+    }
+    window.localStorage.setItem(storageKey, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // best effort
+  }
+}
+
+function areThreadAttentionStatesEqual(left: ThreadAttentionState, right: ThreadAttentionState): boolean {
+  return (
+    left.activeTurnId === right.activeTurnId &&
+    left.activeTurnStatus === right.activeTurnStatus &&
+    left.activeTurnHasMeaningfulOutput === right.activeTurnHasMeaningfulOutput &&
+    left.activeTurnLastOutputAtMs === right.activeTurnLastOutputAtMs &&
+    left.lastCompletedTurnIdWithOutput === right.lastCompletedTurnIdWithOutput &&
+    left.lastCompletedTurnStatus === right.lastCompletedTurnStatus &&
+    left.lastCompletedTurnAtMs === right.lastCompletedTurnAtMs &&
+    left.lastCompletedTurnLastOutputAtMs === right.lastCompletedTurnLastOutputAtMs &&
+    left.lastViewedTurnId === right.lastViewedTurnId &&
+    left.lastViewedAtMs === right.lastViewedAtMs &&
+    left.lastNotifiedTurnId === right.lastNotifiedTurnId &&
+    left.lastNotifiedTurnStatus === right.lastNotifiedTurnStatus
+  );
+}
+
+function nextTurnIdForAttentionState(state: ThreadAttentionState): number {
+  return Math.max(
+    state.activeTurnId ?? 0,
+    state.lastCompletedTurnIdWithOutput,
+    state.lastViewedTurnId,
+    state.lastNotifiedTurnId
+  ) + 1;
+}
+
+function hasUnreadAttentionTurn(state?: ThreadAttentionState): boolean {
+  if (!state) {
+    return false;
+  }
+  if (state.lastCompletedTurnIdWithOutput > state.lastViewedTurnId) {
+    return true;
+  }
+  if (state.lastCompletedTurnIdWithOutput < state.lastViewedTurnId) {
+    return false;
+  }
+  if (state.lastCompletedTurnIdWithOutput === 0) {
+    return false;
+  }
+  if (state.lastCompletedTurnLastOutputAtMs === null) {
+    return false;
+  }
+  return state.lastCompletedTurnLastOutputAtMs > (state.lastViewedAtMs ?? 0);
+}
+
+function shouldNotifyAttentionTurn(state?: ThreadAttentionState): boolean {
+  if (!state || !state.lastCompletedTurnStatus || !hasUnreadAttentionTurn(state)) {
+    return false;
+  }
+  if (state.lastCompletedTurnIdWithOutput > state.lastNotifiedTurnId) {
+    return true;
+  }
+  return (
+    state.lastCompletedTurnIdWithOutput === state.lastNotifiedTurnId &&
+    state.lastCompletedTurnStatus === 'Failed' &&
+    state.lastNotifiedTurnStatus !== 'Failed'
+  );
 }
 
 function threadSelectionKey(workspaceId: string) {
@@ -805,7 +1066,9 @@ function matchesVisibleOutputTail(normalizedChunk: string, visibleTail: string):
   }
   return (
     visibleTail === normalizedChunk ||
+    visibleTail.includes(normalizedChunk) ||
     visibleTail.endsWith(normalizedChunk) ||
+    normalizedChunk.includes(visibleTail) ||
     normalizedChunk.endsWith(visibleTail)
   );
 }
@@ -967,7 +1230,7 @@ export default function App() {
   });
   const [isShellDrawerResizing, setIsShellDrawerResizing] = useState(false);
   const [lastTerminalLogByThread, setLastTerminalLogByThread] = useState<Record<string, string>>({});
-  const [unreadOutputByThread, setUnreadOutputByThread] = useState<Record<string, boolean>>({});
+  const [threadAttentionVersion, setThreadAttentionVersion] = useState(0);
   const [draftAttachmentsByThread, setDraftAttachmentsByThread] = useState<Record<string, string[]>>({});
   const [skillsByWorkspaceId, setSkillsByWorkspaceId] = useState<Record<string, SkillInfo[]>>({});
   const [skillsLoadingByWorkspaceId, setSkillsLoadingByWorkspaceId] = useState<Record<string, boolean>>({});
@@ -1075,26 +1338,30 @@ export default function App() {
   const terminalDataListenerReadyRef = useRef(false);
   const terminalDataListenerReadyResolverRef = useRef<(() => void) | null>(null);
   const terminalDataListenerReadyPromiseRef = useRef<Promise<void> | null>(null);
-  const unreadOutputByThreadRef = useRef<Record<string, boolean>>({});
-  const lastAppBadgeCountRef = useRef<number | null | undefined>(undefined);
-  const unreadAlertStatusByThreadRef = useRef<Record<string, Extract<RunStatus, 'Succeeded' | 'Failed'>>>({});
-  const latestOutputSequenceByThreadRef = useRef<Record<string, number>>({});
-  const seenOutputSequenceByThreadRef = useRef<Record<string, number>>({});
-  const taskCompletionAlertBootstrapAttemptedRef = useRef(false);
   const lastReadAtMsByThreadRef = useRef<Record<string, number>>(loadThreadTimestampMap(THREAD_LAST_READ_AT_KEY));
   const visibleOutputGuardByThreadRef = useRef<Record<string, ThreadVisibleOutputGuard>>(
     loadThreadVisibleOutputGuardMap(THREAD_VISIBLE_OUTPUT_GUARD_KEY)
   );
+  const threadAttentionByThreadRef = useRef<Record<string, ThreadAttentionState>>(
+    migrateLegacyThreadReadStateIntoAttentionMap(
+      loadThreadAttentionStateMap(THREAD_ATTENTION_STATE_V2_KEY),
+      lastReadAtMsByThreadRef.current
+    )
+  );
   const threadReadStateDirtyRef = useRef(false);
-  const lastMeaningfulOutputAtMsByThreadRef = useRef<Record<string, number>>({});
+  const threadAttentionDirtyRef = useRef(false);
+  const legacyReadStateMigrationPendingRef = useRef(
+    Object.keys(lastReadAtMsByThreadRef.current).length > 0 || Object.keys(visibleOutputGuardByThreadRef.current).length > 0
+  );
+  const lastAppBadgeCountRef = useRef<number | null | undefined>(undefined);
+  const taskCompletionAlertBootstrapAttemptedRef = useRef(false);
   const lastMeaningfulOutputByThreadRef = useRef<Record<string, string>>({});
   const lastSessionStartAtMsByThreadRef = useRef<Record<string, number>>({});
   const lastUserInputAtMsByThreadRef = useRef<Record<string, number>>({});
-  const lastUserInputSequenceByThreadRef = useRef<Record<string, number>>({});
   const runLifecycleByThreadRef = useRef<Record<string, TerminalRunLifecycleState>>({});
   const sessionFailCountByThreadRef = useRef<Record<string, number>>({});
-  const outputSequenceCounterRef = useRef(0);
   const terminalDataEventHandlerRef = useRef<(event: TerminalDataEvent) => void>(() => undefined);
+  const terminalTurnCompletedEventHandlerRef = useRef<(event: TerminalTurnCompletedEvent) => void>(() => undefined);
   const terminalExitEventHandlerRef = useRef<(event: TerminalExitEvent) => void>(() => undefined);
   const threadUpdatedEventHandlerRef = useRef<(thread: ThreadMetadata) => void>(() => undefined);
   const autoRecoverInFlightRef = useRef(false);
@@ -1107,6 +1374,7 @@ export default function App() {
         threadId: string;
         workspaceId: string;
         mode: TerminalSessionMode;
+        turnCompletionMode: TerminalTurnCompletionMode;
         startedAtMs: number;
       }
     >
@@ -1117,8 +1385,6 @@ export default function App() {
       terminalDataListenerReadyResolverRef.current = resolve;
     });
   }
-
-  unreadOutputByThreadRef.current = unreadOutputByThread;
 
   const selectedWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId),
@@ -1270,39 +1536,267 @@ export default function App() {
     threadReadStateDirtyRef.current = true;
   }, []);
 
-  const markThreadOutputSeen = useCallback((threadId: string) => {
-    seenOutputSequenceByThreadRef.current[threadId] = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
+  const bumpThreadAttentionVersion = useCallback(() => {
+    setThreadAttentionVersion((current) => current + 1);
   }, []);
 
-  const applyThreadReadBoundary = useCallback((threadId: string, readAtMs: number) => {
-    lastReadAtMsByThreadRef.current[threadId] = readAtMs;
-    threadReadStateDirtyRef.current = true;
-    markThreadOutputSeen(threadId);
-    delete unreadAlertStatusByThreadRef.current[threadId];
-    if (unreadOutputByThreadRef.current[threadId]) {
-      const nextUnread = { ...unreadOutputByThreadRef.current };
-      delete nextUnread[threadId];
-      unreadOutputByThreadRef.current = nextUnread;
+  const flushThreadAttentionState = useCallback(() => {
+    if (!threadAttentionDirtyRef.current) {
+      return;
     }
-    setUnreadOutputByThread((current) => removeThreadFlag(current, threadId));
-  }, [markThreadOutputSeen]);
+    threadAttentionDirtyRef.current = false;
+    persistThreadAttentionStateMap(THREAD_ATTENTION_STATE_V2_KEY, threadAttentionByThreadRef.current);
+  }, []);
 
-  const clearThreadUnread = useCallback((threadId: string, persistNow = false, readAtMs = Date.now()) => {
-    applyThreadReadBoundary(threadId, readAtMs);
-    if (persistNow) {
-      flushThreadReadState();
+  const commitThreadAttentionState = useCallback(
+    (
+      threadId: string,
+      nextState: ThreadAttentionState,
+      { persistNow = false, render = false }: { persistNow?: boolean; render?: boolean } = {}
+    ) => {
+      const currentState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
+      if (!areThreadAttentionStatesEqual(currentState, nextState)) {
+        if (isDefaultThreadAttentionState(nextState)) {
+          delete threadAttentionByThreadRef.current[threadId];
+        } else {
+          threadAttentionByThreadRef.current[threadId] = nextState;
+        }
+        threadAttentionDirtyRef.current = true;
+        if (render) {
+          bumpThreadAttentionVersion();
+        }
+      }
+      if (persistNow) {
+        flushThreadAttentionState();
+      }
+      return nextState;
+    },
+    [bumpThreadAttentionVersion, flushThreadAttentionState]
+  );
+
+  const isThreadVisibleToUser = useCallback((threadId: string) => {
+    if (!threadId || selectedThreadIdRef.current !== threadId) {
+      return false;
     }
-  }, [applyThreadReadBoundary, flushThreadReadState]);
+    return typeof document === 'undefined' || document.visibilityState === 'visible';
+  }, []);
 
-  const markThreadVisibleOutputRead = useCallback(
-    (threadId: string, outputText: string, persistNow = false, readAtMs = Date.now()) => {
-      applyThreadReadBoundary(threadId, readAtMs);
-      rememberThreadVisibleOutput(threadId, outputText, readAtMs);
+  const beginTurn = useCallback(
+    (threadId: string) => {
+      const currentState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
+      const nextState: ThreadAttentionState = {
+        ...currentState,
+        activeTurnId: nextTurnIdForAttentionState(currentState),
+        activeTurnStatus: 'running',
+        activeTurnHasMeaningfulOutput: false,
+        activeTurnLastOutputAtMs: null
+      };
+      return commitThreadAttentionState(threadId, nextState);
+    },
+    [commitThreadAttentionState]
+  );
+
+  const markTurnViewed = useCallback(
+    (threadId: string, persistNow = false, viewedAtMs = Date.now(), visibleOutputText?: string | null) => {
+      const currentState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
+      let nextViewedTurnId = currentState.lastViewedTurnId;
+      if (currentState.lastCompletedTurnIdWithOutput > nextViewedTurnId) {
+        nextViewedTurnId = currentState.lastCompletedTurnIdWithOutput;
+      }
+      if (
+        currentState.activeTurnId !== null &&
+        currentState.activeTurnHasMeaningfulOutput &&
+        currentState.activeTurnId > nextViewedTurnId
+      ) {
+        nextViewedTurnId = currentState.activeTurnId;
+      }
+      const nextViewedAtMs = Math.max(currentState.lastViewedAtMs ?? 0, viewedAtMs);
+      if (nextViewedTurnId < currentState.lastViewedTurnId || (
+        nextViewedTurnId === currentState.lastViewedTurnId &&
+        nextViewedAtMs === (currentState.lastViewedAtMs ?? 0)
+      )) {
+        if (persistNow) {
+          flushThreadReadState();
+          flushThreadAttentionState();
+        }
+        return currentState;
+      }
+      lastReadAtMsByThreadRef.current[threadId] = nextViewedAtMs;
+      threadReadStateDirtyRef.current = true;
+      const outputText = visibleOutputText ?? lastTerminalLogByThreadRef.current[threadId] ?? '';
+      rememberThreadVisibleOutput(threadId, outputText, nextViewedAtMs);
+      const nextState = commitThreadAttentionState(
+        threadId,
+        {
+          ...currentState,
+          lastViewedTurnId: nextViewedTurnId,
+          lastViewedAtMs: nextViewedAtMs
+        },
+        {
+          persistNow,
+          render: hasUnreadAttentionTurn(currentState) || nextViewedTurnId !== currentState.lastViewedTurnId
+        }
+      );
       if (persistNow) {
         flushThreadReadState();
       }
+      return nextState;
     },
-    [applyThreadReadBoundary, flushThreadReadState, rememberThreadVisibleOutput]
+    [commitThreadAttentionState, flushThreadAttentionState, flushThreadReadState, rememberThreadVisibleOutput]
+  );
+
+  const noteTurnOutput = useCallback(
+    (threadId: string, chunk: string) => {
+      const previousCarry = outputControlCarryByThreadRef.current[threadId] ?? '';
+      const stripped = stripTerminalControlSequences(chunk, previousCarry);
+      outputControlCarryByThreadRef.current[threadId] = stripped.carry;
+      const normalized = normalizeMeaningfulOutputText(stripped.text);
+      if (!normalized) {
+        return false;
+      }
+
+      const looksLikeRedrawChunk = chunk.includes('\r') || chunk.includes('\u001b') || chunk.includes('\u009b');
+      const lastMeaningfulOutput = lastMeaningfulOutputByThreadRef.current[threadId] ?? '';
+      if (looksLikeRedrawChunk && lastMeaningfulOutput === normalized) {
+        return false;
+      }
+
+      const lastReadAtMs = lastReadAtMsByThreadRef.current[threadId] ?? 0;
+      const lastUserInputAtMs = lastUserInputAtMsByThreadRef.current[threadId] ?? 0;
+      const visibleOutputGuard = visibleOutputGuardByThreadRef.current[threadId];
+      const isReplayOfVisibleReadOutput =
+        Boolean(visibleOutputGuard) &&
+        lastReadAtMs >= visibleOutputGuard.seenAtMs &&
+        lastUserInputAtMs <= visibleOutputGuard.baselineUserInputAtMs &&
+        matchesVisibleOutputTail(normalized, visibleOutputGuard.tail);
+      if (isReplayOfVisibleReadOutput) {
+        return false;
+      }
+
+      const attentionState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
+      if (attentionState.activeTurnId === null || attentionState.activeTurnStatus !== 'running') {
+        return false;
+      }
+
+      const lifecycle = runLifecycleByThreadRef.current[threadId];
+      if (!workingByThreadRef.current[threadId] && lifecycle?.phase !== 'streaming' && looksLikeShellPromptText(normalized)) {
+        return false;
+      }
+
+      const nowMs = Date.now();
+      lastMeaningfulOutputByThreadRef.current[threadId] = normalized;
+      commitThreadAttentionState(threadId, {
+        ...attentionState,
+        activeTurnStatus: 'running',
+        activeTurnHasMeaningfulOutput: true,
+        activeTurnLastOutputAtMs: nowMs
+      });
+
+      if (isThreadVisibleToUser(threadId)) {
+        const visibleOutputText = `${lastTerminalLogByThreadRef.current[threadId] ?? ''}${stripped.text}`;
+        markTurnViewed(threadId, false, nowMs, visibleOutputText);
+      }
+      return true;
+    },
+    [commitThreadAttentionState, isThreadVisibleToUser, markTurnViewed]
+  );
+
+  const completeTurn = useCallback(
+    (threadId: string, status: RunStatus, completedAtMs = Date.now()) => {
+      const currentState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
+      if (currentState.activeTurnId === null) {
+        return currentState;
+      }
+
+      const completedStatus: ThreadAttentionCompletionStatus | null =
+        status === 'Succeeded' || status === 'Failed' ? status : null;
+      const nextState: ThreadAttentionState = {
+        ...currentState,
+        activeTurnStatus: 'completed'
+      };
+
+      if (currentState.activeTurnHasMeaningfulOutput && completedStatus) {
+        nextState.lastCompletedTurnIdWithOutput = currentState.activeTurnId;
+        nextState.lastCompletedTurnStatus = completedStatus;
+        nextState.lastCompletedTurnAtMs = completedAtMs;
+        nextState.lastCompletedTurnLastOutputAtMs = currentState.activeTurnLastOutputAtMs;
+      }
+
+      return commitThreadAttentionState(threadId, nextState, {
+        persistNow: true,
+        render: currentState.activeTurnHasMeaningfulOutput && completedStatus !== null
+      });
+    },
+    [commitThreadAttentionState]
+  );
+
+  const markTurnNotified = useCallback(
+    (threadId: string, turnId: number, status: ThreadAttentionCompletionStatus | null) => {
+      if (turnId <= 0 || !status) {
+        return;
+      }
+      const currentState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
+      if (
+        turnId < currentState.lastNotifiedTurnId ||
+        (turnId === currentState.lastNotifiedTurnId && currentState.lastNotifiedTurnStatus === status)
+      ) {
+        return;
+      }
+      commitThreadAttentionState(
+        threadId,
+        {
+          ...currentState,
+          lastNotifiedTurnId: turnId,
+          lastNotifiedTurnStatus: status
+        },
+        { persistNow: true }
+      );
+    },
+    [commitThreadAttentionState]
+  );
+
+  const notifyCompletedTurnIfNeeded = useCallback(
+    (threadId: string, attentionState: ThreadAttentionState) => {
+      if (!settings.taskCompletionAlerts || !shouldNotifyAttentionTurn(attentionState) || !attentionState.lastCompletedTurnStatus) {
+        return;
+      }
+
+      markTurnNotified(threadId, attentionState.lastCompletedTurnIdWithOutput, attentionState.lastCompletedTurnStatus);
+      const thread =
+        Object.values(threadsByWorkspaceRef.current)
+          .flat()
+          .find((candidate) => candidate.id === threadId) ?? null;
+
+      void sendTaskCompletionAlert({
+        threadTitle: thread?.title ?? 'Current thread',
+        status: attentionState.lastCompletedTurnStatus
+      });
+    },
+    [markTurnNotified, settings.taskCompletionAlerts]
+  );
+
+  const deleteThreadAttentionState = useCallback(
+    (threadId: string) => {
+      let removedReadState = false;
+      if (threadId in lastReadAtMsByThreadRef.current) {
+        delete lastReadAtMsByThreadRef.current[threadId];
+        removedReadState = true;
+      }
+      if (threadId in visibleOutputGuardByThreadRef.current) {
+        delete visibleOutputGuardByThreadRef.current[threadId];
+        removedReadState = true;
+      }
+      if (removedReadState) {
+        threadReadStateDirtyRef.current = true;
+      }
+      if (!(threadId in threadAttentionByThreadRef.current)) {
+        return;
+      }
+      delete threadAttentionByThreadRef.current[threadId];
+      threadAttentionDirtyRef.current = true;
+      bumpThreadAttentionVersion();
+    },
+    [bumpThreadAttentionVersion]
   );
 
   selectedWorkspaceIdRef.current = selectedWorkspaceId;
@@ -1362,6 +1856,15 @@ export default function App() {
     persistSkillUsageMap(skillUsageMap);
   }, [skillUsageMap]);
 
+  useEffect(() => {
+    if (!legacyReadStateMigrationPendingRef.current) {
+      return;
+    }
+    legacyReadStateMigrationPendingRef.current = false;
+    threadAttentionDirtyRef.current = true;
+    flushThreadAttentionState();
+  }, [flushThreadAttentionState]);
+
   const bindSession = useCallback(
     (threadId: string, sessionId: string, startedAt: string) => {
       activeRunsByThreadRef.current = {
@@ -1375,10 +1878,7 @@ export default function App() {
       runStore.bindSession(threadId, sessionId, startedAt);
       lastSessionStartAtMsByThreadRef.current[threadId] = Date.now();
       delete lastUserInputAtMsByThreadRef.current[threadId];
-      delete lastUserInputSequenceByThreadRef.current[threadId];
-      delete unreadAlertStatusByThreadRef.current[threadId];
       delete lastMeaningfulOutputByThreadRef.current[threadId];
-      delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
       delete outputControlCarryByThreadRef.current[threadId];
       delete liveDataSeenBySessionRef.current[sessionId];
       runLifecycleByThreadRef.current[threadId] = createRunLifecycleState();
@@ -1446,24 +1946,28 @@ export default function App() {
   useEffect(() => {
     const onBeforeUnload = () => {
       flushThreadReadState();
+      flushThreadAttentionState();
     };
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
         flushThreadReadState();
+        flushThreadAttentionState();
       }
     };
     window.addEventListener('beforeunload', onBeforeUnload);
     document.addEventListener('visibilitychange', onVisibilityChange);
     const id = window.setInterval(() => {
       flushThreadReadState();
+      flushThreadAttentionState();
     }, 400);
     return () => {
       window.clearInterval(id);
       window.removeEventListener('beforeunload', onBeforeUnload);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       flushThreadReadState();
+      flushThreadAttentionState();
     };
-  }, [flushThreadReadState]);
+  }, [flushThreadAttentionState, flushThreadReadState]);
 
   useEffect(() => {
     draftAttachmentsByThreadRef.current = draftAttachmentsByThread;
@@ -1720,13 +2224,13 @@ export default function App() {
       if (mode === 'snapshot' && selectedThreadId) {
         const previousSelectedText = current[selectedThreadId] ?? '';
         const nextSelectedText = next[selectedThreadId] ?? '';
-        if (nextSelectedText && nextSelectedText !== previousSelectedText) {
-          markThreadVisibleOutputRead(selectedThreadId, nextSelectedText);
+        if (nextSelectedText && nextSelectedText !== previousSelectedText && isThreadVisibleToUser(selectedThreadId)) {
+          markTurnViewed(selectedThreadId, false, Date.now(), nextSelectedText);
         }
       }
       return next;
     },
-    [markThreadVisibleOutputRead]
+    [isThreadVisibleToUser, markTurnViewed]
   );
 
   const flushPendingTerminalLogChunks = useCallback(() => {
@@ -1826,64 +2330,6 @@ export default function App() {
     [clearSessionSnapshotRefreshTimers]
   );
 
-  const noteThreadOutput = useCallback((threadId: string, chunk: string) => {
-    const previousCarry = outputControlCarryByThreadRef.current[threadId] ?? '';
-    const stripped = stripTerminalControlSequences(chunk, previousCarry);
-    outputControlCarryByThreadRef.current[threadId] = stripped.carry;
-    const normalized = normalizeMeaningfulOutputText(stripped.text);
-    if (!normalized) {
-      return false;
-    }
-
-    // Terminal UIs often repaint identical content using cursor movement; don't
-    // treat duplicate redraw chunks as fresh unread output.
-    const looksLikeRedrawChunk = chunk.includes('\r') || chunk.includes('\u001b') || chunk.includes('\u009b');
-    const lastMeaningfulOutput = lastMeaningfulOutputByThreadRef.current[threadId] ?? '';
-    if (looksLikeRedrawChunk && lastMeaningfulOutput === normalized) {
-      return false;
-    }
-
-    // PTY/session reconnects can occasionally replay the last visible Claude
-    // chunk as plain text. Once the user has already read through the current
-    // output sequence, don't let an exact replay of that same latest chunk
-    // resurrect unread state.
-    const lastMeaningfulOutputAtMs = lastMeaningfulOutputAtMsByThreadRef.current[threadId] ?? 0;
-    const latestOutputSeq = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
-    const seenOutputSeq = seenOutputSequenceByThreadRef.current[threadId] ?? 0;
-    const lastUserInputSeq = lastUserInputSequenceByThreadRef.current[threadId] ?? 0;
-    const lastReadAtMs = lastReadAtMsByThreadRef.current[threadId] ?? 0;
-    const lastUserInputAtMs = lastUserInputAtMsByThreadRef.current[threadId] ?? 0;
-    const visibleOutputGuard = visibleOutputGuardByThreadRef.current[threadId];
-    const isReplayOfAlreadyReadOutput =
-      lastMeaningfulOutputAtMs > 0 &&
-      lastMeaningfulOutput === normalized &&
-      lastReadAtMs >= lastMeaningfulOutputAtMs &&
-      seenOutputSeq >= latestOutputSeq &&
-      lastUserInputSeq < latestOutputSeq;
-    if (isReplayOfAlreadyReadOutput) {
-      return false;
-    }
-    const isReplayOfVisibleReadOutput =
-      Boolean(visibleOutputGuard) &&
-      lastReadAtMs >= visibleOutputGuard.seenAtMs &&
-      lastUserInputAtMs <= visibleOutputGuard.baselineUserInputAtMs &&
-      matchesVisibleOutputTail(normalized, visibleOutputGuard.tail);
-    if (isReplayOfVisibleReadOutput) {
-      return false;
-    }
-
-    const lifecycle = runLifecycleByThreadRef.current[threadId];
-    if (!workingByThreadRef.current[threadId] && lifecycle?.phase !== 'streaming' && looksLikeShellPromptText(normalized)) {
-      return false;
-    }
-
-    lastMeaningfulOutputByThreadRef.current[threadId] = normalized;
-    lastMeaningfulOutputAtMsByThreadRef.current[threadId] = Date.now();
-    outputSequenceCounterRef.current += 1;
-    latestOutputSequenceByThreadRef.current[threadId] = outputSequenceCounterRef.current;
-    return true;
-  }, []);
-
   // Returns true only if the user sent at least one message in the current session
   // (i.e. after the most recent session bind). Prevents Claude's startup prompt from
   // being treated as unread output on non-selected threads.
@@ -1893,61 +2339,20 @@ export default function App() {
     return lastUserInput > sessionStart;
   }, []);
 
-  const hasUnseenMeaningfulOutputSinceRead = useCallback((threadId: string) => {
-    // Monotonic output sequence gate: unread is only possible when we have a
-    // newer meaningful-output sequence than both (a) last-read and (b) the
-    // most recent user-input baseline in the current session.
-    const latestOutputSeq = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
-    const seenOutputSeq = seenOutputSequenceByThreadRef.current[threadId] ?? 0;
-    const lastUserInputSeq = lastUserInputSequenceByThreadRef.current[threadId] ?? 0;
-    return (
-      latestOutputSeq > Math.max(seenOutputSeq, lastUserInputSeq) &&
-      hasUserSentMessageInCurrentSession(threadId)
-    );
-  }, [hasUserSentMessageInCurrentSession]);
-
-  const markThreadUnread = useCallback((threadId: string, status: Extract<RunStatus, 'Succeeded' | 'Failed'> = 'Succeeded') => {
-    if (!hasUnseenMeaningfulOutputSinceRead(threadId)) {
-      return;
+  const resolveThreadTurnCompletionMode = useCallback((threadId: string): TerminalTurnCompletionMode => {
+    const activeSessionId = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
+    if (!activeSessionId) {
+      return 'idle';
     }
-
-    const alreadyUnread = unreadOutputByThreadRef.current[threadId] === true;
-    if (!alreadyUnread) {
-      const nextUnread = {
-        ...unreadOutputByThreadRef.current,
-        [threadId]: true
-      };
-      unreadOutputByThreadRef.current = nextUnread;
-      setUnreadOutputByThread(nextUnread);
-    }
-
-    const priorAlertStatus = unreadAlertStatusByThreadRef.current[threadId];
-    unreadAlertStatusByThreadRef.current[threadId] = status;
-
-    if (!settings.taskCompletionAlerts) {
-      return;
-    }
-    if (alreadyUnread && !(status === 'Failed' && priorAlertStatus !== 'Failed')) {
-      return;
-    }
-
-    const thread =
-      Object.values(threadsByWorkspaceRef.current)
-        .flat()
-        .find((candidate) => candidate.id === threadId) ?? null;
-
-    void sendTaskCompletionAlert({
-      threadTitle: thread?.title ?? 'Current thread',
-      status
-    });
-  }, [hasUnseenMeaningfulOutputSinceRead, settings.taskCompletionAlerts]);
+    return sessionMetaBySessionIdRef.current[activeSessionId]?.turnCompletionMode ?? 'idle';
+  }, []);
 
   const unreadThreadCount = useMemo(
     () =>
-      Object.keys(unreadOutputByThread).reduce((count, threadId) => {
-        return count + (hasUnseenMeaningfulOutputSinceRead(threadId) ? 1 : 0);
+      Object.keys(threadAttentionByThreadRef.current).reduce((count, threadId) => {
+        return count + (hasUnreadAttentionTurn(threadAttentionByThreadRef.current[threadId]) ? 1 : 0);
       }, 0),
-    [hasUnseenMeaningfulOutputSinceRead, unreadOutputByThread]
+    [threadAttentionVersion]
   );
 
   useEffect(() => {
@@ -1965,15 +2370,29 @@ export default function App() {
       workingStopTimerByThreadRef.current[threadId] = window.setTimeout(() => {
         delete workingStopTimerByThreadRef.current[threadId];
         stopThreadWorking(threadId);
-        if (selectedThreadIdRef.current !== threadId && hasUnseenMeaningfulOutputSinceRead(threadId)) {
-          markThreadUnread(threadId);
+        if (resolveThreadTurnCompletionMode(threadId) === 'jsonl') {
+          return;
+        }
+        const previousCompletedTurnId =
+          (threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState()).lastCompletedTurnIdWithOutput;
+        const completedAttentionState = completeTurn(threadId, 'Succeeded');
+        if (
+          completedAttentionState.lastCompletedTurnIdWithOutput > previousCompletedTurnId ||
+          (
+            completedAttentionState.lastCompletedTurnIdWithOutput === previousCompletedTurnId &&
+            completedAttentionState.lastCompletedTurnStatus === 'Succeeded' &&
+            shouldNotifyAttentionTurn(completedAttentionState)
+          )
+        ) {
+          notifyCompletedTurnIfNeeded(threadId, completedAttentionState);
         }
       }, delayMs);
     },
     [
       clearThreadWorkingStopTimer,
-      hasUnseenMeaningfulOutputSinceRead,
-      markThreadUnread,
+      completeTurn,
+      notifyCompletedTurnIfNeeded,
+      resolveThreadTurnCompletionMode,
       stopThreadWorking
     ]
   );
@@ -2257,8 +2676,6 @@ export default function App() {
     const shouldClearSkills = Boolean(pendingSkillClearByThreadRef.current[threadId]);
     delete pendingInputByThreadRef.current[threadId];
     lastUserInputAtMsByThreadRef.current[threadId] = Date.now();
-    lastUserInputSequenceByThreadRef.current[threadId] = latestOutputSequenceByThreadRef.current[threadId] ?? 0;
-    clearThreadUnread(threadId);
     try {
       await api.terminalWrite(sessionId, pending);
     } catch (error) {
@@ -2270,7 +2687,7 @@ export default function App() {
     if (shouldClearSkills) {
       await clearThreadSkillsAfterSend(threadId);
     }
-  }, [clearThreadUnread, clearThreadSkillsAfterSend]);
+  }, [clearThreadSkillsAfterSend]);
 
   const getThreadDraftInput = useCallback((threadId: string) => inputBufferByThreadRef.current[threadId] ?? '', []);
 
@@ -2796,6 +3213,7 @@ export default function App() {
           threadId: thread.id,
           workspaceId: thread.workspaceId,
           mode: response.sessionMode,
+          turnCompletionMode: response.turnCompletionMode ?? 'idle',
           startedAtMs: Date.now()
         };
 
@@ -3534,7 +3952,6 @@ export default function App() {
       invalidatePendingSessionStart(threadId);
       clearThreadWorkingStopTimer(threadId);
       stopThreadWorking(threadId);
-      clearThreadUnread(threadId);
       const existingSessionId = activeRunsByThreadRef.current[threadId]?.sessionId ?? runStore.sessionForThread(threadId);
       if (existingSessionId) {
         try {
@@ -3563,10 +3980,10 @@ export default function App() {
       }
       const deletedThread = (threadsByWorkspaceRef.current[workspaceId] ?? []).find((thread) => thread.id === threadId);
       if (deletedThread) {
-      applyThreadUpdate({
-        ...deletedThread,
-        isArchived: true
-      });
+        applyThreadUpdate({
+          ...deletedThread,
+          isArchived: true
+        });
       }
       delete inputBufferByThreadRef.current[threadId];
       delete inputControlCarryByThreadRef.current[threadId];
@@ -3574,17 +3991,10 @@ export default function App() {
       delete pendingTerminalChunksByThreadRef.current[threadId];
       delete hiddenInjectedPromptsByThreadRef.current[threadId];
       delete outputControlCarryByThreadRef.current[threadId];
-      delete latestOutputSequenceByThreadRef.current[threadId];
-      delete seenOutputSequenceByThreadRef.current[threadId];
-      delete lastReadAtMsByThreadRef.current[threadId];
-      delete visibleOutputGuardByThreadRef.current[threadId];
-      threadReadStateDirtyRef.current = true;
-      delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
+      deleteThreadAttentionState(threadId);
       delete lastMeaningfulOutputByThreadRef.current[threadId];
       delete lastSessionStartAtMsByThreadRef.current[threadId];
       delete lastUserInputAtMsByThreadRef.current[threadId];
-      delete lastUserInputSequenceByThreadRef.current[threadId];
-      delete unreadAlertStatusByThreadRef.current[threadId];
       delete sessionFailCountByThreadRef.current[threadId];
       delete runLifecycleByThreadRef.current[threadId];
       setHasInteractedByThread((current) => removeThreadFlag(current, threadId));
@@ -3612,8 +4022,8 @@ export default function App() {
       refreshThreadsForWorkspace,
       runStore,
       clearTerminalSessionTracking,
-      clearThreadUnread,
       clearThreadWorkingStopTimer,
+      deleteThreadAttentionState,
       stopThreadWorking,
       setSelectedThread,
       setHasInteractedByThread,
@@ -3660,6 +4070,7 @@ export default function App() {
       setThreadRunState(threadId, 'Canceled', null, endedAt);
       clearThreadWorkingStopTimer(threadId);
       stopThreadWorking(threadId);
+      completeTurn(threadId, 'Canceled');
       clearTerminalSessionTracking(sessionId);
       runLifecycleByThreadRef.current[threadId] = markRunExited();
       setStartingByThread((current) => removeThreadFlag(current, threadId));
@@ -3667,6 +4078,7 @@ export default function App() {
       setHasInteractedByThread((current) => removeThreadFlag(current, threadId));
     },
     [
+      completeTurn,
       finishSessionBinding,
       invalidatePendingSessionStart,
       runStore,
@@ -3700,11 +4112,7 @@ export default function App() {
 
   const switchToThread = useCallback(
     async (workspaceId: string, threadId: string) => {
-      const previousThreadId = selectedThreadIdRef.current;
-      if (previousThreadId && previousThreadId !== threadId) {
-        clearThreadUnread(previousThreadId, true);
-      }
-      clearThreadUnread(threadId, true);
+      markTurnViewed(threadId, true, Date.now(), lastTerminalLogByThreadRef.current[threadId] ?? '');
       if (selectedWorkspaceIdRef.current !== workspaceId) {
         setSelectedWorkspace(workspaceId);
       }
@@ -3713,7 +4121,7 @@ export default function App() {
       setSelectedThread(threadId);
       setTerminalFocusRequestId((current) => current + 1);
     },
-    [clearThreadUnread, primeRemoteThreadStartupOnSelection, setSelectedThread, setSelectedWorkspace]
+    [markTurnViewed, primeRemoteThreadStartupOnSelection, setSelectedThread, setSelectedWorkspace]
   );
 
   const restartThreadSession = useCallback(
@@ -3980,13 +4388,27 @@ export default function App() {
     if (!selectedThreadId) {
       return;
     }
-    const visibleLog = lastTerminalLogByThreadRef.current[selectedThreadId] ?? '';
-    if (visibleLog) {
-      markThreadVisibleOutputRead(selectedThreadId, visibleLog, true);
-      return;
+    if (isThreadVisibleToUser(selectedThreadId)) {
+      markTurnViewed(selectedThreadId, true, Date.now(), lastTerminalLogByThreadRef.current[selectedThreadId] ?? '');
     }
-    clearThreadUnread(selectedThreadId, true);
-  }, [clearThreadUnread, markThreadVisibleOutputRead, selectedThreadId]);
+  }, [isThreadVisibleToUser, markTurnViewed, selectedThreadId]);
+
+  useEffect(() => {
+    const markSelectedThreadVisible = () => {
+      const threadId = selectedThreadIdRef.current;
+      if (!threadId || document.visibilityState !== 'visible') {
+        return;
+      }
+      markTurnViewed(threadId, true, Date.now(), lastTerminalLogByThreadRef.current[threadId] ?? '');
+    };
+
+    window.addEventListener('focus', markSelectedThreadVisible);
+    document.addEventListener('visibilitychange', markSelectedThreadVisible);
+    return () => {
+      window.removeEventListener('focus', markSelectedThreadVisible);
+      document.removeEventListener('visibilitychange', markSelectedThreadVisible);
+    };
+  }, [markTurnViewed]);
 
   useEffect(() => {
     if (!selectedWorkspaceId || !selectedThreadId || selectedSessionId) {
@@ -4151,7 +4573,7 @@ export default function App() {
       }
 
       const visibleEventData = stripThreadHiddenInjectedPrompts(threadId, event.data);
-      const hasMeaningfulOutput = noteThreadOutput(threadId, visibleEventData);
+      const hasMeaningfulOutput = noteTurnOutput(threadId, visibleEventData);
       const isSelectedThread = selectedThreadIdRef.current === threadId;
       const nowMs = Date.now();
       runLifecycleByThreadRef.current[threadId] = noteRunOutput(
@@ -4182,11 +4604,6 @@ export default function App() {
         if (isSelectedThread) {
           setStartingByThread((current) => removeThreadFlag(current, threadId));
           setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
-          if (hasMeaningfulOutput) {
-            markThreadVisibleOutputRead(threadId, visibleEventData);
-          } else {
-            clearThreadUnread(threadId);
-          }
         }
         if (workingByThreadRef.current[threadId]) {
           scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
@@ -4206,11 +4623,6 @@ export default function App() {
       if (isSelectedThread) {
         setStartingByThread((current) => removeThreadFlag(current, threadId));
         setReadyByThread((current) => (current[threadId] ? current : { ...current, [threadId]: true }));
-        if (hasMeaningfulOutput) {
-          markThreadVisibleOutputRead(threadId, visibleEventData);
-        } else {
-          clearThreadUnread(threadId);
-        }
       }
       if (workingByThreadRef.current[threadId]) {
         scheduleThreadWorkingStop(threadId, THREAD_WORKING_IDLE_TIMEOUT_MS);
@@ -4229,14 +4641,70 @@ export default function App() {
       appendTerminalLogChunk,
       clearSessionSnapshotRefreshTimers,
       clearThreadWorkingStopTimer,
-      clearThreadUnread,
       hasUserSentMessageInCurrentSession,
-      markThreadVisibleOutputRead,
-      noteThreadOutput,
+      noteTurnOutput,
       stripThreadHiddenInjectedPrompts,
       startThreadWorking,
       stopThreadWorking,
       scheduleThreadWorkingStop
+    ]
+  );
+
+  const handleTerminalTurnCompletedEvent = useCallback(
+    (event: TerminalTurnCompletedEvent) => {
+      const sessionMeta = sessionMetaBySessionIdRef.current[event.sessionId];
+      const threadId =
+        event.threadId ??
+        sessionMeta?.threadId ??
+        Object.entries(activeRunsByThreadRef.current).find(([, run]) => run.sessionId === event.sessionId)?.[0];
+      if (!threadId) {
+        return;
+      }
+
+      const activeSessionIdForThread = activeRunsByThreadRef.current[threadId]?.sessionId ?? null;
+      if (activeSessionIdForThread && activeSessionIdForThread !== event.sessionId) {
+        return;
+      }
+      if ((sessionMeta?.turnCompletionMode ?? 'idle') !== 'jsonl') {
+        return;
+      }
+
+      clearThreadWorkingStopTimer(threadId);
+      stopThreadWorking(threadId);
+      const completionStatus: ThreadAttentionCompletionStatus = event.status === 'Failed' ? 'Failed' : 'Succeeded';
+      const completedAtMs = event.completedAtMs ?? Date.now();
+      const previousAttentionState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
+      const shouldSeedMeaningfulOutput =
+        event.hasMeaningfulOutput === true &&
+        previousAttentionState.activeTurnId !== null &&
+        previousAttentionState.activeTurnStatus === 'running';
+      if (shouldSeedMeaningfulOutput) {
+        commitThreadAttentionState(threadId, {
+          ...previousAttentionState,
+          activeTurnStatus: 'running',
+          activeTurnHasMeaningfulOutput: true,
+          activeTurnLastOutputAtMs: Math.max(previousAttentionState.activeTurnLastOutputAtMs ?? 0, completedAtMs)
+        });
+        if (isThreadVisibleToUser(threadId)) {
+          markTurnViewed(threadId, false, completedAtMs, lastTerminalLogByThreadRef.current[threadId] ?? '');
+        }
+      }
+      const completedAttentionState = completeTurn(threadId, completionStatus, completedAtMs);
+      if (
+        completedAttentionState.lastCompletedTurnIdWithOutput > previousAttentionState.lastCompletedTurnIdWithOutput ||
+        shouldNotifyAttentionTurn(completedAttentionState)
+      ) {
+        notifyCompletedTurnIfNeeded(threadId, completedAttentionState);
+      }
+    },
+    [
+      clearThreadWorkingStopTimer,
+      commitThreadAttentionState,
+      completeTurn,
+      isThreadVisibleToUser,
+      markTurnViewed,
+      notifyCompletedTurnIfNeeded,
+      stopThreadWorking
     ]
   );
 
@@ -4276,15 +4744,17 @@ export default function App() {
         sessionFailCountByThreadRef.current[endedThreadId] =
           (sessionFailCountByThreadRef.current[endedThreadId] ?? 0) + 1;
       }
+      const previousAttentionState = threadAttentionByThreadRef.current[endedThreadId] ?? createThreadAttentionState();
+      const completedAttentionState = completeTurn(endedThreadId, exitStatus);
       if (
-        (exitStatus === 'Succeeded' || exitStatus === 'Failed') &&
-        selectedThreadIdRef.current !== endedThreadId &&
+        completedAttentionState.lastCompletedTurnIdWithOutput > previousAttentionState.lastCompletedTurnIdWithOutput ||
         (
-          hasUnseenMeaningfulOutputSinceRead(endedThreadId) ||
-          unreadOutputByThreadRef.current[endedThreadId]
+          completedAttentionState.lastCompletedTurnIdWithOutput === previousAttentionState.lastCompletedTurnIdWithOutput &&
+          completedAttentionState.lastCompletedTurnStatus !== previousAttentionState.lastCompletedTurnStatus &&
+          shouldNotifyAttentionTurn(completedAttentionState)
         )
       ) {
-        markThreadUnread(endedThreadId, exitStatus);
+        notifyCompletedTurnIfNeeded(endedThreadId, completedAttentionState);
       }
 
       const workspaceId =
@@ -4327,17 +4797,17 @@ export default function App() {
         .catch(() => undefined);
     },
     [
+      completeTurn,
       finishSessionBinding,
-      hasUnseenMeaningfulOutputSinceRead,
       invalidatePendingShellSessionStart,
+      notifyCompletedTurnIfNeeded,
       refreshThreadsForWorkspace,
       setThreadRunState,
       setShellSessionBinding,
       stopThreadWorking,
       updateTerminalLogMap,
       clearTerminalSessionTracking,
-      clearThreadWorkingStopTimer,
-      markThreadUnread
+      clearThreadWorkingStopTimer
     ]
   );
 
@@ -4355,6 +4825,7 @@ export default function App() {
   );
 
   terminalDataEventHandlerRef.current = handleTerminalDataEvent;
+  terminalTurnCompletedEventHandlerRef.current = handleTerminalTurnCompletedEvent;
   terminalExitEventHandlerRef.current = handleTerminalExitEvent;
   threadUpdatedEventHandlerRef.current = handleThreadUpdatedEvent;
 
@@ -4406,6 +4877,28 @@ export default function App() {
     return () => {
       cancelled = true;
       unlistenReady?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenTurnCompleted: (() => void) | null = null;
+
+    void onTerminalTurnCompleted((event: TerminalTurnCompletedEvent) => {
+      terminalTurnCompletedEventHandlerRef.current(event);
+    })
+      .then((off) => {
+        if (cancelled) {
+          off();
+          return;
+        }
+        unlistenTurnCompleted = off;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+      unlistenTurnCompleted?.();
     };
   }, []);
 
@@ -5107,25 +5600,34 @@ export default function App() {
 
       window.localStorage.removeItem(threadSelectionKey(workspace.id));
       clearThreadUserInputTimestamps(threadIds);
+      let removedAttentionState = false;
       for (const threadId of threadIds) {
         delete inputBufferByThreadRef.current[threadId];
         delete inputControlCarryByThreadRef.current[threadId];
         delete threadTitleInitializedRef.current[threadId];
         delete pendingTerminalChunksByThreadRef.current[threadId];
         delete outputControlCarryByThreadRef.current[threadId];
-        delete latestOutputSequenceByThreadRef.current[threadId];
-        delete seenOutputSequenceByThreadRef.current[threadId];
-        delete lastReadAtMsByThreadRef.current[threadId];
-        delete visibleOutputGuardByThreadRef.current[threadId];
-        threadReadStateDirtyRef.current = true;
-        delete lastMeaningfulOutputAtMsByThreadRef.current[threadId];
+        if (threadId in lastReadAtMsByThreadRef.current) {
+          delete lastReadAtMsByThreadRef.current[threadId];
+          threadReadStateDirtyRef.current = true;
+        }
+        if (threadId in visibleOutputGuardByThreadRef.current) {
+          delete visibleOutputGuardByThreadRef.current[threadId];
+          threadReadStateDirtyRef.current = true;
+        }
+        if (threadId in threadAttentionByThreadRef.current) {
+          delete threadAttentionByThreadRef.current[threadId];
+          removedAttentionState = true;
+        }
         delete lastMeaningfulOutputByThreadRef.current[threadId];
         delete lastSessionStartAtMsByThreadRef.current[threadId];
         delete lastUserInputAtMsByThreadRef.current[threadId];
-        delete lastUserInputSequenceByThreadRef.current[threadId];
-        delete unreadAlertStatusByThreadRef.current[threadId];
         delete sessionFailCountByThreadRef.current[threadId];
         delete runLifecycleByThreadRef.current[threadId];
+      }
+      if (removedAttentionState) {
+        threadAttentionDirtyRef.current = true;
+        bumpThreadAttentionVersion();
       }
       updateTerminalLogMap((current) => {
         let changed = false;
@@ -5163,18 +5665,6 @@ export default function App() {
         }
         return changed ? next : current;
       });
-      setUnreadOutputByThread((current) => {
-        let changed = false;
-        const next = { ...current };
-        for (const threadId of threadIds) {
-          if (!(threadId in next)) {
-            continue;
-          }
-          delete next[threadId];
-          changed = true;
-        }
-        return changed ? next : current;
-      });
       setHasInteractedByThread((current) => {
         let changed = false;
         const next = { ...current };
@@ -5196,6 +5686,7 @@ export default function App() {
       pushToast(`Removed project "${workspace.name}".`, 'info');
     },
     [
+      bumpThreadAttentionVersion,
       clearThreadUserInputTimestamps,
       invalidatePendingSessionStart,
       pushToast,
@@ -5247,9 +5738,7 @@ export default function App() {
         onReorderWorkspaces={onReorderWorkspaces}
         onRemoveWorkspace={onRemoveWorkspace}
         isThreadWorking={runStore.isThreadWorking}
-        hasUnreadThreadOutput={(threadId) =>
-          Boolean(unreadOutputByThread[threadId]) && hasUnseenMeaningfulOutputSinceRead(threadId)
-        }
+        hasUnreadThreadOutput={(threadId) => hasUnreadAttentionTurn(threadAttentionByThreadRef.current[threadId])}
         getThreadDisplayTimestampMs={threadStore.getThreadDisplayTimestampMs}
         getSearchTextForThread={getSearchTextForThread}
         onCopyResumeCommand={copyResumeCommand}
@@ -5344,15 +5833,20 @@ export default function App() {
                 }
 
                 if (submittedLines.length > 0) {
+                  const submittedAtMs = Date.now();
+                  markTurnViewed(
+                    selectedThread.id,
+                    true,
+                    submittedAtMs,
+                    lastTerminalLogByThreadRef.current[selectedThread.id] ?? ''
+                  );
                   markThreadUserInput(selectedThread.workspaceId, selectedThread.id);
-                  lastUserInputAtMsByThreadRef.current[selectedThread.id] = Date.now();
-                  lastUserInputSequenceByThreadRef.current[selectedThread.id] =
-                    latestOutputSequenceByThreadRef.current[selectedThread.id] ?? 0;
+                  lastUserInputAtMsByThreadRef.current[selectedThread.id] = submittedAtMs;
                   sessionFailCountByThreadRef.current[selectedThread.id] = 0;
                   setHasInteractedByThread((current) =>
                     current[selectedThread.id] ? current : { ...current, [selectedThread.id]: true }
                   );
-                  clearThreadUnread(selectedThread.id);
+                  beginTurn(selectedThread.id);
                 }
 
                 if (submittedLines.length > 0) {

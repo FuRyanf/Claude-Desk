@@ -52,6 +52,7 @@ const mocks = vi.hoisted(() => {
 
   let threadState = baseThreads.map((thread) => ({ ...thread }));
   let terminalDataHandler: ((event: { sessionId: string; data: string }) => void) | null = null;
+  let terminalTurnCompletedHandler: ((event: { sessionId: string; threadId?: string | null }) => void) | null = null;
   let terminalExitHandler: ((event: { sessionId: string; code: number | null; signal: number | null }) => void) | null = null;
 
   const api = {
@@ -159,6 +160,7 @@ const mocks = vi.hoisted(() => {
   const reset = () => {
     threadState = baseThreads.map((thread) => ({ ...thread }));
     terminalDataHandler = null;
+    terminalTurnCompletedHandler = null;
     terminalExitHandler = null;
     window.localStorage.clear();
     helperMocks.sendTaskCompletionAlert.mockClear();
@@ -176,11 +178,21 @@ const mocks = vi.hoisted(() => {
     api,
     reset,
     ...helperMocks,
+    getThread: (threadId: string) => threadState.find((thread) => thread.id === threadId) ?? threadState[0],
     prependThread: (thread: (typeof baseThreads)[number]) => {
       threadState = [thread, ...threadState];
     },
     emitTerminalData: (event: { sessionId: string; data: string }) => {
       terminalDataHandler?.(event);
+    },
+    emitTerminalTurnCompleted: (event: {
+      sessionId: string;
+      threadId?: string | null;
+      status?: 'Succeeded' | 'Failed';
+      hasMeaningfulOutput?: boolean;
+      completedAtMs?: number | null;
+    }) => {
+      terminalTurnCompletedHandler?.(event);
     },
     emitTerminalExit: (event: { sessionId: string; code: number | null; signal: number | null }) => {
       terminalExitHandler?.(event);
@@ -198,6 +210,24 @@ const mocks = vi.hoisted(() => {
       };
     }),
     onTerminalReady: vi.fn(async () => () => undefined),
+    onTerminalTurnCompleted: vi.fn(
+      async (
+        handler: (event: {
+          sessionId: string;
+          threadId?: string | null;
+          status?: 'Succeeded' | 'Failed';
+          hasMeaningfulOutput?: boolean;
+          completedAtMs?: number | null;
+        }) => void
+      ) => {
+        terminalTurnCompletedHandler = handler;
+        return () => {
+          if (terminalTurnCompletedHandler === handler) {
+            terminalTurnCompletedHandler = null;
+          }
+        };
+      }
+    ),
     onTerminalExit: vi.fn(
       async (handler: (event: { sessionId: string; code: number | null; signal: number | null }) => void) => {
         terminalExitHandler = handler;
@@ -218,6 +248,7 @@ vi.mock('../../src/lib/api', () => ({
   onRunExit: mocks.onRunExit,
   onTerminalData: mocks.onTerminalData,
   onTerminalReady: mocks.onTerminalReady,
+  onTerminalTurnCompleted: mocks.onTerminalTurnCompleted,
   onTerminalExit: mocks.onTerminalExit,
   onThreadUpdated: mocks.onThreadUpdated
 }));
@@ -509,6 +540,127 @@ describe('Left rail recency and sorting semantics', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
     });
+  });
+
+  it('does not turn blue on a quiet pause alone when structured completion mode is enabled', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
+    try {
+      mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => ({
+        sessionId: `session-${params.threadId}`,
+        sessionMode: 'new',
+        resumeSessionId: null,
+        turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
+        thread: mocks.getThread(params.threadId)
+      }));
+
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-running-thread-newer')).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
+      });
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+
+      expect(screen.queryByTestId('thread-running-thread-newer')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+
+      act(() => {
+        mocks.emitTerminalTurnCompleted({
+          sessionId: 'session-thread-newer',
+          threadId: 'thread-newer',
+          status: 'Succeeded',
+          hasMeaningfulOutput: true,
+          completedAtMs: Date.now()
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      });
+    } finally {
+      if (originalTerminalStartSession) {
+        mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
+      }
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps unread when structured completion arrives before the final PTY chunk', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
+    try {
+      mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string }) => ({
+        sessionId: `session-${params.threadId}`,
+        sessionMode: 'new',
+        resumeSessionId: null,
+        turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
+        thread: mocks.getThread(params.threadId)
+      }));
+
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-running-thread-newer')).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
+      });
+
+      act(() => {
+        mocks.emitTerminalTurnCompleted({
+          sessionId: 'session-thread-newer',
+          threadId: 'thread-newer',
+          status: 'Succeeded',
+          hasMeaningfulOutput: true,
+          completedAtMs: Date.now()
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      });
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'assistant output\n' });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      });
+    } finally {
+      if (originalTerminalStartSession) {
+        mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
+      }
+      vi.useRealTimers();
+    }
   });
 
   it('does not resurface unread after the user reads output before idle timeout completes', async () => {
@@ -1001,6 +1153,51 @@ describe('Left rail recency and sorting semantics', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
     });
+  });
+
+  it('does not resurface unread when a completed turn receives a replay of earlier seen output', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime.bind(vi) });
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-newer' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: 'submit-input' }));
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'first line\nsecond line\n' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+
+      expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      act(() => {
+        mocks.emitTerminalData({ sessionId: 'session-thread-newer', data: 'first line\n' });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(1400);
+      });
+
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('fires a failed alert when a background run exits before the idle unread timer fires', async () => {
