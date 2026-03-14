@@ -1242,7 +1242,6 @@ export default function App() {
   );
   const [shellTerminalStarting, setShellTerminalStarting] = useState(false);
   const [shellTerminalFocusRequestId, setShellTerminalFocusRequestId] = useState(0);
-  const [shellTerminalRepairRequestId, setShellTerminalRepairRequestId] = useState(0);
   const [terminalSearchToggleRequestId, setTerminalSearchToggleRequestId] = useState(0);
   const [shellTerminalSearchToggleRequestId, setShellTerminalSearchToggleRequestId] = useState(0);
 
@@ -1258,8 +1257,6 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [blockingError, setBlockingError] = useState<string | null>(null);
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
-  const [terminalRepairRequestId, setTerminalRepairRequestId] = useState(0);
-
   const [addWorkspaceOpen, setAddWorkspaceOpen] = useState(false);
   const [addWorkspaceMode, setAddWorkspaceMode] = useState<'local' | 'rdev' | 'ssh'>('local');
   const [addWorkspacePath, setAddWorkspacePath] = useState('');
@@ -1464,14 +1461,6 @@ export default function App() {
   const handleShellTerminalFocusChange = useCallback((focused: boolean) => {
     setFocusedTerminalKind((current) => (focused ? 'shell' : current === 'shell' ? null : current));
   }, []);
-
-  const repairActiveTerminalDisplay = useCallback(() => {
-    if (focusedTerminalKind === 'shell' || (!selectedThread && shellDrawerOpen)) {
-      setShellTerminalRepairRequestId((current) => current + 1);
-      return;
-    }
-    setTerminalRepairRequestId((current) => current + 1);
-  }, [focusedTerminalKind, selectedThread, shellDrawerOpen]);
 
   const resolveTerminalDataListenerReady = useCallback(() => {
     if (terminalDataListenerReadyRef.current) {
@@ -5414,8 +5403,6 @@ export default function App() {
               openWorkspaceInFinder(selectedWorkspace);
             }
           }}
-          onRepairDisplay={repairActiveTerminalDisplay}
-          repairDisplayDisabled={!selectedThread && !shellDrawerOpen}
           onOpenTerminal={() => {
             toggleWorkspaceShellDrawer();
           }}
@@ -5447,7 +5434,6 @@ export default function App() {
                   : undefined
               }
               focusRequestId={terminalFocusRequestId}
-              repairRequestId={terminalRepairRequestId}
               searchToggleRequestId={terminalSearchToggleRequestId}
               onData={(data) => {
                 if (!selectedThread) {
@@ -5643,7 +5629,6 @@ export default function App() {
           height={shellDrawerHeight}
           starting={shellTerminalStarting}
           focusRequestId={shellTerminalFocusRequestId}
-          repairRequestId={shellTerminalRepairRequestId}
           searchToggleRequestId={shellTerminalSearchToggleRequestId}
           onClose={closeWorkspaceShellDrawer}
           onStartResize={beginShellDrawerResize}

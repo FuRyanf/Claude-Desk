@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -34,9 +34,6 @@ const mocks = vi.hoisted(() => {
   };
 
   let threadState = [{ ...baseThread }];
-  const terminalPanel = vi.fn((props: { repairRequestId?: number }) => (
-    <section data-testid="terminal-panel-mock" data-repair-request-id={String(props.repairRequestId ?? 0)} />
-  ));
 
   const api = {
     getAppStorageRoot: vi.fn(async () => '/tmp/ClaudeDesk'),
@@ -113,7 +110,6 @@ const mocks = vi.hoisted(() => {
 
   const reset = () => {
     threadState = [{ ...baseThread }];
-    terminalPanel.mockClear();
     Object.values(api).forEach((fn) => {
       if (typeof fn === 'function' && 'mockClear' in fn) {
         (fn as { mockClear: () => void }).mockClear();
@@ -124,7 +120,6 @@ const mocks = vi.hoisted(() => {
   return {
     api,
     reset,
-    terminalPanel,
     openDialog: vi.fn(async () => null),
     confirmDialog: vi.fn(async () => true),
     onRunStream: vi.fn(async () => () => undefined),
@@ -153,85 +148,20 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   confirm: mocks.confirmDialog
 }));
 
-vi.mock('../../src/components/TerminalPanel', () => ({
-  TerminalPanel: (props: { repairRequestId?: number }) => mocks.terminalPanel(props)
-}));
-
 import App from '../../src/App';
 
 // ── tests ────────────────────────────────────────────────────────────────────
 
-describe('"Refresh Display" button', () => {
+describe('Header actions', () => {
   beforeEach(() => {
     mocks.reset();
     window.localStorage.clear();
-    vi.useRealTimers();
   });
 
-  it('renders in the header actions', async () => {
+  it('does not render a refresh display button', async () => {
     render(<App />);
     await screen.findByRole('button', { name: /Test Thread/i });
-    expect(screen.getByRole('button', { name: 'Refresh Display' })).toBeInTheDocument();
-  });
-
-  it('is always visible regardless of thread selection', async () => {
-    render(<App />);
-    await waitFor(() => {
-      expect(screen.getByTestId('fix-display-button')).toBeInTheDocument();
-    });
-  });
-
-  it('clicking the button requests a terminal display repair', async () => {
-    const user = userEvent.setup();
-    render(<App />);
-    await screen.findByRole('button', { name: /Test Thread/i });
-
-    expect(screen.getByTestId('terminal-panel-mock')).toHaveAttribute('data-repair-request-id', '0');
-
-    await user.click(screen.getByTestId('fix-display-button'));
-
-    await waitFor(() => {
-      expect(screen.getByTestId('terminal-panel-mock')).toHaveAttribute('data-repair-request-id', '1');
-    });
-  });
-
-  it('clicking the button does not modify thread state', async () => {
-    const user = userEvent.setup();
-    render(<App />);
-    await screen.findByRole('button', { name: /Test Thread/i });
-
-    await user.click(screen.getByTestId('fix-display-button'));
-
-    expect(mocks.api.setThreadFullAccess).not.toHaveBeenCalled();
-  });
-
-  it('shows a lingering hint on hover', async () => {
-    render(<App />);
-    await screen.findByRole('button', { name: /Test Thread/i });
-
-    const button = screen.getByTestId('fix-display-button');
-    const wrapper = button.parentElement as HTMLElement;
-    const tooltipText = 'If the terminal looks broken, try dragging the window edge slightly to force a reflow.';
-
-    fireEvent.mouseEnter(wrapper);
-
-    const tooltip = screen.getByRole('tooltip');
-    expect(tooltip).toHaveTextContent(tooltipText);
-    expect(tooltip).toHaveClass('visible');
-
-    vi.useFakeTimers();
-    fireEvent.mouseLeave(wrapper);
-    expect(tooltip).toHaveClass('visible');
-
-    await act(async () => {
-      vi.advanceTimersByTime(2100);
-    });
-    expect(tooltip).toHaveClass('visible');
-
-    await act(async () => {
-      vi.advanceTimersByTime(200);
-    });
-    expect(tooltip).not.toHaveClass('visible');
+    expect(screen.queryByRole('button', { name: 'Refresh Display' })).not.toBeInTheDocument();
   });
 
   it('orders header actions with update first when available', async () => {
@@ -254,7 +184,7 @@ describe('"Refresh Display" button', () => {
       button.textContent?.trim()
     );
 
-    expect(actionLabels).toEqual(['Update', 'Refresh Display', 'Open', 'Terminal']);
+    expect(actionLabels).toEqual(['Update', 'Open', 'Terminal']);
   });
 
   it('wiki button opens the wiki link', async () => {

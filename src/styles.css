@@ -2153,69 +2153,6 @@ body.shell-drawer-resizing {
   border-color: var(--line);
 }
 
-.fix-display-button {
-  height: 32px;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  background: var(--surface-card);
-  color: var(--muted);
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: border-color var(--motion-fast), background-color var(--motion-fast), color var(--motion-fast);
-}
-
-.fix-display-button:hover {
-  border-color: var(--line-strong);
-  background: var(--surface-card-hover);
-  color: var(--ink);
-}
-
-.fix-display-button:disabled {
-  opacity: 0.62;
-  cursor: not-allowed;
-}
-
-.fix-display-button:focus-visible {
-  outline: 2px solid rgba(118, 142, 255, 0.56);
-  outline-offset: 1px;
-}
-
-.fix-display-button-wrapper {
-  position: relative;
-  display: inline-flex;
-}
-
-.header-hover-tip {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 8px);
-  width: 260px;
-  background: var(--surface-tooltip);
-  color: #e2e8f0;
-  font-size: 12px;
-  font-weight: 450;
-  line-height: 1.45;
-  padding: 8px 10px;
-  border-radius: 10px;
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
-  white-space: normal;
-  pointer-events: none;
-  opacity: 0;
-  transform: translateY(-4px);
-  transition: opacity 120ms ease-out, transform 120ms ease-out;
-  z-index: 24;
-}
-
-.header-hover-tip.visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-
 .full-access-toggle {
   min-width: 144px;
   height: 32px;
@@ -3517,7 +3454,6 @@ html[data-theme='light'] .skills-search-input:focus-visible {
 html[data-theme='light'] .icon-ghost-button,
 html[data-theme='light'] .ghost-button,
 html[data-theme='light'] select,
-html[data-theme='light'] .fix-display-button,
 html[data-theme='light'] .full-access-toggle,
 html[data-theme='light'] .attachment-add-button,
 html[data-theme='light'] .attachment-clear-button {
@@ -3531,7 +3467,6 @@ html[data-theme='light'] .attachment-clear-button {
 html[data-theme='light'] .icon-ghost-button:hover,
 html[data-theme='light'] .ghost-button:hover:not(:disabled),
 html[data-theme='light'] select:hover:not(:disabled),
-html[data-theme='light'] .fix-display-button:hover,
 html[data-theme='light'] .full-access-toggle:hover:not(:disabled),
 html[data-theme='light'] .attachment-add-button:hover:not(:disabled),
 html[data-theme='light'] .attachment-clear-button:hover:not(:disabled) {
@@ -3545,7 +3480,6 @@ html[data-theme='light'] .attachment-clear-button:hover:not(:disabled) {
 
 html[data-theme='light'] .icon-ghost-button:active,
 html[data-theme='light'] .ghost-button:active:not(:disabled),
-html[data-theme='light'] .fix-display-button:active:not(:disabled),
 html[data-theme='light'] .full-access-toggle:active:not(:disabled),
 html[data-theme='light'] .attachment-add-button:active:not(:disabled),
 html[data-theme='light'] .attachment-clear-button:active:not(:disabled) {
@@ -4054,7 +3988,6 @@ html[data-theme='light'] .thread-button:focus-visible,
 html[data-theme='light'] .thread-delete-button:focus-visible,
 html[data-theme='light'] .icon-ghost-button:focus-visible,
 html[data-theme='light'] .icon-primary-button:focus-visible,
-html[data-theme='light'] .fix-display-button:focus-visible,
 html[data-theme='light'] .full-access-toggle:focus-visible,
 html[data-theme='light'] .attachment-add-button:focus-visible,
 html[data-theme='light'] .attachment-clear-button:focus-visible {
