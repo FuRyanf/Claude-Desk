@@ -415,6 +415,7 @@ async fn terminal_start_session(
     env_vars: Option<std::collections::HashMap<String, String>>,
     full_access_flag: bool,
     thread_id: String,
+    reattach_completion_after_ms: Option<i64>,
 ) -> Result<TerminalStartResponse, String> {
     runner::terminal_start_session(
         app,
@@ -424,6 +425,7 @@ async fn terminal_start_session(
         env_vars,
         full_access_flag,
         thread_id,
+        reattach_completion_after_ms,
     )
     .await
     .map_err(|error| error.to_string())

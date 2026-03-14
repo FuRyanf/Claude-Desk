@@ -146,6 +146,7 @@ export interface TerminalStartResponse {
   sessionMode: TerminalSessionMode;
   resumeSessionId?: string | null;
   turnCompletionMode?: TerminalTurnCompletionMode;
+  reattachTurnCompletion?: TerminalTurnCompletedEvent | null;
   thread: ThreadMetadata;
 }
 

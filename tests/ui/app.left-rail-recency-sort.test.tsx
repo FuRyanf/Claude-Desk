@@ -2,11 +2,18 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const THREAD_ATTENTION_STATE_V2_KEY = 'claude-desk:thread-attention-v2';
+
+function seedThreadAttentionState(stateByThread: Record<string, unknown>) {
+  window.localStorage.setItem(THREAD_ATTENTION_STATE_V2_KEY, JSON.stringify(stateByThread));
+}
+
 const mocks = vi.hoisted(() => {
   const baseNow = Date.parse('2026-02-22T10:00:00.000Z');
   const workspace = {
     id: 'ws-1',
     name: 'Workspace',
+    kind: 'local' as const,
     path: '/tmp/workspace',
     gitPullOnMasterForNewThreads: false,
     createdAt: new Date(baseNow - 10_000).toISOString(),
@@ -52,7 +59,13 @@ const mocks = vi.hoisted(() => {
 
   let threadState = baseThreads.map((thread) => ({ ...thread }));
   let terminalDataHandler: ((event: { sessionId: string; data: string }) => void) | null = null;
-  let terminalTurnCompletedHandler: ((event: { sessionId: string; threadId?: string | null }) => void) | null = null;
+  let terminalTurnCompletedHandler: ((event: {
+    sessionId: string;
+    threadId?: string | null;
+    status?: 'Succeeded' | 'Failed';
+    hasMeaningfulOutput?: boolean;
+    completedAtMs?: number | null;
+  }) => void) | null = null;
   let terminalExitHandler: ((event: { sessionId: string; code: number | null; signal: number | null }) => void) | null = null;
 
   const api = {
@@ -542,6 +555,166 @@ describe('Left rail recency and sorting semantics', () => {
     });
   });
 
+  it('reconciles a persisted local running turn exactly once on resumed attach when completion already exists', async () => {
+    window.localStorage.setItem('claude-desk:selected-thread:ws-1', 'thread-newer');
+    seedThreadAttentionState({
+      'thread-newer': {
+        activeTurnId: 1,
+        activeTurnStatus: 'running',
+        activeTurnStartedAtMs: 2_000,
+        activeTurnHasMeaningfulOutput: false,
+        activeTurnLastOutputAtMs: null,
+        lastCompletedTurnIdWithOutput: 0,
+        lastCompletedTurnStatus: null,
+        lastCompletedTurnAtMs: null,
+        lastCompletedTurnLastOutputAtMs: null,
+        lastViewedTurnId: 0,
+        lastViewedAtMs: null,
+        lastNotifiedTurnId: 0,
+        lastNotifiedTurnStatus: null
+      }
+    });
+
+    const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
+    try {
+      mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string; reattachCompletionAfterMs?: number | null }) => ({
+        sessionId: `session-${params.threadId}`,
+        sessionMode: params.threadId === 'thread-newer' ? 'resumed' : 'new',
+        resumeSessionId: params.threadId === 'thread-newer' ? 'resume-thread-newer' : null,
+        turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
+        reattachTurnCompletion:
+          params.threadId === 'thread-newer'
+            ? {
+                sessionId: 'session-thread-newer',
+                threadId: 'thread-newer',
+                status: 'Succeeded',
+                hasMeaningfulOutput: true,
+                completedAtMs: 3_000
+              }
+            : null,
+        thread: mocks.getThread(params.threadId)
+      }));
+
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+          expect.objectContaining({
+            threadId: 'thread-newer',
+            reattachCompletionAfterMs: 2_000
+          })
+        );
+      });
+
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+
+      act(() => {
+        mocks.emitTerminalTurnCompleted({
+          sessionId: 'session-thread-newer',
+          threadId: 'thread-newer',
+          status: 'Succeeded',
+          hasMeaningfulOutput: true,
+          completedAtMs: 3_000
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+      });
+    } finally {
+      if (originalTerminalStartSession) {
+        mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
+      }
+    }
+  });
+
+  it('does not falsely reconcile a resumed local running turn when no completion exists yet', async () => {
+    window.localStorage.setItem('claude-desk:selected-thread:ws-1', 'thread-newer');
+    seedThreadAttentionState({
+      'thread-newer': {
+        activeTurnId: 1,
+        activeTurnStatus: 'running',
+        activeTurnStartedAtMs: 2_000,
+        activeTurnHasMeaningfulOutput: false,
+        activeTurnLastOutputAtMs: null,
+        lastCompletedTurnIdWithOutput: 0,
+        lastCompletedTurnStatus: null,
+        lastCompletedTurnAtMs: null,
+        lastCompletedTurnLastOutputAtMs: null,
+        lastViewedTurnId: 0,
+        lastViewedAtMs: null,
+        lastNotifiedTurnId: 0,
+        lastNotifiedTurnStatus: null
+      }
+    });
+
+    const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
+    try {
+      mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string; reattachCompletionAfterMs?: number | null }) => ({
+        sessionId: `session-${params.threadId}`,
+        sessionMode: params.threadId === 'thread-newer' ? 'resumed' : 'new',
+        resumeSessionId: params.threadId === 'thread-newer' ? 'resume-thread-newer' : null,
+        turnCompletionMode: params.threadId === 'thread-newer' ? 'jsonl' : 'idle',
+        reattachTurnCompletion: null,
+        thread: mocks.getThread(params.threadId)
+      }));
+
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+          expect.objectContaining({
+            threadId: 'thread-newer',
+            reattachCompletionAfterMs: 2_000
+          })
+        );
+      });
+
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    } finally {
+      if (originalTerminalStartSession) {
+        mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
+      }
+    }
+  });
+
+  it('does not request local reattach reconciliation when there is no persisted running turn', async () => {
+    window.localStorage.setItem('claude-desk:selected-thread:ws-1', 'thread-newer');
+
+    const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
+    try {
+      mocks.api.terminalStartSession.mockImplementation(async (params: { threadId: string; reattachCompletionAfterMs?: number | null }) => ({
+        sessionId: `session-${params.threadId}`,
+        sessionMode: 'resumed',
+        resumeSessionId: 'resume-thread-newer',
+        turnCompletionMode: 'jsonl',
+        reattachTurnCompletion: null,
+        thread: mocks.getThread(params.threadId)
+      }));
+
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Newer thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+          expect.objectContaining({
+            threadId: 'thread-newer'
+          })
+        );
+      });
+
+      const [firstCall] = mocks.api.terminalStartSession.mock.calls;
+      expect(firstCall?.[0]).not.toHaveProperty('reattachCompletionAfterMs');
+      expect(screen.queryByTestId('thread-unread-thread-newer')).not.toBeInTheDocument();
+    } finally {
+      if (originalTerminalStartSession) {
+        mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
+      }
+    }
+  });
+
   it('does not turn blue on a quiet pause alone when structured completion mode is enabled', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
@@ -660,6 +833,142 @@ describe('Left rail recency and sorting semantics', () => {
         mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
       }
       vi.useRealTimers();
+    }
+  });
+
+  it('does not duplicate unread or notifications when reconciliation is followed by the same completion event', async () => {
+    window.localStorage.setItem('claude-desk:selected-thread:ws-1', 'thread-older');
+    window.localStorage.setItem('claude-desk:task-completion-alerts-bootstrap-v1', '1');
+    seedThreadAttentionState({
+      'thread-newer': {
+        activeTurnId: 1,
+        activeTurnStatus: 'running',
+        activeTurnStartedAtMs: 2_000,
+        activeTurnHasMeaningfulOutput: false,
+        activeTurnLastOutputAtMs: null,
+        lastCompletedTurnIdWithOutput: 0,
+        lastCompletedTurnStatus: null,
+        lastCompletedTurnAtMs: null,
+        lastCompletedTurnLastOutputAtMs: null,
+        lastViewedTurnId: 0,
+        lastViewedAtMs: null,
+        lastNotifiedTurnId: 0,
+        lastNotifiedTurnStatus: null
+      }
+    });
+    mocks.api.getSettings.mockResolvedValueOnce({
+      claudeCliPath: '/usr/local/bin/claude',
+      taskCompletionAlerts: true
+    });
+
+    let resolveNewerStart: ((value: {
+      sessionId: string;
+      sessionMode: 'resumed' | 'new';
+      resumeSessionId: string | null;
+      turnCompletionMode: 'jsonl' | 'idle';
+      reattachTurnCompletion: {
+        sessionId: string;
+        threadId: string;
+        status: 'Succeeded';
+        hasMeaningfulOutput: true;
+        completedAtMs: number;
+      } | null;
+      thread: ReturnType<typeof mocks.getThread>;
+    }) => void) | null = null;
+    const newerStartPromise = new Promise<{
+      sessionId: string;
+      sessionMode: 'resumed' | 'new';
+      resumeSessionId: string | null;
+      turnCompletionMode: 'jsonl' | 'idle';
+      reattachTurnCompletion: {
+        sessionId: string;
+        threadId: string;
+        status: 'Succeeded';
+        hasMeaningfulOutput: true;
+        completedAtMs: number;
+      } | null;
+      thread: ReturnType<typeof mocks.getThread>;
+    }>((resolve) => {
+      resolveNewerStart = resolve;
+    });
+
+    const originalTerminalStartSession = mocks.api.terminalStartSession.getMockImplementation();
+    try {
+      mocks.api.terminalStartSession.mockImplementation((params: { threadId: string; reattachCompletionAfterMs?: number | null }) => {
+        if (params.threadId === 'thread-newer') {
+          return newerStartPromise;
+        }
+        return Promise.resolve({
+          sessionId: `session-${params.threadId}`,
+          sessionMode: 'new' as const,
+          resumeSessionId: null,
+          turnCompletionMode: 'idle' as const,
+          reattachTurnCompletion: null,
+          thread: mocks.getThread(params.threadId)
+        });
+      });
+
+      const user = userEvent.setup();
+      render(<App />);
+
+      await screen.findByRole('button', { name: /Older thread/i });
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'thread-older' }));
+      });
+
+      await user.click(screen.getByRole('button', { name: /Newer thread/i }));
+      await waitFor(() => {
+        expect(mocks.api.terminalStartSession).toHaveBeenCalledWith(
+          expect.objectContaining({
+            threadId: 'thread-newer',
+            reattachCompletionAfterMs: 2_000
+          })
+        );
+      });
+
+      await user.click(screen.getByRole('button', { name: /Older thread/i }));
+
+      await act(async () => {
+        resolveNewerStart?.({
+          sessionId: 'session-thread-newer',
+          sessionMode: 'resumed',
+          resumeSessionId: 'resume-thread-newer',
+          turnCompletionMode: 'jsonl',
+          reattachTurnCompletion: {
+            sessionId: 'session-thread-newer',
+            threadId: 'thread-newer',
+            status: 'Succeeded',
+            hasMeaningfulOutput: true,
+            completedAtMs: 3_000
+          },
+          thread: mocks.getThread('thread-newer')
+        });
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+      });
+      expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledTimes(1);
+
+      act(() => {
+        mocks.emitTerminalTurnCompleted({
+          sessionId: 'session-thread-newer',
+          threadId: 'thread-newer',
+          status: 'Succeeded',
+          hasMeaningfulOutput: true,
+          completedAtMs: 3_000
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('thread-unread-thread-newer')).toBeInTheDocument();
+        expect(mocks.sendTaskCompletionAlert).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      if (originalTerminalStartSession) {
+        mocks.api.terminalStartSession.mockImplementation(originalTerminalStartSession);
+      }
     }
   });
 

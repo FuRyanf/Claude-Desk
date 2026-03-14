@@ -108,6 +108,7 @@ export const api = {
     envVars?: Record<string, string> | null;
     fullAccessFlag: boolean;
     threadId: string;
+    reattachCompletionAfterMs?: number | null;
   }) =>
     invoke<TerminalStartResponse>('terminal_start_session', params),
   workspaceShellStartSession: (params: {

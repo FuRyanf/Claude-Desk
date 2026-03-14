@@ -257,6 +257,7 @@ pub struct TerminalStartResponse {
     pub session_mode: String,
     pub resume_session_id: Option<String>,
     pub turn_completion_mode: String,
+    pub reattach_turn_completion: Option<TerminalTurnCompletedEvent>,
     pub thread: ThreadMetadata,
 }
 

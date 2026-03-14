@@ -144,6 +144,7 @@ type ThreadAttentionCompletionStatus = Extract<RunStatus, 'Succeeded' | 'Failed'
 interface ThreadAttentionState {
   activeTurnId: number | null;
   activeTurnStatus: ThreadAttentionActiveTurnStatus;
+  activeTurnStartedAtMs: number | null;
   activeTurnHasMeaningfulOutput: boolean;
   activeTurnLastOutputAtMs: number | null;
   lastCompletedTurnIdWithOutput: number;
@@ -316,6 +317,7 @@ function createThreadAttentionState(): ThreadAttentionState {
   return {
     activeTurnId: null,
     activeTurnStatus: 'idle',
+    activeTurnStartedAtMs: null,
     activeTurnHasMeaningfulOutput: false,
     activeTurnLastOutputAtMs: null,
     lastCompletedTurnIdWithOutput: 0,
@@ -358,6 +360,7 @@ function normalizeThreadAttentionState(value: unknown): ThreadAttentionState | n
   const record = value as Record<string, unknown>;
   const activeTurnId = normalizePositiveInteger(record.activeTurnId);
   const activeTurnStatus = normalizeThreadAttentionTurnStatus(record.activeTurnStatus);
+  const activeTurnStartedAtMs = normalizePositiveInteger(record.activeTurnStartedAtMs);
   const activeTurnLastOutputAtMs = normalizePositiveInteger(record.activeTurnLastOutputAtMs);
   const lastCompletedTurnIdWithOutput = normalizeNonNegativeInteger(record.lastCompletedTurnIdWithOutput);
   const lastCompletedTurnStatus = normalizeThreadAttentionCompletionStatus(record.lastCompletedTurnStatus);
@@ -371,6 +374,7 @@ function normalizeThreadAttentionState(value: unknown): ThreadAttentionState | n
   return {
     activeTurnId,
     activeTurnStatus: activeTurnId ? activeTurnStatus : 'idle',
+    activeTurnStartedAtMs: activeTurnId ? activeTurnStartedAtMs : null,
     activeTurnHasMeaningfulOutput: record.activeTurnHasMeaningfulOutput === true,
     activeTurnLastOutputAtMs,
     lastCompletedTurnIdWithOutput,
@@ -459,6 +463,7 @@ function isDefaultThreadAttentionState(state: ThreadAttentionState): boolean {
   return (
     state.activeTurnId === null &&
     state.activeTurnStatus === 'idle' &&
+    state.activeTurnStartedAtMs === null &&
     !state.activeTurnHasMeaningfulOutput &&
     state.activeTurnLastOutputAtMs === null &&
     state.lastCompletedTurnIdWithOutput === 0 &&
@@ -492,6 +497,7 @@ function areThreadAttentionStatesEqual(left: ThreadAttentionState, right: Thread
   return (
     left.activeTurnId === right.activeTurnId &&
     left.activeTurnStatus === right.activeTurnStatus &&
+    left.activeTurnStartedAtMs === right.activeTurnStartedAtMs &&
     left.activeTurnHasMeaningfulOutput === right.activeTurnHasMeaningfulOutput &&
     left.activeTurnLastOutputAtMs === right.activeTurnLastOutputAtMs &&
     left.lastCompletedTurnIdWithOutput === right.lastCompletedTurnIdWithOutput &&
@@ -512,6 +518,14 @@ function nextTurnIdForAttentionState(state: ThreadAttentionState): number {
     state.lastViewedTurnId,
     state.lastNotifiedTurnId
   ) + 1;
+}
+
+function runningTurnReattachBoundaryMs(state?: ThreadAttentionState): number | null {
+  if (!state || state.activeTurnId === null || state.activeTurnStatus !== 'running') {
+    return null;
+  }
+
+  return state.activeTurnStartedAtMs ?? state.activeTurnLastOutputAtMs ?? state.lastCompletedTurnAtMs ?? null;
 }
 
 function hasUnreadAttentionTurn(state?: ThreadAttentionState): boolean {
@@ -1584,10 +1598,12 @@ export default function App() {
   const beginTurn = useCallback(
     (threadId: string) => {
       const currentState = threadAttentionByThreadRef.current[threadId] ?? createThreadAttentionState();
+      const startedAtMs = Date.now();
       const nextState: ThreadAttentionState = {
         ...currentState,
         activeTurnId: nextTurnIdForAttentionState(currentState),
         activeTurnStatus: 'running',
+        activeTurnStartedAtMs: startedAtMs,
         activeTurnHasMeaningfulOutput: false,
         activeTurnLastOutputAtMs: null
       };
@@ -3163,11 +3179,15 @@ export default function App() {
 
       const startPromise = (async () => {
         await waitForTerminalDataListenerReady();
+        const currentAttentionState = threadAttentionByThreadRef.current[thread.id] ?? createThreadAttentionState();
+        const reattachCompletionAfterMs =
+          workspace.kind === 'local' ? runningTurnReattachBoundaryMs(currentAttentionState) : null;
         const response = await api.terminalStartSession({
           workspacePath: workspace.path,
           initialCwd: workspace.kind === 'local' ? workspace.path : null,
           fullAccessFlag: thread.fullAccess,
-          threadId: thread.id
+          threadId: thread.id,
+          ...(typeof reattachCompletionAfterMs === 'number' ? { reattachCompletionAfterMs } : {})
         });
 
         const sessionId = response.sessionId;
@@ -3216,6 +3236,16 @@ export default function App() {
           turnCompletionMode: response.turnCompletionMode ?? 'idle',
           startedAtMs: Date.now()
         };
+        if (
+          response.sessionMode === 'resumed' &&
+          (response.turnCompletionMode ?? 'idle') === 'jsonl' &&
+          response.reattachTurnCompletion
+        ) {
+          const latestAttentionState = threadAttentionByThreadRef.current[thread.id] ?? createThreadAttentionState();
+          if (latestAttentionState.activeTurnId !== null && latestAttentionState.activeTurnStatus === 'running') {
+            terminalTurnCompletedEventHandlerRef.current(response.reattachTurnCompletion);
+          }
+        }
 
         void api.terminalResize(sessionId, terminalSize.cols, terminalSize.rows);
         await flushPendingThreadInput(thread.id, sessionId);

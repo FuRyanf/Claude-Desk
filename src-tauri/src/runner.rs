@@ -1075,6 +1075,44 @@ fn claude_session_jsonl_path(workspace_path: &str, claude_session_id: &str) -> R
         .join(format!("{claude_session_id}.jsonl")))
 }
 
+fn latest_claude_turn_completion_after(
+    session_path: &Path,
+    after_ms: i64,
+) -> Option<ClaudeTurnCompletion> {
+    let file = File::open(session_path).ok()?;
+    let mut reader = StdBufReader::new(file);
+    let mut latest_completion = None;
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line).ok()?;
+        if bytes_read == 0 {
+            break;
+        }
+        if !line.ends_with('\n') {
+            break;
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<ClaudeJsonlEntry>(trimmed) else {
+            continue;
+        };
+        let Some(completion) = classify_claude_turn_completion_entry(&entry) else {
+            continue;
+        };
+        if completion.completed_at_ms <= after_ms {
+            continue;
+        }
+        latest_completion = Some(completion);
+    }
+
+    latest_completion
+}
+
 fn spawn_claude_turn_completion_watcher(
     app: AppHandle,
     session: Arc<TerminalSession>,
@@ -1174,8 +1212,40 @@ fn normalize_terminal_input_chunk(chunk: &str) -> String {
     chunk.replace("\u{1b}\r", "\n")
 }
 
+fn update_prompt_submit_buffer(buffer: &mut String, chunk: &str) -> bool {
+    let normalized = normalize_terminal_input_chunk(chunk);
+    let mut submitted_prompt = false;
+
+    for char in normalized.chars() {
+        if char == '\n' {
+            buffer.push('\n');
+            continue;
+        }
+
+        if char == '\r' {
+            if !submitted_prompt && !buffer.trim().is_empty() {
+                submitted_prompt = true;
+            }
+            buffer.clear();
+            continue;
+        }
+
+        if char == '\u{7f}' || char == '\u{8}' {
+            buffer.pop();
+            continue;
+        }
+
+        if char >= ' ' && char != '\u{7f}' {
+            buffer.push(char);
+        }
+    }
+
+    submitted_prompt
+}
+
 fn input_chunk_submits_prompt(chunk: &str) -> bool {
-    normalize_terminal_input_chunk(chunk).contains('\r')
+    let mut buffer = String::new();
+    update_prompt_submit_buffer(&mut buffer, chunk)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1210,6 +1280,7 @@ struct TerminalSession {
     session_mode: Option<TerminalSessionMode>,
     resume_session_id: Option<String>,
     pending_confirmation_session_id: Mutex<Option<String>>,
+    submitted_input_buffer: Mutex<String>,
     process_id: Option<u32>,
     started_at: chrono::DateTime<Utc>,
     command: Vec<String>,
@@ -1650,6 +1721,7 @@ pub async fn terminal_start_session(
     env_vars: Option<HashMap<String, String>>,
     full_access_flag: bool,
     thread_id: String,
+    reattach_completion_after_ms: Option<i64>,
 ) -> Result<TerminalStartResponse> {
     let workspace = storage::resolve_workspace_by_path(&workspace_path)?.ok_or_else(|| {
         anyhow!("Workspace not registered. Add workspace before starting terminal.")
@@ -1722,6 +1794,27 @@ pub async fn terminal_start_session(
             .to_string()
     };
     let session_id = Uuid::new_v4().to_string();
+    let reattach_turn_completion = if workspace.kind == WorkspaceKind::Local
+        && session_mode == TerminalSessionMode::Resumed
+    {
+        if let Some(after_ms) = reattach_completion_after_ms {
+            match claude_session_jsonl_path(&workspace_path, &launch_session_id) {
+                Ok(session_path) => latest_claude_turn_completion_after(&session_path, after_ms)
+                    .map(|completion| TerminalTurnCompletedEvent {
+                        session_id: session_id.clone(),
+                        thread_id: Some(thread_id.clone()),
+                        status: completion.status.to_string(),
+                        has_meaningful_output: completion.has_meaningful_output,
+                        completed_at_ms: completion.completed_at_ms,
+                    }),
+                Err(_) => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let run_dir = storage::runs_dir(&workspace_id, &thread_id)?.join(&session_id);
     fs::create_dir_all(&run_dir)?;
 
@@ -1835,6 +1928,7 @@ pub async fn terminal_start_session(
         } else {
             None
         }),
+        submitted_input_buffer: Mutex::new(String::new()),
         process_id,
         started_at,
         command: command_manifest.clone(),
@@ -2066,6 +2160,7 @@ pub async fn terminal_start_session(
         } else {
             "idle".to_string()
         },
+        reattach_turn_completion,
         thread,
     })
 }
@@ -2195,6 +2290,7 @@ pub async fn workspace_shell_start_session(
         session_mode: None,
         resume_session_id: None,
         pending_confirmation_session_id: Mutex::new(None),
+        submitted_input_buffer: Mutex::new(String::new()),
         process_id,
         started_at,
         command: command_manifest.clone(),
@@ -2353,8 +2449,19 @@ pub fn terminal_write(
         .map_err(|_| anyhow!("Terminal writer lock poisoned"))?;
     writer.write_all(data.as_bytes())?;
     writer.flush()?;
+    drop(writer);
 
-    if session.kind == TerminalSessionKind::ClaudeThread && input_chunk_submits_prompt(&data) {
+    let submitted_prompt = if session.kind == TerminalSessionKind::ClaudeThread {
+        let mut input_buffer = session
+            .submitted_input_buffer
+            .lock()
+            .map_err(|_| anyhow!("Terminal session lock poisoned"))?;
+        update_prompt_submit_buffer(&mut input_buffer, &data)
+    } else {
+        false
+    };
+
+    if session.kind == TerminalSessionKind::ClaudeThread && submitted_prompt {
         session
             .submitted_prompt_count
             .fetch_add(1, Ordering::AcqRel);
@@ -2989,6 +3096,22 @@ mod tests {
     }
 
     #[test]
+    fn update_prompt_submit_buffer_ignores_whitespace_only_enter() {
+        let mut buffer = String::new();
+        assert!(!update_prompt_submit_buffer(&mut buffer, "   "));
+        assert!(!update_prompt_submit_buffer(&mut buffer, "\r"));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn update_prompt_submit_buffer_tracks_non_empty_submit_across_chunks() {
+        let mut buffer = String::new();
+        assert!(!update_prompt_submit_buffer(&mut buffer, "ship"));
+        assert!(update_prompt_submit_buffer(&mut buffer, " it\r"));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
     fn detects_claude_turn_completion_from_end_turn_text_message() {
         let entry: ClaudeJsonlEntry = serde_json::from_str(
             r#"{
@@ -3119,6 +3242,54 @@ mod tests {
                 completed_at_ms: 0,
             })
         );
+    }
+
+    #[test]
+    fn latest_claude_turn_completion_after_returns_newer_completion_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "claude-desk-turn-completion-after-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("should create temp dir");
+        let path = dir.join("session.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Older\"}]},\"timestamp\":\"1970-01-01T00:00:01Z\"}\n",
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Newer\"}]},\"timestamp\":\"1970-01-01T00:00:02Z\"}\n"
+            ),
+        )
+        .expect("should write jsonl");
+
+        assert_eq!(
+            latest_claude_turn_completion_after(&path, 1_500),
+            Some(ClaudeTurnCompletion {
+                status: "Succeeded",
+                has_meaningful_output: true,
+                completed_at_ms: 2_000,
+            })
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn latest_claude_turn_completion_after_returns_none_when_no_newer_completion_exists() {
+        let dir = std::env::temp_dir().join(format!(
+            "claude-desk-turn-completion-none-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("should create temp dir");
+        let path = dir.join("session.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"Older\"}]},\"timestamp\":\"1970-01-01T00:00:01Z\"}\n",
+        )
+        .expect("should write jsonl");
+
+        assert_eq!(latest_claude_turn_completion_after(&path, 1_000), None);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
