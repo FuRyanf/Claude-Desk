@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   appendTerminalStreamChunk,
+  bindLiveTerminalSessionStream,
   bindTerminalSessionStream,
   createTerminalSessionStreamState,
   hydrateTerminalSessionStream,
@@ -31,6 +32,19 @@ describe('terminalSessionStream', () => {
       endPosition: 0,
       chunks: [],
       resetToken: previous.resetToken + 1
+    });
+  });
+
+  it('binds live-only sessions in ready mode so chunks render immediately', () => {
+    expect(bindLiveTerminalSessionStream(createTerminalSessionStreamState(), 'session-1')).toEqual({
+      sessionId: 'session-1',
+      phase: 'ready',
+      text: '',
+      rawEndPosition: 0,
+      startPosition: 0,
+      endPosition: 0,
+      chunks: [],
+      resetToken: 1
     });
   });
 

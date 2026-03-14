@@ -172,6 +172,22 @@ export function bindTerminalSessionStream(
   };
 }
 
+export function bindLiveTerminalSessionStream(
+  state: TerminalSessionStreamState,
+  sessionId: string | null
+): TerminalSessionStreamState {
+  return {
+    sessionId,
+    phase: sessionId ? 'ready' : 'idle',
+    text: '',
+    rawEndPosition: 0,
+    startPosition: 0,
+    endPosition: 0,
+    chunks: [],
+    resetToken: state.resetToken + 1
+  };
+}
+
 export function presentTerminalSnapshot(
   state: TerminalSessionStreamState,
   snapshot: TerminalOutputSnapshot,

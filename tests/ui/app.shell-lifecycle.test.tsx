@@ -231,6 +231,7 @@ vi.mock('../../src/components/WorkspaceShellDrawer', () => ({
     workspace?: { name?: string };
     sessionId?: string | null;
     starting?: boolean;
+    streamState?: { text?: string; phase?: string } | null;
     onClose: () => void;
     onOpenInTerminal?: () => void;
   }) =>
@@ -239,6 +240,8 @@ vi.mock('../../src/components/WorkspaceShellDrawer', () => ({
         <span>{props.workspace?.name ?? 'No workspace'}</span>
         <span>{props.sessionId ?? 'pending'}</span>
         <span>{String(Boolean(props.starting))}</span>
+        <span data-testid="workspace-shell-stream-phase">{props.streamState?.phase ?? 'missing'}</span>
+        <span data-testid="workspace-shell-stream-text">{props.streamState?.text ?? ''}</span>
         <button type="button" onClick={props.onOpenInTerminal}>
           open-external-shell
         </button>
@@ -254,6 +257,8 @@ import App from '../../src/App';
 describe('Workspace shell lifecycle', () => {
   beforeEach(() => {
     mocks.reset();
+    mocks.onTerminalData.mockReset();
+    mocks.onTerminalData.mockImplementation(async () => () => undefined);
     mocks.api.workspaceShellStartSession.mockReset();
     mocks.api.workspaceShellStartSession.mockResolvedValue({
       sessionId: 'shell-session-default'
@@ -339,6 +344,46 @@ describe('Workspace shell lifecycle', () => {
     });
     expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('Workspace Two');
     expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('shell-session-ws2');
+  });
+
+  it('renders live workspace shell output chunks', async () => {
+    const user = userEvent.setup();
+    let terminalDataHandler: ((event: {
+      sessionId: string;
+      threadId?: string | null;
+      data: string;
+      startPosition: number;
+      endPosition: number;
+    }) => void) | null = null;
+    mocks.onTerminalData.mockImplementation(async (handler) => {
+      terminalDataHandler = handler;
+      return () => undefined;
+    });
+    mocks.api.workspaceShellStartSession.mockResolvedValueOnce({
+      sessionId: 'shell-session-ws1'
+    });
+
+    render(<App />);
+
+    await screen.findByRole('button', { name: /Alpha thread/i });
+    await user.click(screen.getByRole('button', { name: 'Terminal' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('workspace-shell-drawer')).toHaveTextContent('shell-session-ws1');
+      expect(screen.getByTestId('workspace-shell-stream-phase')).toHaveTextContent('ready');
+    });
+
+    terminalDataHandler?.({
+      sessionId: 'shell-session-ws1',
+      threadId: null,
+      data: 'echo hi',
+      startPosition: 0,
+      endPosition: 7
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('workspace-shell-stream-text')).toHaveTextContent('echo hi');
+    });
   });
 
   it('keeps the replacement workspace shell marked as starting when a stale prior start fails', async () => {

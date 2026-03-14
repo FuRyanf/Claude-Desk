@@ -50,6 +50,7 @@ import {
 } from './lib/terminalRunLifecycle';
 import {
   appendTerminalStreamChunk,
+  bindLiveTerminalSessionStream,
   bindTerminalSessionStream,
   createTerminalSessionStreamState,
   hydrateTerminalSessionStream,
@@ -1808,7 +1809,7 @@ export default function App() {
     setShellTerminalSessionId(sessionId);
     setShellTerminalWorkspaceId(workspaceId);
     if (sessionId) {
-      setShellTerminalStream((current) => bindTerminalSessionStream(current, sessionId));
+      setShellTerminalStream((current) => bindLiveTerminalSessionStream(current, sessionId));
     }
   }, []);
 
@@ -4216,7 +4217,21 @@ export default function App() {
         setShellTerminalStarting(false);
         setShellTerminalStream((current) => {
           const boundState =
-            current.sessionId === event.sessionId ? current : bindTerminalSessionStream(current, event.sessionId);
+            current.sessionId !== event.sessionId
+              ? bindLiveTerminalSessionStream(current, event.sessionId)
+              : current.phase === 'hydrating'
+                ? hydrateTerminalSessionStream(
+                    current,
+                    event.sessionId,
+                    {
+                      text: '',
+                      startPosition: 0,
+                      endPosition: 0,
+                      truncated: false
+                    },
+                    TERMINAL_LOG_BUFFER_CHARS
+                  )
+                : current;
           if (event.endPosition <= terminalSessionStreamKnownRawEndPosition(boundState)) {
             return boundState;
           }
